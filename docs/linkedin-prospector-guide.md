@@ -24,7 +24,7 @@ A portable Claude Code plugin for LinkedIn network intelligence. It turns your 1
 
 ### What It Does
 
-LinkedIn Prospector is a local-first network intelligence tool that searches your LinkedIn 1st-degree connections, enriches their profiles, scores them against configurable Ideal Customer Profiles (ICPs), analyzes behavioral patterns, identifies referral partners, and produces actionable intelligence through 10 analysis modes and an interactive HTML dashboard.
+LinkedIn Prospector is a local-first network intelligence tool that searches your LinkedIn 1st-degree connections, enriches their profiles, scores them against configurable Ideal Customer Profiles (ICPs), analyzes behavioral patterns, identifies referral partners, and produces actionable intelligence through 12 analysis modes (including semantic vector search) and an interactive HTML dashboard.
 
 ### Who It's For
 
@@ -47,11 +47,12 @@ LinkedIn Prospector is a local-first network intelligence tool that searches you
 +-------------------+     +-------------------+     +-------------------+
                                                             |
                           +-------------------+     +-------v-----------+
+                          +-------------------+     +-------------------+
                           |  Phase 4          |     |  Phase 3          |
                           |  REPORT           |     |  ANALYZE          |
                           |                   |<----|                   |
                           |  report-generator |     |  analyzer.mjs     |
-                          |  HTML dashboard   |     |  10 modes         |
+                          |  HTML dashboard   |     |  12 modes         |
                           |  delta snapshots  |     |  delta.mjs        |
                           +-------------------+     +-------------------+
 
@@ -89,6 +90,7 @@ Two Claude Code slash commands wrap all of this:
 - **Playwright with Chromium** -- Used for browser automation. Install it as described below.
 - **LinkedIn account** -- You need to be logged into LinkedIn in a persistent Playwright browser session.
 - **Claude Code** -- Required if you want to use the `/linkedin-prospector` and `/network-intel` slash commands.
+- **ruvector** (optional) -- For semantic vector search. Install: `npm i ruvector` in the skill directory.
 
 ### Step 1: Install Dependencies
 
@@ -862,7 +864,7 @@ Agent: Running pipeline --rebuild...
 
 The `/network-intel` slash command is the **Analyze/Report agent** -- it handles scoring, analysis, expansion, and reporting (Phases 2-4).
 
-### All 10 Analysis Modes
+### All 12 Analysis Modes
 
 #### 1. summary
 
@@ -1026,6 +1028,38 @@ node scripts/analyzer.mjs --mode referrals --persona white-label-partner
 node scripts/analyzer.mjs --mode referrals --persona warm-introducer
 node scripts/analyzer.mjs --mode referrals --tier gold-referral
 ```
+
+#### 11. similar
+
+Finds contacts whose profiles are most similar to a specific person using k-NN vector search. Requires ruvector and a built vector store.
+
+**Returns:** Contacts ranked by cosine similarity to the target contact's profile vector, with tier and headline.
+
+```
+/network-intel find contacts similar to https://linkedin.com/in/someone
+```
+
+```bash
+node scripts/analyzer.mjs --mode similar --url "https://linkedin.com/in/someone" --top 20
+```
+
+#### 12. semantic
+
+Searches for contacts by natural language description. Embeds your query and finds the most relevant profiles by meaning, not exact keywords.
+
+**Returns:** Contacts ranked by relevance (cosine similarity) to the query text.
+
+```
+/network-intel who talks about AI transformation?
+/network-intel search for people in cloud infrastructure
+```
+
+```bash
+node scripts/analyzer.mjs --mode semantic --query "AI transformation leaders" --top 20
+node scripts/analyzer.mjs --mode semantic --query "cloud infrastructure scaling" --top 15
+```
+
+For detailed documentation on the semantic search system, see [semantic-search-guide.md](semantic-search-guide.md).
 
 ### Pipeline Modes
 
@@ -1812,23 +1846,48 @@ node scripts/referral-scorer.mjs [--verbose]
 
 ### analyzer.mjs
 
-**Purpose:** Queries and analyzes the scored graph. Supports 10 analysis modes.
+**Purpose:** Queries and analyzes the scored graph. Supports 12 analysis modes.
 
-**Requires:** `graph.json` (with scores).
+**Requires:** `graph.json` (with scores). `similar` and `semantic` modes also require ruvector and a built vector store.
 
 ```bash
-node scripts/analyzer.mjs --mode <mode> [--top N] [--icp <profile>] [--persona <type>] [--tier <tier>] [--cluster <id>] [--name "<company>"]
+node scripts/analyzer.mjs --mode <mode> [--top N] [--icp <profile>] [--persona <type>] [--tier <tier>] [--cluster <id>] [--name "<company>"] [--url <profile-url>] [--query "text"]
 ```
 
 | Option | Used By | Description |
 |--------|---------|-------------|
-| `--mode <mode>` | all | Analysis mode: summary, hubs, prospects, recommend, clusters, company, behavioral, visibility, employers, referrals |
+| `--mode <mode>` | all | Analysis mode: summary, hubs, prospects, recommend, clusters, company, behavioral, visibility, employers, referrals, similar, semantic |
 | `--top <N>` | hubs, prospects, behavioral, employers, referrals | Number of results to return (default varies by mode: 10-20) |
 | `--icp <profile>` | prospects | Filter by ICP profile slug |
 | `--persona <type>` | behavioral, referrals | Filter by persona (e.g., super-connector, white-label-partner) |
 | `--tier <tier>` | prospects, referrals | Filter by tier (e.g., gold, gold-referral) |
 | `--cluster <id>` | hubs, visibility | Filter by cluster ID |
 | `--name "<company>"` | company | Company name to search for |
+| `--url <profile-url>` | similar | Target contact's profile URL for similarity search |
+| `--query "text"` | semantic | Free-text search query for semantic search |
+
+### vectorize.mjs
+
+**Purpose:** Embedding pipeline. Generates 384-dim semantic embeddings from contact profile text and stores them in the RVF vector store. Requires ruvector.
+
+```bash
+node scripts/vectorize.mjs --from-graph [--batch-size 50] [--verbose]
+node scripts/vectorize.mjs                                             # from contacts.json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--from-graph` | off | Load from `graph.json` (includes scores in metadata). Recommended. |
+| `--batch-size <N>` | 50 | Contacts per embedding batch. |
+| `--verbose` | off | Detailed progress logging. |
+
+### rvf-store.mjs
+
+**Purpose:** Central abstraction layer over ruvector's VectorDBWrapper. Library module (not a CLI tool). All ruvector interaction goes through this module.
+
+**Exports:** `isRvfAvailable`, `openStore`, `closeStore`, `queryStore`, `ingestContacts`, `getContact`, `deleteContact`, `storeLength`, `upsertMetadata`, `buildProfileText`, `buildMetadata`, `chunkArray`.
+
+For full API documentation, see [semantic-search-guide.md](semantic-search-guide.md).
 
 ### report-generator.mjs
 
@@ -1974,9 +2033,12 @@ Cache files are stored in `data/cache/` with an `index.json` tracking metadata (
 /network-intel what should I focus on next?
 /network-intel show me super-connectors
 /network-intel content visibility strategy
+/network-intel find contacts similar to https://linkedin.com/in/someone
+/network-intel who talks about AI transformation?
 /network-intel any new connections since last time?
 /network-intel generate a report
 /network-intel expand my network through referral partners
+/network-intel vectorize my contacts
 ```
 
 ### Common Script Sequences
@@ -2013,5 +2075,6 @@ node scripts/pipeline.mjs --rebuild
 | `data/contacts.json` | Contact database (auto-generated) |
 | `data/graph.json` | Scored knowledge graph (auto-generated) |
 | `data/network-report.html` | Interactive HTML dashboard (auto-generated) |
+| `data/network.rvf` | Semantic vector store (auto-generated, requires ruvector) |
 | `data/snapshots/` | Delta snapshots (auto-generated) |
 | `data/cache/` | Cached HTML pages (auto-generated) |

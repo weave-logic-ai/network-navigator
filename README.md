@@ -7,6 +7,7 @@ A Claude Code skill that turns your LinkedIn connections into a scored, tiered, 
 - **Scored contacts** -- every connection scored on ICP fit, network influence, behavioral signals, and referral potential
 - **Tiered classification** -- gold/silver/bronze tiers with persona labels (buyer, advisor, hub, referral-partner)
 - **Referral partner identification** -- finds warm introducers, co-sellers, and white-label partners in your existing network
+- **Semantic vector search** -- find contacts by meaning, not just keywords, using 384-dim ONNX embeddings powered by [ruvector](https://github.com/ruvnet/ruvector)
 - **Interactive dashboard** -- HTML report with charts, tables, and a 3D network graph
 - **Delta tracking** -- see what changed in your network since your last analysis
 
@@ -142,6 +143,8 @@ Use this command for scoring, analysis, and reports:
 | `who are my best referral partners?` | Referral partner analysis with explanations |
 | `what should I focus on next?` | Strategic recommendations |
 | `give me an overview` | Network summary with tier/persona distribution |
+| `find contacts similar to [name/URL]` | k-NN vector similarity search |
+| `who talks about [topic]?` | Semantic free-text search across profiles |
 | `any new connections since last time?` | Delta comparison with previous snapshot |
 | `generate a report` | Interactive HTML dashboard |
 | `export my contacts` | JSON export of scored contacts |
@@ -154,8 +157,8 @@ Use this command for scoring, analysis, and reports:
 ```
 Phase 0: CONFIGURE  -- Define ICP profiles, target niches, scoring weights
 Phase 1: PULL       -- Search LinkedIn, enrich profiles, cache locally
-Phase 2: SCORE      -- Build knowledge graph, run 3-layer scoring engine
-Phase 3: ANALYZE    -- 10 analysis modes (hubs, prospects, referrals, clusters...)
+Phase 2: SCORE      -- Build knowledge graph, run 3-layer scoring engine, vectorize
+Phase 3: ANALYZE    -- 12 analysis modes (hubs, prospects, referrals, similar, semantic...)
 Phase 4: REPORT     -- Interactive HTML dashboard with 3D graph and charts
 ```
 
@@ -198,6 +201,37 @@ export PROSPECTOR_DATA_DIR=/path/to/your/data
 
 This keeps PII out of the skill's code tree. Config files always load from the skill directory regardless of this setting.
 
+## Semantic Search (ruvector Integration)
+
+LinkedIn Prospector optionally integrates with [ruvector](https://github.com/ruvnet/ruvector) to add semantic vector search powered by 384-dimensional ONNX embeddings (all-MiniLM-L6-v2). This enables finding contacts by meaning rather than exact keyword matches.
+
+### Quick Setup
+
+```bash
+# Install ruvector (optional dependency)
+cd .claude/linkedin-prospector/skills/linkedin-prospector
+npm i ruvector
+
+# Build the vector store from your scored graph
+node scripts/vectorize.mjs --from-graph
+```
+
+### What You Can Do
+
+```
+# Find contacts with similar profiles to a specific person
+/network-intel find contacts similar to https://linkedin.com/in/someone
+
+# Search by concept -- finds relevant contacts even without exact keyword matches
+/network-intel who talks about AI transformation?
+/network-intel search for people in cloud infrastructure
+
+# DB search also uses vectors when available
+/linkedin-prospector search for "scaling enterprise SaaS"
+```
+
+All existing functionality works without ruvector installed. The vector engine is a transparent enhancement layer. See [docs/semantic-search-guide.md](docs/semantic-search-guide.md) for the full reference.
+
 ## Advanced Usage
 
 ### Network Expansion
@@ -233,6 +267,7 @@ Track changes over time:
 - **Node.js 18+**
 - **Playwright** with Chromium (`npm i playwright && npx playwright install chromium`)
 - **LinkedIn account** with an active session
+- **ruvector** (optional) -- for semantic vector search (`cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`)
 
 ## Troubleshooting
 
@@ -245,6 +280,10 @@ Track changes over time:
 **"Config is example template"** -- Run `/linkedin-prospector set up my ICP config` to customize for your business.
 
 **"graph.json missing"** -- Run `/network-intel rebuild and rescore everything`
+
+**"ruvector not available"** -- Optional dependency for semantic search. Install: `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`
+
+**"RVF store not available or empty"** -- Build the vector store: `node scripts/vectorize.mjs --from-graph`
 
 ## License
 
