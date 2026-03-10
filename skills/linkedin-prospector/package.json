@@ -1,0 +1,16 @@
+{
+  "name": "linkedin-prospector",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claude Code skill for LinkedIn network intelligence",
+  "private": true,
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "optionalDependencies": {
+    "ruvector": "^0.2.12"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

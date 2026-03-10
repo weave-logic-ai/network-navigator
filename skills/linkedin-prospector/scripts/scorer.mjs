@@ -191,8 +191,35 @@ function deriveTags(contact, url, bl) {
   return [...new Set(tags)];
 }
 
+// ---- RVF Update ----
+async function updateRvfScores(contacts) {
+  try {
+    const { isRvfAvailable, upsertMetadata, closeStore } = await import('./rvf-store.mjs');
+    if (!isRvfAvailable()) return;
+
+    let updated = 0;
+    for (const [url, contact] of Object.entries(contacts)) {
+      const success = await upsertMetadata(url, {
+        icpFit: contact.scores?.icpFit || 0,
+        networkHub: contact.scores?.networkHub || 0,
+        relationshipStrength: contact.scores?.relationshipStrength || 0,
+        signalBoost: contact.scores?.signalBoost || 0,
+        goldScore: contact.scores?.goldScore || 0,
+        tier: contact.scores?.tier || 'watch',
+        persona: contact.personaType || '',
+      });
+      if (success) updated++;
+    }
+
+    await closeStore();
+    if (updated > 0) console.log(`  RVF: updated ${updated} contact scores`);
+  } catch (err) {
+    console.warn(`  RVF score update failed: ${err.message}`);
+  }
+}
+
 // ---- Main ----
-function score() {
+async function score() {
   const { graph, icp } = loadFiles();
   const urls = Object.keys(graph.contacts);
   if (!urls.length) { console.error('No contacts in graph.json.'); process.exit(1); }
@@ -258,6 +285,8 @@ function score() {
     });
   }
   console.log(`\nOutput: ${GRAPH_PATH}`);
+
+  await updateRvfScores(graph.contacts);
 }
 
-score();
+score().catch(e => { console.error(e); process.exit(1); });

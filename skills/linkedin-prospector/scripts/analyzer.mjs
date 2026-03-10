@@ -680,12 +680,126 @@ function modeEmployers(graph, opts) {
   });
 }
 
+// ---- Mode: similar (k-NN from stored vector) ----
+// Uses stored vector from db.get() -- NO embedder initialization needed (D-8)
+async function modeSimilar(graph, opts) {
+  const { isRvfAvailable, getContact, queryStore, buildProfileText }
+    = await import('./rvf-store.mjs');
+
+  if (!isRvfAvailable()) {
+    console.log('Semantic search requires ruvector. Install: npm i ruvector');
+    return;
+  }
+
+  const targetUrl = opts.url;
+  if (!targetUrl) {
+    console.log('Usage: --mode similar --url <profile-url> --top N');
+    return;
+  }
+
+  const targetContact = graph.contacts[targetUrl];
+  if (!targetContact) {
+    console.log(`Contact not found: ${targetUrl}`);
+    return;
+  }
+
+  // Try to get the stored vector (fast path -- no embedder needed)
+  let targetVector;
+  const stored = await getContact(targetUrl);
+  if (stored) {
+    targetVector = stored.vector;
+  } else {
+    // Fallback: embed the contact (only if not yet vectorized)
+    console.log('  Contact not in vector store, embedding...');
+    const ruvector = await import('ruvector');
+    const mod = ruvector.default || ruvector;
+    const embedder = new mod.OnnxEmbedder({ enableParallel: false });
+    await embedder.init();
+    targetVector = await embedder.embed(buildProfileText(targetContact));
+    await mod.shutdown();
+  }
+
+  // k-NN search
+  const k = parseInt(opts.top, 10) || 20;
+  const results = await queryStore(targetVector, k + 1);  // +1 to account for self
+  if (!results || results.length === 0) {
+    console.log('RVF store not available or empty. Run: node scripts/vectorize.mjs --from-graph');
+    return;
+  }
+
+  // Display results
+  const name = targetContact.enrichedName || targetContact.name;
+  console.log(`\n=== Contacts Similar to: ${name} ===`);
+  console.log('='.repeat(60));
+  let rank = 0;
+  for (const result of results) {
+    if (result.id === targetUrl) continue;  // skip self
+    rank++;
+    const contact = result.metadata || graph.contacts[result.id] || {};
+    const displayName = contact.name || result.id;
+    const similarity = result.score?.toFixed(3) || '?';
+    const tier = contact.tier || '?';
+    const headline = (contact.headline || '').substring(0, 70);
+    console.log(`  ${rank}. [${tier}] ${displayName} (similarity: ${similarity})`);
+    if (headline) console.log(`     ${headline}`);
+  }
+}
+
+// ---- Mode: semantic (free-text query embedding search) ----
+// Requires OnnxEmbedder to embed the query text
+async function modeSemantic(graph, opts) {
+  const { isRvfAvailable, queryStore } = await import('./rvf-store.mjs');
+
+  if (!isRvfAvailable()) {
+    console.log('Semantic search requires ruvector. Install: npm i ruvector');
+    return;
+  }
+
+  const query = opts.query;
+  if (!query) {
+    console.log('Usage: --mode semantic --query "search text" --top N');
+    return;
+  }
+
+  // Embed query text
+  const ruvector = await import('ruvector');
+  const mod = ruvector.default || ruvector;
+  const embedder = new mod.OnnxEmbedder({ enableParallel: false });
+  await embedder.init();
+  const queryVector = await embedder.embed(query);
+
+  // k-NN search
+  const k = parseInt(opts.top, 10) || 20;
+  const results = await queryStore(queryVector, k);
+
+  if (!results || results.length === 0) {
+    console.log('No results found. Is the store built? Run: node scripts/vectorize.mjs --from-graph');
+    await mod.shutdown();
+    return;
+  }
+
+  console.log(`\n=== Semantic Search: "${query}" ===`);
+  console.log('='.repeat(60));
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const contact = result.metadata || graph.contacts[result.id] || {};
+    const name = contact.name || result.id;
+    const relevance = result.score?.toFixed(3) || '?';
+    const tier = contact.tier || '?';
+    const headline = (contact.headline || '').substring(0, 70);
+    console.log(`  ${i + 1}. [${tier}] ${name} (relevance: ${relevance})`);
+    if (headline) console.log(`     ${headline}`);
+  }
+
+  await mod.shutdown();  // module-level shutdown -- D-6
+}
+
 // ---- CLI dispatch ----
 const MODES = {
   hubs: modeHubs, prospects: modeProspects, recommend: modeRecommend,
   clusters: modeClusters, summary: modeSummary, company: modeCompany,
   behavioral: modeBehavioral, visibility: modeVisibility, employers: modeEmployers,
-  referrals: modeReferrals,
+  referrals: modeReferrals, similar: modeSimilar, semantic: modeSemantic,
 };
 const args = parseArgs(process.argv);
 const mode = args.mode || 'summary';
@@ -694,4 +808,4 @@ if (!MODES[mode]) {
   process.exit(1);
 }
 const graph = loadGraph();
-MODES[mode](graph, args);
+Promise.resolve(MODES[mode](graph, args)).catch(e => { console.error(e); process.exit(1); });

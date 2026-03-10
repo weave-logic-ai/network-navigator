@@ -367,10 +367,36 @@ function computeBaselines(graph) {
 }
 
 // ---------------------------------------------------------------------------
+// RVF Update
+// ---------------------------------------------------------------------------
+
+async function updateRvfScores(contacts) {
+  try {
+    const { isRvfAvailable, upsertMetadata, closeStore } = await import('./rvf-store.mjs');
+    if (!isRvfAvailable()) return;
+
+    let updated = 0;
+    for (const [url, contact] of Object.entries(contacts)) {
+      const success = await upsertMetadata(url, {
+        referralLikelihood: contact.scores?.referralLikelihood || 0,
+        referralTier: contact.referralTier || '',
+        referralPersona: contact.referralPersona || '',
+      });
+      if (success) updated++;
+    }
+
+    await closeStore();
+    if (updated > 0) console.log(`  RVF: updated ${updated} referral scores`);
+  } catch (err) {
+    console.warn(`  RVF referral update failed: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-function score() {
+async function score() {
   const { graph, config, icp } = loadFiles();
   const urls = Object.keys(graph.contacts);
   if (!urls.length) { console.error('No contacts in graph.json.'); process.exit(1); }
@@ -503,6 +529,8 @@ function score() {
   });
 
   console.log(`\nOutput: ${GRAPH_PATH}`);
+
+  await updateRvfScores(graph.contacts);
 }
 
-score();
+score().catch(e => { console.error(e); process.exit(1); });

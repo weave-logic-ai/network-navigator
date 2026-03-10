@@ -235,10 +235,35 @@ function computeBaselines(graph) {
 }
 
 // ---------------------------------------------------------------------------
+// RVF Update
+// ---------------------------------------------------------------------------
+
+async function updateRvfScores(contacts) {
+  try {
+    const { isRvfAvailable, upsertMetadata, closeStore } = await import('./rvf-store.mjs');
+    if (!isRvfAvailable()) return;
+
+    let updated = 0;
+    for (const [url, contact] of Object.entries(contacts)) {
+      const success = await upsertMetadata(url, {
+        behavioralScore: contact.behavioralScore || 0,
+        behavioralPersona: contact.behavioralPersona || '',
+      });
+      if (success) updated++;
+    }
+
+    await closeStore();
+    if (updated > 0) console.log(`  RVF: updated ${updated} behavioral scores`);
+  } catch (err) {
+    console.warn(`  RVF behavioral update failed: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-function score() {
+async function score() {
   const { graph, config, icp } = loadFiles();
   const urls = Object.keys(graph.contacts);
   if (!urls.length) { console.error('No contacts in graph.json.'); process.exit(1); }
@@ -373,6 +398,8 @@ function score() {
   });
 
   console.log(`\nOutput: ${GRAPH_PATH}`);
+
+  await updateRvfScores(graph.contacts);
 }
 
-score();
+score().catch(e => { console.error(e); process.exit(1); });

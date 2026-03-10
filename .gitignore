@@ -5,6 +5,13 @@ skills/linkedin-prospector/data/network-report.html
 skills/linkedin-prospector/data/snapshots/
 skills/linkedin-prospector/data/cache/
 
+# RVF stores (runtime, contains PII)
+skills/linkedin-prospector/data/network.rvf
+skills/linkedin-prospector/data/snapshots/*.rvf
+
+# ONNX model cache
+.cache/
+
 # Browser session data
 .browser-data/
 

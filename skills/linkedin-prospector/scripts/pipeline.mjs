@@ -2,11 +2,12 @@
  * pipeline.mjs -- Network Intelligence pipeline orchestrator.
  *
  * Modes:
- *   --full       search -> enrich -> graph -> score -> behavioral -> referral -> analyze -> snapshot
- *   --rebuild    graph -> score -> behavioral -> referral -> analyze -> snapshot  (default)
+ *   --full       search -> enrich -> graph -> score -> behavioral -> referral -> vectorize -> analyze -> snapshot
+ *   --rebuild    graph -> score -> behavioral -> referral -> vectorize -> analyze -> snapshot  (default)
  *   --rescore    score -> behavioral -> referral -> analyze
  *   --behavioral behavioral -> analyze(behavioral) -> analyze(visibility)
  *   --referrals  referral-scorer -> analyzer(referrals)
+ *   --vectorize  vectorize scored graph data into vector store (standalone)
  *   --report     generate interactive HTML dashboard from graph.json
  *   --deep-scan  deep-scan a single contact + rebuild graph + report
  *   --visualize  (Phase 2 - not yet implemented)
@@ -32,7 +33,7 @@ function elapsed(startMs) {
   return `${s}s`;
 }
 
-function run(script, args = []) {
+function run(script, args = [], timeout = 120_000) {
   const scriptPath = resolve(__dirname, script);
   const label = `${script} ${args.join(' ')}`.trim();
   console.log(`\n${'='.repeat(60)}`);
@@ -45,7 +46,7 @@ function run(script, args = []) {
       cwd: __dirname,
       encoding: 'utf-8',
       stdio: 'pipe',
-      timeout: 120_000, // 2 min per step
+      timeout: timeout,
     });
     if (output.trim()) console.log(output);
     console.log(`  -> completed in ${elapsed(stepStart)}`);
@@ -108,6 +109,9 @@ function parseCliArgs(argv) {
       case '--url':
         opts.url = argv[++i] || null;
         break;
+      case '--vectorize':
+        opts.mode = 'vectorize';
+        break;
       case '--visualize':
         opts.mode = 'visualize';
         break;
@@ -151,6 +155,7 @@ function buildSteps(opts) {
       steps.push({ script: 'scorer.mjs', args: [...v] });
       steps.push({ script: 'behavioral-scorer.mjs', args: [...v] });
       steps.push({ script: 'referral-scorer.mjs', args: [...v] });
+      steps.push({ script: 'vectorize.mjs', args: ['--from-graph', ...v] });
       steps.push({ script: 'analyzer.mjs', args: ['--mode', 'summary', ...v] });
       steps.push({ script: 'delta.mjs', args: ['--snapshot', ...v] });
       return steps;
@@ -162,6 +167,7 @@ function buildSteps(opts) {
         { script: 'scorer.mjs', args: [...v] },
         { script: 'behavioral-scorer.mjs', args: [...v] },
         { script: 'referral-scorer.mjs', args: [...v] },
+        { script: 'vectorize.mjs', args: ['--from-graph', ...v] },
         { script: 'analyzer.mjs', args: ['--mode', 'summary', ...v] },
         { script: 'delta.mjs', args: ['--snapshot', ...v] },
       ];
@@ -226,6 +232,11 @@ function buildSteps(opts) {
     case 'reparse':
       return [{ script: 'reparse.mjs', args: ['--all'] }];
 
+    case 'vectorize':
+      return [
+        { script: 'vectorize.mjs', args: ['--from-graph', ...v] },
+      ];
+
     case 'visualize':
       return []; // handled separately
 
@@ -278,6 +289,7 @@ async function main() {
   let graphOk = true;
   let scorerOk = true;
   let behavioralOk = true;
+  let vectorizeOk = true;
 
   for (const { script, args } of steps) {
     // If graph-builder failed, skip scorer (it depends on graph.json)
@@ -303,7 +315,16 @@ async function main() {
       continue;
     }
 
-    const ok = run(script, args);
+    // If any scorer failed, skip vectorize (it depends on scored data)
+    if (script === 'vectorize.mjs' && !scorerOk) {
+      console.log(`\n  SKIP: ${script} (scorer failed)`);
+      results.push({ script, ok: false, skipped: true });
+      vectorizeOk = false;
+      continue;
+    }
+
+    const timeout = script === 'vectorize.mjs' ? 300_000 : 120_000;
+    const ok = run(script, args, timeout);
     results.push({ script, ok, skipped: false });
 
     if (script === 'graph-builder.mjs' && !ok) {
@@ -314,6 +335,10 @@ async function main() {
     }
     if (script === 'behavioral-scorer.mjs' && !ok) {
       behavioralOk = false;
+    }
+    if (script === 'vectorize.mjs' && !ok) {
+      vectorizeOk = false;
+      console.warn('  Vectorize failed -- continuing without vector store');
     }
   }
 

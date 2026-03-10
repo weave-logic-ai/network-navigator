@@ -144,8 +144,17 @@ All pages visited during search and enrichment are cached in `data/cache/`. Use 
 - `node .claude/linkedin-prospector/skills/linkedin-prospector/scripts/db.mjs prune --older-than 90d` - Remove stale entries
 - `node .claude/linkedin-prospector/skills/linkedin-prospector/scripts/db.mjs seed --file <path>` - Import from enriched JSON
 
+### 5. Vectorize contacts (optional, for semantic search)
+
+If the user wants semantic search capabilities:
+
+Run: `node .claude/linkedin-prospector/skills/linkedin-prospector/scripts/vectorize.mjs --from-graph`
+
+This generates 384-dim semantic embeddings and builds a vector store. Requires `ruvector` (optional dependency). Install with `npm i ruvector` in the skill directory.
+
 ## Important Notes
 
+- **Semantic search** — Install `ruvector` for k-NN vector search: `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`
 - Browser data dir defaults to `.browser-data` in your working directory (override with `BROWSER_DATA_DIR` env var)
 - The browser runs headless=false so LinkedIn doesn't block it
 - Always check the local DB before searching to avoid redundant scraping
@@ -200,3 +209,9 @@ User: "Find compliance officers at banks"
 
 User: "Search for manufacturing operations leaders"
 -> Run search --keywords "VP Operations,Director Manufacturing,plant manager,lean,supply chain" --max-results 20
+
+User: "Vectorize my contacts for semantic search"
+-> Run vectorize.mjs --from-graph
+
+User: "Enable semantic search"
+-> Check if ruvector is installed, if not suggest npm i ruvector, then run vectorize.mjs --from-graph

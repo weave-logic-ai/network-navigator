@@ -30,6 +30,9 @@ Determine the user's intent from their prompt and route to the right action:
 | clusters | "clusters", "industries", "segments" | `node analyzer.mjs --mode clusters` |
 | company | "company", "company intel" + company name | `node analyzer.mjs --mode company --name "<company>"` |
 | summary | "summary", "overview", "status", "dashboard" | `node analyzer.mjs --mode summary` |
+| similar | "similar to", "contacts like", "find similar", "who's like" | `node analyzer.mjs --mode similar --url <profile-url> --top N` |
+| semantic | "semantic search", "search for", "who talks about", "find people who" | `node analyzer.mjs --mode semantic --query "text" --top N` |
+| vectorize | "vectorize", "build vector store", "embed contacts" | `node scripts/vectorize.mjs --from-graph` |
 | search | "search", "find" + niche/keywords | Delegate to `/linkedin-prospector` |
 | enrich | "enrich" | Delegate to `/linkedin-prospector` |
 | export | "export", "csv", "push" | `node db.mjs export --format csv` |
@@ -47,7 +50,8 @@ Available scripts:
 - `graph-builder.mjs` - Build the knowledge graph from contacts
 - `scorer.mjs` - Compute ICP fit, network hub, relationship, and gold scores
 - `behavioral-scorer.mjs` - Compute behavioral scores, connection power, amplification
-- `analyzer.mjs` - Query and analyze the scored graph (modes: hubs, prospects, recommend, clusters, summary, company, behavioral, visibility, employers, referrals)
+- `analyzer.mjs` - Query and analyze the scored graph (modes: hubs, prospects, recommend, clusters, summary, company, behavioral, visibility, employers, referrals, similar, semantic)
+- `vectorize.mjs` - Generate semantic embeddings and build RVF vector store
 - `delta.mjs` - Snapshot and change detection
 - `pipeline.mjs` - Orchestrate full workflows (--rebuild, --rescore, --behavioral, --referrals, --full, --report, --deep-scan, --configure, --validate, --reparse)
 - `referral-scorer.mjs` - Compute referral likelihood scores and assign referral personas/tiers
@@ -182,3 +186,20 @@ User: "what's cached?"
 
 User: "reparse everything from cache"
 -> Run: `node reparse.mjs --all`
+
+### Semantic Search
+
+User: "find contacts similar to Jane Doe"
+-> Run: `node analyzer.mjs --mode similar --url <jane-doe-profile-url> --top 20`
+
+User: "who talks about AI transformation?"
+-> Run: `node analyzer.mjs --mode semantic --query "AI transformation" --top 20`
+
+User: "search for people in cloud infrastructure"
+-> Run: `node analyzer.mjs --mode semantic --query "cloud infrastructure engineering" --top 15`
+
+User: "build the vector store"
+-> Run: `node scripts/vectorize.mjs --from-graph`
+
+User: "vectorize my contacts"
+-> Run: `node scripts/vectorize.mjs --from-graph`

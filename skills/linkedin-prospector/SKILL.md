@@ -14,7 +14,7 @@ Five-phase workflow:
 0. **Configure** — Set up ICP profiles, scoring weights, niche definitions, referral config
 1. **Pull** — Search LinkedIn connections by niche/keywords, enrich profiles, cache raw HTML locally
 2. **Score** — Build knowledge graph, ICP scoring, behavioral analysis, referral scoring
-3. **Analyze** — 10 analysis modes: hubs, prospects, referrals, clusters, visibility, etc.
+3. **Analyze** — 12 analysis modes: hubs, prospects, referrals, clusters, visibility, **similar**, **semantic**, etc.
 4. **Report** — Interactive HTML dashboard with 3D graph, charts, tables, delta snapshots
 
 ### Scoring Engine (3-Layer)
@@ -58,6 +58,27 @@ node scripts/pipeline.mjs --rebuild
 node scripts/pipeline.mjs --report
 ```
 
+## Optional: Semantic Search
+
+Install `ruvector` for k-NN vector similarity search:
+
+```bash
+# In the skill directory
+cd .claude/linkedin-prospector/skills/linkedin-prospector
+npm i ruvector
+
+# Build the vector store from scored data
+node scripts/vectorize.mjs --from-graph
+
+# Find contacts similar to a specific person
+node scripts/analyzer.mjs --mode similar --url "https://linkedin.com/in/someone"
+
+# Search by description
+node scripts/analyzer.mjs --mode semantic --query "AI transformation leaders"
+```
+
+Works without ruvector too -- all existing functionality uses JSON-only mode.
+
 ## Available Commands
 
 - `/linkedin-prospector` — Configure + Pull phase: search, enrich, cache contacts
@@ -78,7 +99,8 @@ node scripts/pipeline.mjs --report
 | `scorer.mjs` | Layer 1: ICP fit, network hub, relationship, gold score |
 | `behavioral-scorer.mjs` | Layer 2: behavioral score, connection power, amplification |
 | `referral-scorer.mjs` | Layer 3: referral likelihood, referral tier, referral persona |
-| `analyzer.mjs` | 10 analysis modes (hubs, prospects, referrals, clusters, etc.) |
+| `analyzer.mjs` | 12 analysis modes (hubs, prospects, referrals, clusters, similar, semantic, etc.) |
+| `vectorize.mjs` | Generate 384-dim embeddings and build RVF vector store |
 | `delta.mjs` | Snapshot and change detection |
 | `report-generator.mjs` | Interactive HTML dashboard (3D graph, Chart.js) |
 | `pipeline.mjs` | Pipeline orchestrator (10+ modes with dependency guards) |
@@ -114,5 +136,9 @@ Set up via `node scripts/configure.mjs wizard` or `/linkedin-prospector set up m
 **"graph.json missing"** — Run `node scripts/pipeline.mjs --rebuild` to build from contacts.json.
 
 **"Config is example template"** — Run `node scripts/configure.mjs wizard` to customize for your business.
+
+**"ruvector not available"** — Optional dependency for semantic search. Install: `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`
+
+**"RVF store not available or empty"** — Build the vector store: `node scripts/vectorize.mjs --from-graph`
 
 **"referral-scorer failed"** — Referral scoring requires behavioral scores. Run `--rebuild` (not `--referrals` alone) if scores are missing.

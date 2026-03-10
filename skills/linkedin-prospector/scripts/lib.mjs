@@ -13,6 +13,9 @@ export const USER_DATA_DIR = process.env.BROWSER_DATA_DIR || resolve(process.cwd
 const SKILL_DATA_DIR = resolve(__dirname, '..', 'data');
 export const DATA_DIR = process.env.PROSPECTOR_DATA_DIR || SKILL_DATA_DIR;
 
+// RVF store path -- isRvfAvailable() lives in rvf-store.mjs (D-3)
+export const RVF_STORE_PATH = resolve(DATA_DIR, 'network.rvf');
+
 // Config directory — config files always load from the skill tree
 export const CONFIG_DIR = SKILL_DATA_DIR;
 
