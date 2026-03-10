@@ -1,0 +1,39 @@
+{
+  "profiles": {
+    "example-consulting": {
+      "label": "Example: Consulting Services",
+      "description": "CUSTOMIZE THIS: Leaders who buy consulting/advisory services. Run 'node scripts/configure.mjs wizard' to replace with your actual ICP.",
+      "rolePatterns": {
+        "high": ["CEO", "CTO", "CIO", "Founder", "President", "Managing Director"],
+        "medium": ["VP", "Vice President", "Director", "Head of", "SVP"],
+        "low": ["Manager", "Lead", "Principal", "Senior"]
+      },
+      "industries": ["technology", "saas", "software", "professional services", "financial services", "healthcare"],
+      "signals": ["digital transformation", "scaling", "automation", "modernization", "growth", "hiring", "migration"],
+      "companySizeSweet": { "min": 10, "max": 500 },
+      "weight": 1.0
+    }
+  },
+  "scoring": {
+    "roleWeight": 0.35,
+    "industryWeight": 0.25,
+    "signalWeight": 0.25,
+    "companySizeWeight": 0.15
+  },
+  "goldScore": {
+    "icpWeight": 0.35,
+    "networkHubWeight": 0.30,
+    "relationshipWeight": 0.25,
+    "signalBoostWeight": 0.10
+  },
+  "tiers": {
+    "gold": 0.55,
+    "silver": 0.40,
+    "bronze": 0.28
+  },
+  "niches": {
+    "technology": ["CTO", "VP Engineering", "Head of Engineering", "tech leader"],
+    "saas": ["SaaS", "platform", "software as a service"],
+    "consulting": ["consulting", "advisory", "professional services"]
+  }
+}

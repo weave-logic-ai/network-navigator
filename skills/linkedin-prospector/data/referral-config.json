@@ -1,0 +1,104 @@
+{
+  "weights": {
+    "referralRole": 0.25,
+    "clientOverlap": 0.20,
+    "networkReach": 0.20,
+    "amplificationPower": 0.15,
+    "relationshipWarmth": 0.10,
+    "buyerInversion": 0.10
+  },
+  "roleTiers": {
+    "high": {
+      "score": 1.0,
+      "patterns": [
+        "agency", "digital agency", "consultancy", "consulting firm",
+        "partner", "managing partner", "founding partner",
+        "fractional", "fractional cto", "fractional cmo",
+        "advisor", "strategic advisor", "board advisor",
+        "white label", "reseller", "channel partner",
+        "solutions partner", "alliance", "integration partner"
+      ]
+    },
+    "medium": {
+      "score": 0.7,
+      "patterns": [
+        "consultant", "independent consultant", "freelance",
+        "broker", "referral", "business development",
+        "community manager", "ecosystem", "partnerships",
+        "channel", "alliances", "account executive",
+        "solutions architect", "pre-sales"
+      ]
+    },
+    "low": {
+      "score": 0.3,
+      "patterns": [
+        "manager", "director", "head of",
+        "founder", "co-founder", "ceo", "cto",
+        "vp", "vice president", "lead"
+      ]
+    }
+  },
+  "targetIndustries": [
+    "technology", "saas", "software", "professional services",
+    "financial services", "healthcare", "consulting",
+    "startup", "platform", "digital"
+  ],
+  "industrySignals": {
+    "servesTargetClients": [
+      "agency", "consultancy", "consulting", "solutions provider",
+      "implementation partner", "technology partner", "service provider",
+      "managed services", "professional services", "digital services"
+    ],
+    "industryKeywords": [
+      "technology", "saas", "software", "professional services",
+      "consulting", "digital", "platform", "cloud", "data",
+      "analytics", "ai", "automation"
+    ]
+  },
+  "referralTiers": {
+    "gold-referral": 0.65,
+    "silver-referral": 0.45,
+    "bronze-referral": 0.30
+  },
+  "personas": {
+    "white-label-partner": {
+      "description": "Agency/consultancy that can resell your services to their clients",
+      "requires": {
+        "minReferralRole": 0.7,
+        "minClientOverlap": 0.4,
+        "rolePatterns": ["agency", "consultancy", "consulting", "partner", "solutions", "services", "implementation", "white label", "reseller"]
+      }
+    },
+    "warm-introducer": {
+      "description": "Strong relationship + broad network — makes warm intros to decision-makers",
+      "requires": {
+        "minRelationshipWarmth": 0.5,
+        "minNetworkReach": 0.5
+      }
+    },
+    "co-seller": {
+      "description": "Consultant/advisor serving overlapping clients — mutual referral arrangements",
+      "requires": {
+        "minClientOverlap": 0.5,
+        "rolePatterns": ["consultant", "advisor", "freelance", "fractional", "independent"]
+      }
+    },
+    "amplifier": {
+      "description": "Super-connector or content creator who amplifies your brand",
+      "requires": {
+        "minAmplificationPower": 0.5,
+        "behavioralPersonas": ["super-connector", "content-creator"]
+      }
+    },
+    "passive-referral": {
+      "description": "Default — has some referral potential, needs relationship deepening",
+      "requires": {}
+    }
+  },
+  "networkReachBaselines": {
+    "connectionCountNorm": 500,
+    "clusterBreadthWeight": 0.4,
+    "edgeDensityWeight": 0.3,
+    "connectionCountWeight": 0.3
+  }
+}

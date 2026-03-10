@@ -1,0 +1,22 @@
+# User data (PII) — generated at runtime, never commit
+skills/linkedin-prospector/data/contacts.json
+skills/linkedin-prospector/data/graph.json
+skills/linkedin-prospector/data/network-report.html
+skills/linkedin-prospector/data/snapshots/
+skills/linkedin-prospector/data/cache/
+
+# Browser session data
+.browser-data/
+
+# Node
+node_modules/
+package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example

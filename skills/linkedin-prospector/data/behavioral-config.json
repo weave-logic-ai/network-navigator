@@ -1,0 +1,84 @@
+{
+  "connectionPower": {
+    "weight": 0.20,
+    "thresholds": {
+      "500+": 1.0,
+      "300": 0.7,
+      "100": 0.4,
+      "0": 0.1
+    },
+    "followerMultiplier": 0.8
+  },
+  "connectionRecency": {
+    "weight": 0.15,
+    "ranges": {
+      "30": 1.0,
+      "90": 0.7,
+      "180": 0.4,
+      "365": 0.2,
+      "older": 0.1
+    }
+  },
+  "aboutSignals": {
+    "weight": 0.25,
+    "keywords": {
+      "connector": ["connector", "connecting", "introductions", "bridge", "matchmaker", "bringing people together"],
+      "speaker": ["speaker", "keynote", "panelist", "conference", "podcast", "webinar", "TEDx"],
+      "mentor": ["mentor", "mentoring", "coach", "coaching", "advise", "guide"],
+      "builder": ["builder", "building", "creating", "launched", "founded", "co-founded", "built"],
+      "helper": ["helping", "passionate about helping", "empower", "enable", "support teams", "serve"],
+      "thought-leader": ["author", "writer", "published", "book", "article", "thought leader"],
+      "community": ["community", "ecosystem", "network", "association", "chapter", "board member"],
+      "teacher": ["teacher", "instructor", "professor", "educator", "trainer", "workshop"]
+    }
+  },
+  "headlineSignals": {
+    "weight": 0.15,
+    "patterns": {
+      "multi-role": { "regex": "\\|", "score": 0.7, "description": "Pipe separators = social-savvy" },
+      "helping-language": { "keywords": ["helping", "empowering", "enabling", "serving", "passionate"], "score": 0.6 },
+      "credentials": { "keywords": ["MBA", "PhD", "PMP", "CPA", "certified"], "score": 0.4 },
+      "creator-mode": { "keywords": ["creator", "influencer", "content", "writer", "author"], "score": 0.8 }
+    }
+  },
+  "superConnectorIndex": {
+    "weight": 0.15,
+    "minTraits": 3,
+    "traitSources": ["connector", "speaker", "mentor", "builder", "helper", "thought-leader", "community", "teacher", "500+", "multi-role", "helping-language"]
+  },
+  "networkAmplifier": {
+    "weight": 0.10,
+    "description": "mutuals * connectionPower = amplification potential"
+  },
+  "goldScoreV2": {
+    "icpWeight": 0.30,
+    "networkHubWeight": 0.25,
+    "relationshipWeight": 0.20,
+    "behavioralWeight": 0.15,
+    "signalBoostWeight": 0.10
+  },
+  "behavioralPersonas": {
+    "super-connector": {
+      "minTraits": 3,
+      "minConnections": 500,
+      "description": "3+ behavioral signals AND 500+ connections"
+    },
+    "content-creator": {
+      "keywords": ["speaker", "author", "writer", "keynote", "podcast", "published", "content creator", "blogger"],
+      "description": "Speaker/author keywords in about or headline"
+    },
+    "silent-influencer": {
+      "minConnections": 500,
+      "maxAboutSignals": 1,
+      "description": "500+ connections but low about signals (dormant amplifiers)"
+    },
+    "rising-connector": {
+      "maxConnections": 500,
+      "recencyDays": 180,
+      "description": "<500 connections AND connected in last 6 months"
+    },
+    "passive-network": {
+      "description": "Default — no strong behavioral signals"
+    }
+  }
+}
