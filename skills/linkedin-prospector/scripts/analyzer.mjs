@@ -691,21 +691,23 @@ async function modeSimilar(graph, opts) {
     return;
   }
 
-  const targetUrl = opts.url;
-  if (!targetUrl) {
+  const rawUrl = opts.url;
+  if (!rawUrl) {
     console.log('Usage: --mode similar --url <profile-url> --top N');
     return;
   }
 
-  const targetContact = graph.contacts[targetUrl];
+  // Graph keys may have trailing slash; vector store IDs are normalized (no trailing slash)
+  const targetContact = graph.contacts[rawUrl];
   if (!targetContact) {
-    console.log(`Contact not found: ${targetUrl}`);
+    console.log(`Contact not found: ${rawUrl}`);
     return;
   }
+  const normalizedUrl = rawUrl.replace(/\/$/, '').split('?')[0];
 
   // Try to get the stored vector (fast path -- no embedder needed)
   let targetVector;
-  const stored = await getContact(targetUrl);
+  const stored = await getContact(normalizedUrl);
   if (stored) {
     targetVector = stored.vector;
   } else {
@@ -733,7 +735,7 @@ async function modeSimilar(graph, opts) {
   console.log('='.repeat(60));
   let rank = 0;
   for (const result of results) {
-    if (result.id === targetUrl) continue;  // skip self
+    if (result.id === normalizedUrl) continue;  // skip self
     rank++;
     const contact = result.metadata || graph.contacts[result.id] || {};
     const displayName = contact.name || result.id;

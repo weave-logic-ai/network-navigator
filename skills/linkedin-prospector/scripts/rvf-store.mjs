@@ -77,7 +77,7 @@ export async function openStore() {
     _db = new VectorDB({
       dimensions: DIMENSIONS,
       storagePath: RVF_PATH,
-      distanceMetric: 'cosine',
+      distanceMetric: 'Cosine',
       hnswConfig: { m: 16, efConstruction: 200 },
     });
 
@@ -108,9 +108,11 @@ export async function closeStore() {
 export async function queryStore(vector, k = 20, filter = null) {
   const db = await openStore();
   if (!db) return null;
-  // VectorDBWrapper.search returns [{ id, score, metadata }]
-  // score = cosine similarity (higher = more similar)
-  return db.search(vector, k, filter);
+  // VectorDBWrapper.search expects { vector, k, filter? }
+  // Returns [{ id, score, metadata }]
+  const opts = { vector, k };
+  if (filter) opts.filter = filter;
+  return db.search(opts);
 }
 
 export async function ingestContacts(entries) {
