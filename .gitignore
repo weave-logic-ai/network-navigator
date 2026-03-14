@@ -1,0 +1,79 @@
+# === Data & PII ===
+# User data directory (PII - never commit)
+data/drives/
+data/linkedin/
+**/contacts.json
+**/graph.json
+**/network-report.html
+**/snapshots/
+
+# Config files with user-specific data
+**/behavioral-config.json
+**/referral-config.json
+
+# Browser session data
+.browser-data/
+
+# Credentials & tokens
+*.credentials.json
+*-credentials.json
+**/tokens/
+*-token.json
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.*
+
+# === Build artifacts ===
+node_modules/
+dist/
+build/
+.next/
+*.tsbuildinfo
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*:Zone.Identifier
+
+# === IDE ===
+.idea/
+.vscode/
+*.code-workspace
+
+# === Claude Flow ===
+.claude-flow/
+.linkedin-prospector/
+.hive-mind/
+.swarm/
+.claude/
+
+# === Working files ===
+*.tmp
+*.bak
+*.log
+*.pid
+
+# === Test/coverage ===
+coverage/
+.nyc_output/
+
+# === Compressed archives ===
+*.zip
+*.tgz
+*.tar.gz
+
+# === Backup files ===
+package-lock.json.bak
+
+# === Agent data ===
+agent/linkedin-prospector/app/data/
+
+# === Archive ===
+.archive/
+
+tasks.md
