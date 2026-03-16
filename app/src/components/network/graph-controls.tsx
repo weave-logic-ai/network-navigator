@@ -42,7 +42,7 @@ export function GraphControls({
   onShowClustersChange,
 }: GraphControlsProps) {
   return (
-    <Card className="w-56 shrink-0">
+    <Card className="w-56 shrink-0 z-10 overflow-y-auto">
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-medium">Graph Controls</CardTitle>
       </CardHeader>

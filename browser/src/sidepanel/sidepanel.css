@@ -12,8 +12,12 @@ body {
 }
 
 .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 16px;
   border-bottom: 1px solid #e5e5e5;
+  background: #fafafa;
 }
 
 .panel-header h1 {
@@ -21,9 +25,25 @@ body {
   font-weight: 600;
 }
 
-.panel-content {
-  padding: 0;
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #666;
 }
+
+.status-indicator::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-indicator.disconnected::before { background-color: #dc3545; }
+.status-indicator.connected::before { background-color: #28a745; }
+.status-indicator.connecting::before { background-color: #ffc107; }
 
 .panel-section {
   padding: 16px;
@@ -31,16 +51,214 @@ body {
 }
 
 .panel-section h2 {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  color: #888;
+  margin-bottom: 12px;
+}
+
+.page-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.page-type-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  background: #f0f0f0;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.scroll-depth {
+  font-size: 12px;
+  color: #888;
+}
+
+.contact-info {
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.contact-name {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.contact-details {
+  font-size: 12px;
   color: #666;
+}
+
+.btn {
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary {
+  background: #0066cc;
+  color: white;
+}
+
+.btn-primary:hover { background: #0052a3; }
+.btn-primary:disabled { background: #ccc; cursor: default; }
+.btn-full { width: 100%; }
+
+.goals-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.goal-card {
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
   margin-bottom: 8px;
+}
+
+.goal-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.goal-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: #e0e0e0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #0066cc;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: #888;
+  min-width: 40px;
+  text-align: right;
+}
+
+.goal-tasks {
+  list-style: none;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #eee;
+  font-size: 12px;
+}
+
+.task-item:last-child { border-bottom: none; }
+
+.task-check {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #ccc;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-check:hover { border-color: #0066cc; }
+.task-check.completed { background: #0066cc; border-color: #0066cc; }
+.task-check.completed::after { content: '\2713'; color: white; font-size: 10px; }
+
+.task-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-title.completed {
+  text-decoration: line-through;
+  color: #999;
+}
+
+.task-navigable {
+  cursor: pointer;
+  color: #0066cc;
+}
+
+.task-navigable:hover {
+  text-decoration: underline;
+}
+
+.task-navigable.completed {
+  color: #999;
+}
+
+.task-priority {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.task-priority.high { background: #dc3545; }
+.task-priority.medium { background: #ffc107; }
+.task-priority.low { background: #28a745; }
+
+.activity-stats {
+  display: flex;
+  gap: 16px;
+}
+
+.activity-stat {
+  flex: 1;
+  text-align: center;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.activity-value {
+  display: block;
+  font-size: 24px;
+  font-weight: 700;
+  color: #0066cc;
+}
+
+.activity-label {
+  display: block;
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
 }
 
 .placeholder-text {
   color: #999;
   font-size: 13px;
-  line-height: 1.5;
 }

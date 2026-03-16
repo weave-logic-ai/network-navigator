@@ -10,22 +10,48 @@
   <div id="sidepanel-root">
     <header class="panel-header">
       <h1>Network Intelligence</h1>
+      <span id="sp-connection-status" class="status-indicator disconnected">
+        Disconnected
+      </span>
     </header>
-    <main class="panel-content">
-      <section class="panel-section">
-        <h2>Goals</h2>
-        <p class="placeholder-text">Goal tracking will be available in Phase 5.</p>
-      </section>
-      <section class="panel-section">
-        <h2>Tasks</h2>
-        <p class="placeholder-text">Task list will be available in Phase 4.</p>
-      </section>
-      <section class="panel-section">
-        <h2>Current Page</h2>
-        <p class="placeholder-text">Page info will be available in Phase 4.</p>
-      </section>
-    </main>
+
+    <!-- Current Page Section -->
+    <section class="panel-section" id="current-page-section">
+      <h2>Current Page</h2>
+      <div class="page-info">
+        <span id="sp-page-type" class="page-type-badge">--</span>
+        <span id="sp-scroll-depth" class="scroll-depth">0%</span>
+      </div>
+      <div id="sp-contact-info" class="contact-info" style="display: none;">
+        <div class="contact-name" id="sp-contact-name"></div>
+        <div class="contact-details" id="sp-contact-details"></div>
+      </div>
+      <button id="sp-capture-btn" class="btn btn-primary btn-full">Capture This Page</button>
+    </section>
+
+    <!-- Goals & Tasks Section -->
+    <section class="panel-section">
+      <h2>Goals & Tasks</h2>
+      <div id="sp-goals-list" class="goals-list">
+        <p class="placeholder-text">No active goals</p>
+      </div>
+    </section>
+
+    <!-- Recent Captures -->
+    <section class="panel-section">
+      <h2>Today's Activity</h2>
+      <div class="activity-stats">
+        <div class="activity-stat">
+          <span class="activity-value" id="sp-capture-count">0</span>
+          <span class="activity-label">Captures</span>
+        </div>
+        <div class="activity-stat">
+          <span class="activity-value" id="sp-queue-depth">0</span>
+          <span class="activity-label">Queued</span>
+        </div>
+      </div>
+    </section>
   </div>
-  <script src="../dist/sidepanel.js" type="module"></script>
+  <script src="/dist/sidepanel.js"></script>
 </body>
 </html>

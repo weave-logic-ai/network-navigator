@@ -19,6 +19,8 @@ data/linkedin/
 *-credentials.json
 **/tokens/
 *-token.json
+data/config/extension-tokens.json
+data/config/extension-settings.json
 .env
 .env.local
 .env.*.local

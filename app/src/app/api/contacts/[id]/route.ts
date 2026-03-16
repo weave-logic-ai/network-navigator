@@ -5,6 +5,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getContactById, updateContact, deleteContact } from '@/lib/db/queries/contacts';
 
+function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    result[camelKey] = value;
+  }
+  return result;
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function validateUuid(id: string): boolean {
@@ -28,7 +37,7 @@ export async function GET(
       return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ data: contact });
+    return NextResponse.json({ data: snakeToCamel(contact as unknown as Record<string, unknown>) });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to get contact', details: error instanceof Error ? error.message : undefined },
@@ -70,7 +79,7 @@ export async function PATCH(
       return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ data: contact });
+    return NextResponse.json({ data: snakeToCamel(contact as unknown as Record<string, unknown>) });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to update contact', details: error instanceof Error ? error.message : undefined },

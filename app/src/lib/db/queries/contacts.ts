@@ -83,6 +83,9 @@ export async function listContacts(
     conditions.push('c.is_archived = FALSE');
   }
 
+  // Exclude owner/self contacts (degree 0)
+  conditions.push('c.degree > 0');
+
   if (tier) {
     conditions.push(`cs.tier = $${paramIdx++}`);
     params.push(tier);
@@ -206,6 +209,7 @@ export async function updateContact(
     'first_name', 'last_name', 'full_name', 'headline', 'title',
     'current_company', 'current_company_id', 'location', 'about',
     'email', 'phone', 'tags', 'notes', 'is_archived',
+    'connections_count', 'linkedin_url', 'degree',
   ];
 
   const setClauses: string[] = [];
@@ -254,7 +258,7 @@ export async function searchContacts(
 
   const countResult = await query<{ count: string }>(
     `SELECT COUNT(*)::text as count FROM contacts c
-     WHERE c.is_archived = FALSE AND (
+     WHERE c.is_archived = FALSE AND c.degree > 0 AND (
        c.full_name ILIKE $1 OR c.headline ILIKE $1 OR c.title ILIKE $1
        OR c.current_company ILIKE $1 OR c.email ILIKE $1
      )`,
@@ -268,7 +272,7 @@ export async function searchContacts(
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      LEFT JOIN contact_scores cs ON cs.contact_id = c.id
-     WHERE c.is_archived = FALSE AND (
+     WHERE c.is_archived = FALSE AND c.degree > 0 AND (
        c.full_name ILIKE $1 OR c.headline ILIKE $1 OR c.title ILIKE $1
        OR c.current_company ILIKE $1 OR c.email ILIKE $1
      )

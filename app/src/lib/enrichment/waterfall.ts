@@ -4,6 +4,7 @@ import { EnrichmentContact, EnrichmentResult, CostEstimate, ProviderConfig } fro
 import { PdlProvider } from './providers/pdl';
 import { LushaProvider } from './providers/lusha';
 import { TheirStackProvider } from './providers/theirstack';
+import { ApolloProvider } from './providers/apollo';
 import * as enrichmentQueries from '../db/queries/enrichment';
 
 interface WaterfallOptions {
@@ -12,7 +13,7 @@ interface WaterfallOptions {
   budgetLimitCents?: number;
 }
 
-type ProviderInstance = PdlProvider | LushaProvider | TheirStackProvider;
+type ProviderInstance = PdlProvider | LushaProvider | TheirStackProvider | ApolloProvider;
 
 function createProviderInstance(config: ProviderConfig): ProviderInstance | null {
   const providerConfig = {
@@ -24,6 +25,7 @@ function createProviderInstance(config: ProviderConfig): ProviderInstance | null
     case 'pdl': return new PdlProvider(providerConfig);
     case 'lusha': return new LushaProvider(providerConfig);
     case 'theirstack': return new TheirStackProvider(providerConfig);
+    case 'apollo': return new ApolloProvider(providerConfig);
     default: return null;
   }
 }
@@ -45,12 +47,17 @@ export async function enrichContact(
   const budgetLimit = budgetLimitCents ?? (budget ? budget.budgetCents - budget.spentCents : Infinity);
 
   // Determine which fields we still need
+  // Treat boolean-like strings ("true", "false") as empty — these come from bad imports
+  const EMPTY_SENTINELS = new Set(['true', 'false', 'null', 'undefined', 'N/A', 'n/a', '']);
+  const hasRealValue = (v: string | null): boolean =>
+    v !== null && v !== undefined && !EMPTY_SENTINELS.has(v.trim());
+
   const filledFields = new Set<string>();
   if (skipFilledFields) {
-    if (contact.email) filledFields.add('email');
-    if (contact.fullName) filledFields.add('full_name');
-    if (contact.title) filledFields.add('title');
-    if (contact.currentCompany) filledFields.add('current_company');
+    if (hasRealValue(contact.email)) filledFields.add('email');
+    if (hasRealValue(contact.fullName)) filledFields.add('full_name');
+    if (hasRealValue(contact.title)) filledFields.add('title');
+    if (hasRealValue(contact.currentCompany)) filledFields.add('current_company');
   }
 
   const results: EnrichmentResult[] = [];
@@ -146,11 +153,15 @@ function capabilityMatchesField(capability: string, field: string): boolean {
   const mapping: Record<string, string[]> = {
     email: ['email'],
     phone: ['phone'],
-    social: ['linkedin_url', 'twitter'],
-    employment: ['title', 'current_company'],
+    social: ['linkedin_url', 'twitter', 'location'],
+    employment: ['title', 'current_company', 'headline'],
     education: ['education'],
     company: ['current_company', 'industry'],
     technographics: ['technographics'],
+    profile: ['about', 'headline', 'location', 'connections_count', 'tags'],
+    skills: ['tags'],
+    connections: ['connections_count'],
+    activity: [],
   };
   return (mapping[capability] || []).includes(field);
 }

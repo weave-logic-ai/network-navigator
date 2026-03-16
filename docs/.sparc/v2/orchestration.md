@@ -286,9 +286,9 @@ Full dashboard, contact detail, network graph, discover page.
 - [x] Contact detail layout with 5 tabs (Profile, Network, Outreach, Enrichment, Activity)
 - [ ] ContactScoreCard with hover math popover <!-- PARTIAL: TierBadge with tooltip exists, no dedicated ContactScoreCard component -->
 - [x] Contact Profile tab (about, experience, skills)
-- [x] Contact Network tab (ego network, same-company contacts, similar contacts) <!-- minimal: text-based, no visual ego graph -->
-- [x] Contact Enrichment tab (per-source attribution) <!-- minimal: status display, no detailed history -->
-- [x] Contact Activity tab (behavioral observations) <!-- minimal: placeholder "No activity recorded yet" -->
+- [x] Contact Network tab (placeholder) <!-- deferred to Phase 5: full ego graph, same-company, similar contacts -->
+- [x] Contact Enrichment tab (placeholder) <!-- deferred to Phase 5: per-source attribution, detailed history -->
+- [x] Contact Activity tab (placeholder) <!-- deferred to Phase 5: behavioral observations, content analysis -->
 - [ ] Network graph with reagraph (force-directed 2D/3D) <!-- NOT DONE: reagraph not installed, network page shows text-based community cards -->
 - [ ] Graph controls panel (layout, color, size, edge filter, cluster hulls) <!-- NOT DONE: no graph visualization to control -->
 - [ ] Cluster sidebar <!-- NOT DONE: clusters shown as card grid, no sidebar -->
@@ -431,6 +431,9 @@ Claude fully integrated. Goals/tasks auto-generated. Outreach templates.
 - [ ] Template editor with sequence configuration
 - [ ] Template performance tracking
 - [ ] Campaign management
+- [ ] Contact Network tab: visual ego graph, same-company contacts, similar contacts (deferred from Phase 3)
+- [ ] Contact Enrichment tab: per-source attribution, detailed enrichment history (deferred from Phase 3)
+- [ ] Contact Activity tab: behavioral observations, content analysis timeline (deferred from Phase 3)
 
 #### Extension (see `phase-5-intelligence/extension.md`)
 - [ ] Message template display in popup + side panel

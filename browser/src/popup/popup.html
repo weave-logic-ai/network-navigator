@@ -9,18 +9,64 @@
 <body>
   <div id="popup-root">
     <header class="popup-header">
-      <h1>LinkedIn Network Intelligence</h1>
+      <h1>Network Intelligence</h1>
       <span id="connection-status" class="status-indicator disconnected">
         Disconnected
       </span>
     </header>
-    <main class="popup-content">
-      <p class="placeholder-text">
-        Extension setup will be available in a future update.
-      </p>
-      <p class="version-text">v0.1.0 - Phase 1 Scaffold</p>
-    </main>
+
+    <!-- Registration Section (shown when not registered) -->
+    <section id="register-section" class="popup-section">
+      <h2>Connect to App</h2>
+      <p class="help-text">Enter the display token from the app settings page:</p>
+      <div class="input-group">
+        <input type="text" id="token-input" placeholder="ext_xxxxxxxx" />
+        <button id="register-btn" class="btn btn-primary">Connect</button>
+      </div>
+      <p id="register-error" class="error-text" style="display: none;"></p>
+    </section>
+
+    <!-- Main Section (shown when registered) -->
+    <section id="main-section" style="display: none;">
+      <!-- Stats -->
+      <div class="popup-section stats-row">
+        <div class="stat">
+          <span class="stat-value" id="capture-count">0</span>
+          <span class="stat-label">Captures Today</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="queue-depth">0</span>
+          <span class="stat-label">Queued</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="task-count">0</span>
+          <span class="stat-label">Tasks</span>
+        </div>
+      </div>
+
+      <!-- Current Page -->
+      <div class="popup-section">
+        <h2>Current Page</h2>
+        <p id="page-type" class="page-type-label">--</p>
+        <button id="capture-btn" class="btn btn-primary btn-full">
+          Capture This Page
+        </button>
+      </div>
+
+      <!-- Quick Tasks -->
+      <div class="popup-section">
+        <h2>Pending Tasks</h2>
+        <div id="task-list" class="task-list">
+          <p class="placeholder-text">No pending tasks</p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="popup-footer">
+      <span class="version-text">v0.1.0</span>
+      <button id="open-sidepanel-btn" class="btn btn-link">Open Side Panel</button>
+    </footer>
   </div>
-  <script src="../dist/popup.js" type="module"></script>
+  <script src="/dist/popup.js"></script>
 </body>
 </html>

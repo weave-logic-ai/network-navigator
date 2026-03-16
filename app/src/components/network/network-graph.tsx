@@ -129,8 +129,32 @@ export function NetworkGraph({
         if (!res.ok) throw new Error("Failed to fetch graph data");
         const json = await res.json();
         if (!cancelled) {
-          setRawNodes(json.nodes || []);
-          setRawEdges(json.edges || []);
+          const gd = json.data || json;
+          // API returns { id, label, data: { tier, company, score } } — flatten for local use
+          const apiNodes = (gd.nodes || []).map((n: Record<string, unknown>) => {
+            const nd = (n.data || {}) as Record<string, unknown>;
+            return {
+              id: n.id,
+              label: n.label,
+              tier: nd.tier || null,
+              company: nd.company || null,
+              composite_score: nd.score || 0,
+              persona: nd.persona || null,
+              cluster_id: nd.cluster_id || null,
+            };
+          });
+          const apiEdges = (gd.edges || []).map((e: Record<string, unknown>) => {
+            const ed = (e.data || {}) as Record<string, unknown>;
+            return {
+              id: e.id,
+              source: e.source,
+              target: e.target,
+              edge_type: ed.type || 'connection',
+              weight: ed.weight || 1,
+            };
+          });
+          setRawNodes(apiNodes);
+          setRawEdges(apiEdges);
         }
       } catch (err) {
         if (!cancelled) {
@@ -228,9 +252,9 @@ export function NetworkGraph({
         if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) return false;
         switch (edgeFilter) {
           case "connections":
-            return e.edge_type === "connection";
+            return e.edge_type === "CONNECTED_TO" || e.edge_type === "connection";
           case "messages":
-            return e.edge_type === "message";
+            return e.edge_type === "MESSAGED" || e.edge_type === "message";
           default:
             return true;
         }
@@ -275,18 +299,20 @@ export function NetworkGraph({
   }
 
   return (
-    <GraphCanvas
-      ref={graphRef}
-      nodes={nodes}
-      edges={edges}
-      layoutType={layout}
-      labelType="auto"
-      sizingType="attribute"
-      sizingAttribute="size"
-      edgeArrowPosition="end"
-      edgeInterpolation="curved"
-      onNodeClick={handleNodeClick}
-      animated
-    />
+    <div className="absolute inset-0">
+      <GraphCanvas
+        ref={graphRef}
+        nodes={nodes}
+        edges={edges}
+        layoutType={layout}
+        labelType="auto"
+        sizingType="attribute"
+        sizingAttribute="size"
+        edgeArrowPosition="end"
+        edgeInterpolation="curved"
+        onNodeClick={handleNodeClick}
+        animated
+      />
+    </div>
   );
 }

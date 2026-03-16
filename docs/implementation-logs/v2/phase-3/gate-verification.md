@@ -55,3 +55,4 @@ Route (app)                                 Size  First Load JS
 - Network health uses inline SVG (no chart library dependency) for donut ring
 - All pages handle empty states gracefully (no data = helpful message, not error)
 - Build requires clean `.next` directory to avoid stale cache build ID conflicts
+- Contact Activity/Network/Enrichment tabs are minimal placeholders — deferred to Phase 5 (Intelligence) where extension + Claude data makes them meaningful

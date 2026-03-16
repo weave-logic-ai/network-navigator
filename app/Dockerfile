@@ -2,7 +2,7 @@
 FROM node:20-alpine AS dev
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 EXPOSE 3000
 CMD ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]
 
@@ -10,7 +10,7 @@ CMD ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 COPY . .
 RUN mkdir -p public
 RUN npm run build

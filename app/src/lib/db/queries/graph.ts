@@ -210,7 +210,7 @@ export async function getContactAttributeClusters(): Promise<
        co.size_range AS company_size,
        c.location,
        COUNT(*)::text AS contact_count,
-       ARRAY_AGG(c.id ORDER BY c.created_at LIMIT 5) AS sample_ids
+       (ARRAY_AGG(c.id ORDER BY c.created_at))[1:5] AS sample_ids
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      WHERE c.is_archived = FALSE

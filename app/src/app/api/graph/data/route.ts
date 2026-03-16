@@ -60,7 +60,8 @@ export async function GET(request: NextRequest) {
     // Collect node IDs for edge filtering
     const nodeIds = nodesResult.rows.map((r) => r.id);
 
-    // Fetch edges between the selected contacts only
+    // Fetch edges where at least one end is in the node set
+    // This captures star-topology edges (self -> connection) properly
     const edgesResult = await query<{
       id: string;
       source_contact_id: string;
@@ -70,10 +71,38 @@ export async function GET(request: NextRequest) {
     }>(
       `SELECT e.id, e.source_contact_id, e.target_contact_id, e.edge_type, e.weight
        FROM edges e
-       WHERE e.source_contact_id = ANY($1)
-         AND e.target_contact_id = ANY($1)`,
+       WHERE e.target_contact_id = ANY($1)
+         AND e.target_contact_id IS NOT NULL`,
       [nodeIds]
     );
+
+    // Add any source nodes that aren't already in the set (e.g., self-contact)
+    const existingIds = new Set(nodeIds);
+    const missingSources = new Set<string>();
+    for (const edge of edgesResult.rows) {
+      if (!existingIds.has(edge.source_contact_id)) {
+        missingSources.add(edge.source_contact_id);
+      }
+    }
+
+    if (missingSources.size > 0) {
+      const missingResult = await query<{
+        id: string;
+        full_name: string | null;
+        current_company: string | null;
+        title: string | null;
+        tier: string | null;
+        composite_score: number | null;
+      }>(
+        `SELECT c.id, c.full_name, c.current_company, c.title,
+                cs.tier, cs.composite_score
+         FROM contacts c
+         LEFT JOIN contact_scores cs ON c.id = cs.contact_id
+         WHERE c.id = ANY($1)`,
+        [Array.from(missingSources)]
+      );
+      nodesResult.rows.push(...missingResult.rows);
+    }
 
     // Build response
     const nodes: GraphNode[] = nodesResult.rows.map((row) => ({

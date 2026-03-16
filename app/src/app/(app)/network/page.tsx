@@ -79,7 +79,7 @@ export default function NetworkPage() {
           onShowClustersChange={setShowClusters}
         />
 
-        <div className="flex-1 rounded-lg border bg-background">
+        <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
           <NetworkGraph
             layout={layout}
             colorBy={colorBy}

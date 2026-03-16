@@ -12,6 +12,7 @@ import {
   Puzzle,
   Settings,
   Upload,
+  UserCircle,
   PanelLeftClose,
   PanelLeft,
 } from "lucide-react";
@@ -36,6 +37,7 @@ const primaryNav = [
 ];
 
 const secondaryNav = [
+  { href: "/profile", label: "Profile", icon: UserCircle },
   { href: "/extension", label: "Extension", icon: Puzzle },
   { href: "/admin", label: "Admin", icon: Settings },
   { href: "/import", label: "Import", icon: Upload },

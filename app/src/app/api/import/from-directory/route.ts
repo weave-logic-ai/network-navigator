@@ -11,6 +11,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 // Allowed directory prefixes (absolute paths only)
 const ALLOWED_PREFIXES = [
   '/home/aepod/dev/ctox/data/',
+  '/data/',
 ];
 
 function isPathAllowed(dirPath: string): boolean {
@@ -50,7 +51,14 @@ export async function POST(request: NextRequest) {
     // Resolve relative "data/" paths to absolute
     let resolvedPath = directoryPath;
     if (directoryPath.startsWith('data/')) {
-      resolvedPath = resolve('/home/aepod/dev/ctox', directoryPath);
+      // Try container path first, then host path
+      const containerPath = resolve('/', directoryPath);
+      const hostPath = resolve('/home/aepod/dev/ctox', directoryPath);
+      resolvedPath = containerPath;
+      // Fallback to host path if container path doesn't match allowed prefixes
+      if (!isPathAllowed(containerPath) && isPathAllowed(hostPath)) {
+        resolvedPath = hostPath;
+      }
     } else {
       resolvedPath = resolve(directoryPath);
     }

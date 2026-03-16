@@ -58,4 +58,5 @@ INSERT INTO enrichment_providers (name, display_name, cost_per_lookup_cents, cap
   ('theirstack', 'TheirStack', 5, ARRAY['technographics', 'company'], 30),
   ('apollo', 'Apollo.io', 8, ARRAY['email', 'phone', 'company', 'employment'], 40),
   ('crunchbase', 'Crunchbase', 20, ARRAY['company', 'funding', 'leadership'], 50),
-  ('builtwith', 'BuiltWith', 12, ARRAY['technographics', 'website'], 60);
+  ('builtwith', 'BuiltWith', 12, ARRAY['technographics', 'website'], 60),
+  ('linkedin', 'LinkedIn (Extension)', 0, ARRAY['profile', 'employment', 'education', 'skills', 'connections', 'activity'], 5);

@@ -3,6 +3,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { searchContacts } from '@/lib/db/queries/contacts';
 
+function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    result[camelKey] = value;
+  }
+  return result;
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -26,7 +35,16 @@ export async function GET(request: NextRequest) {
 
     const result = await searchContacts(q.trim(), page, limit);
 
-    return NextResponse.json(result);
+    return NextResponse.json({
+      data: result.data.map((row) => ({
+        ...snakeToCamel(row as unknown as Record<string, unknown>),
+        // Command palette uses 'name' shorthand
+        name: row.full_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown',
+        company: row.current_company,
+        tier: (row as unknown as Record<string, unknown>).tier ?? null,
+      })),
+      pagination: result.pagination,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: 'Search failed', details: error instanceof Error ? error.message : undefined },

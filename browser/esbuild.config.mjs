@@ -4,33 +4,40 @@ const isWatch = process.argv.includes('--watch');
 
 const sharedOptions = {
   bundle: true,
-  format: 'esm',
   target: 'chrome120',
   sourcemap: true,
   minify: !isWatch,
   logLevel: 'info',
-  alias: {
-    '@shared': '../shared',
-  },
 };
 
-const entryPoints = [
-  { in: 'src/service-worker.ts', out: 'service-worker' },
-  { in: 'src/content/index.ts', out: 'content' },
-  { in: 'src/popup/popup.ts', out: 'popup' },
-  { in: 'src/sidepanel/sidepanel.ts', out: 'sidepanel' },
-];
-
-const buildOptions = {
+// Service worker must be ESM (manifest declares "type": "module")
+const swBuild = {
   ...sharedOptions,
-  entryPoints: entryPoints.map((ep) => ({ in: ep.in, out: ep.out })),
+  entryPoints: [{ in: 'src/service-worker.ts', out: 'service-worker' }],
   outdir: 'dist',
+  format: 'esm',
+};
+
+// Popup, content script, and sidepanel use IIFE (no module import needed)
+const pageBuild = {
+  ...sharedOptions,
+  entryPoints: [
+    { in: 'src/content/index.ts', out: 'content' },
+    { in: 'src/popup/popup.ts', out: 'popup' },
+    { in: 'src/sidepanel/sidepanel.ts', out: 'sidepanel' },
+  ],
+  outdir: 'dist',
+  format: 'iife',
 };
 
 if (isWatch) {
-  const ctx = await esbuild.context(buildOptions);
-  await ctx.watch();
+  const ctx1 = await esbuild.context(swBuild);
+  const ctx2 = await esbuild.context(pageBuild);
+  await Promise.all([ctx1.watch(), ctx2.watch()]);
   console.log('Watching for changes...');
 } else {
-  await esbuild.build(buildOptions);
+  await Promise.all([
+    esbuild.build(swBuild),
+    esbuild.build(pageBuild),
+  ]);
 }

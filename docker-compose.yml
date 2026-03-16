@@ -23,24 +23,28 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
-      target: dev
+      target: runner
     container_name: ctox-app
     ports:
       - "3000:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ctox}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ctox}
-      NODE_ENV: ${NODE_ENV:-development}
+      NODE_ENV: production
+      PDL_API_KEY: ${PDL_API_KEY:-}
+      APOLLO_API_KEY: ${APOLLO_API_KEY:-}
+      LUSHA_API_KEY: ${LUSHA_API_KEY:-}
+      THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy
     volumes:
-      - ./app:/app
-      - ./data/drives/shared:/app/data/shared
+      - ./data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 90s
+      start_period: 30s
     restart: unless-stopped
 

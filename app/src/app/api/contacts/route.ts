@@ -4,6 +4,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { listContacts, createContact } from '@/lib/db/queries/contacts';
 
+function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    result[camelKey] = value;
+  }
+  return result;
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -29,7 +38,10 @@ export async function GET(request: NextRequest) {
       search,
     });
 
-    return NextResponse.json(result);
+    return NextResponse.json({
+      data: result.data.map((row) => snakeToCamel(row as unknown as Record<string, unknown>)),
+      pagination: result.pagination,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to list contacts', details: error instanceof Error ? error.message : undefined },
