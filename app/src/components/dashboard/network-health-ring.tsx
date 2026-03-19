@@ -3,33 +3,33 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-interface HealthMetrics {
+interface HealthData {
   totalContacts: number;
-  withEmail: number;
-  withCompany: number;
-  withTitle: number;
-  scored: number;
+  totalEdges: number;
+  avgScore: number;
+  dataMaturity: number;
 }
 
 export function NetworkHealthRing() {
-  const [metrics, setMetrics] = useState<HealthMetrics | null>(null);
+  const [data, setData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch("/api/contacts?limit=1");
+        const res = await fetch("/api/dashboard");
         if (res.ok) {
           const json = await res.json();
-          const total = json.pagination?.total || 0;
-          // Approximate data maturity from available data
-          setMetrics({
-            totalContacts: total,
-            withEmail: 0,
-            withCompany: 0,
-            withTitle: 0,
-            scored: 0,
-          });
+          const stats = json.data?.stats;
+          const health = json.data?.networkHealth;
+          if (stats && health) {
+            setData({
+              totalContacts: stats.totalContacts ?? 0,
+              totalEdges: health.totalEdges ?? 0,
+              avgScore: health.avgScore ?? 0,
+              dataMaturity: health.dataMaturity ?? 0,
+            });
+          }
         }
       } catch {
         // Empty state
@@ -40,15 +40,7 @@ export function NetworkHealthRing() {
     load();
   }, []);
 
-  const maturityPercent = metrics
-    ? metrics.totalContacts > 0
-      ? Math.round(
-          ((metrics.withEmail + metrics.withCompany + metrics.withTitle + metrics.scored) /
-            (metrics.totalContacts * 4)) *
-            100
-        )
-      : 0
-    : 0;
+  const maturityPercent = data?.dataMaturity ?? 0;
 
   return (
     <Card>
@@ -60,7 +52,7 @@ export function NetworkHealthRing() {
           <div className="h-32 flex items-center justify-center text-sm text-muted-foreground">
             Loading...
           </div>
-        ) : !metrics || metrics.totalContacts === 0 ? (
+        ) : !data || data.totalContacts === 0 ? (
           <div className="h-32 flex items-center justify-center text-sm text-muted-foreground">
             Import contacts to see network health
           </div>
@@ -94,9 +86,13 @@ export function NetworkHealthRing() {
                 <span className="text-lg font-bold">{maturityPercent}%</span>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              {metrics.totalContacts} contacts
-            </p>
+            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-2">
+              <span>{data.totalContacts} contacts</span>
+              <span>{data.totalEdges} edges</span>
+              {data.avgScore > 0 && (
+                <span>avg {data.avgScore.toFixed(1)}</span>
+              )}
+            </div>
           </div>
         )}
       </CardContent>

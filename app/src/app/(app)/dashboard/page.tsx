@@ -2,6 +2,14 @@ import dynamic from "next/dynamic";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
 
+const ScoreScatterWidget = dynamic(
+  () =>
+    import("@/components/dashboard/score-scatter-widget").then(
+      (mod) => mod.ScoreScatterWidget
+    ),
+  { loading: () => <ChartSkeleton title="Score Distribution" /> }
+);
+
 const GoalFocusBanner = dynamic(
   () =>
     import("@/components/dashboard/goal-focus-banner").then(
@@ -117,6 +125,9 @@ export default function DashboardPage() {
         <div className="grid gap-4 md:grid-cols-2">
           <IcpRadarChart />
           <TaskQueueWidget />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <ScoreScatterWidget />
         </div>
         <div className="grid gap-4 md:grid-cols-3">
           <DiscoveryFeed />

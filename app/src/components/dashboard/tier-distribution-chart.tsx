@@ -31,23 +31,21 @@ export function TierDistributionChart() {
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch("/api/scoring/weights");
+        const res = await fetch("/api/dashboard");
         if (res.ok) {
-          // Use the tier distribution from contacts
-          const contactRes = await fetch("/api/contacts?limit=1");
-          if (contactRes.ok) {
-            const json = await contactRes.json();
-            const total = json.pagination?.total || 0;
-            // Show placeholder if no scored data
-            if (total > 0) {
-              setData([
-                { tier: "Gold", count: 0 },
-                { tier: "Silver", count: 0 },
-                { tier: "Bronze", count: 0 },
-                { tier: "Watch", count: 0 },
-                { tier: "Unscored", count: total },
-              ]);
+          const json = await res.json();
+          const dist = json.data?.stats?.tierDistribution;
+          if (dist) {
+            const items: TierData[] = [];
+            for (const [tier, count] of Object.entries(dist)) {
+              if (typeof count === "number" && count > 0) {
+                items.push({
+                  tier: tier.charAt(0).toUpperCase() + tier.slice(1),
+                  count,
+                });
+              }
             }
+            setData(items);
           }
         }
       } catch {
@@ -79,7 +77,7 @@ export function TierDistributionChart() {
           <ResponsiveContainer width="100%" height={200}>
             <PieChart>
               <Pie
-                data={data.filter((d) => d.count > 0)}
+                data={data}
                 cx="50%"
                 cy="50%"
                 innerRadius={40}
@@ -88,16 +86,14 @@ export function TierDistributionChart() {
                 dataKey="count"
                 nameKey="tier"
               >
-                {data
-                  .filter((d) => d.count > 0)
-                  .map((entry) => (
-                    <Cell
-                      key={entry.tier}
-                      fill={
-                        TIER_COLORS[entry.tier.toLowerCase()] || TIER_COLORS.unscored
-                      }
-                    />
-                  ))}
+                {data.map((entry) => (
+                  <Cell
+                    key={entry.tier}
+                    fill={
+                      TIER_COLORS[entry.tier.toLowerCase()] || TIER_COLORS.unscored
+                    }
+                  />
+                ))}
               </Pie>
               <Tooltip />
               <Legend
