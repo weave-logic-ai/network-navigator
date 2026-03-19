@@ -60,6 +60,63 @@
           <p class="placeholder-text">No pending tasks</p>
         </div>
       </div>
+
+      <!-- Templates Section (Phase 5) -->
+      <div class="popup-section">
+        <h2>Templates</h2>
+        <div class="template-controls">
+          <select id="template-selector" class="template-select">
+            <option value="">Select a template...</option>
+            <option value="initial_outreach">Initial Outreach</option>
+            <option value="follow_up">Follow-up</option>
+            <option value="meeting_request">Meeting Request</option>
+          </select>
+        </div>
+        <div id="template-preview" class="template-preview" style="display: none;">
+          <p id="template-preview-text" class="template-preview-text"></p>
+        </div>
+        <div id="template-actions" class="template-actions" style="display: none;">
+          <button id="copy-template-btn" class="btn btn-secondary btn-half">Copy to Clipboard</button>
+          <button id="personalize-btn" class="btn btn-primary btn-half">Personalize</button>
+        </div>
+        <p id="template-status" class="template-status" style="display: none;"></p>
+      </div>
+
+      <!-- Settings Section (Phase 6) -->
+      <div class="popup-section">
+        <div class="settings-toggle" id="settings-toggle">
+          <h2>Settings</h2>
+          <span class="settings-chevron" id="settings-chevron">&#9660;</span>
+        </div>
+        <div id="settings-content" class="settings-content" style="display: none;">
+          <div class="setting-item">
+            <label class="setting-label" for="setting-app-url">App URL</label>
+            <div class="input-group">
+              <input type="text" id="setting-app-url" class="setting-input" placeholder="http://localhost:3000" />
+              <button id="save-app-url-btn" class="btn btn-secondary btn-sm">Save</button>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">
+              <input type="checkbox" id="setting-auto-capture" />
+              Auto-capture on page load
+            </label>
+          </div>
+          <div class="setting-item">
+            <label class="setting-label" for="setting-capture-limit">Daily capture limit</label>
+            <input type="number" id="setting-capture-limit" class="setting-input setting-input-sm" min="1" max="500" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label" for="setting-overlay-position">Overlay position</label>
+            <select id="setting-overlay-position" class="template-select">
+              <option value="bottom-right">Bottom Right</option>
+              <option value="bottom-left">Bottom Left</option>
+              <option value="top-right">Top Right</option>
+              <option value="top-left">Top Left</option>
+            </select>
+          </div>
+        </div>
+      </div>
     </section>
 
     <footer class="popup-footer">

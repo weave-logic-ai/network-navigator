@@ -102,6 +102,14 @@ export interface TasksResponse {
 // Template Types
 // ============================================================
 
+export interface OutreachTemplate {
+  id: string;
+  name: string;
+  category: 'initial_outreach' | 'follow_up' | 'meeting_request' | string;
+  body: string;
+  variables: string[];
+}
+
 export interface TemplateResponse {
   success: boolean;
   message: string;
@@ -109,6 +117,27 @@ export interface TemplateResponse {
   templateName: string;
   variables: Record<string, string>;
   nextTemplateId: string | null;
+}
+
+export interface PersonalizeResponse {
+  success: boolean;
+  personalizedText: string;
+  templateId: string;
+  contactName: string;
+}
+
+// ============================================================
+// Retry Queue Types
+// ============================================================
+
+export interface RetryQueueItem {
+  id: string;
+  method: string;
+  path: string;
+  body?: unknown;
+  retryCount: number;
+  maxRetries: number;
+  createdAt: string;
 }
 
 // ============================================================
@@ -204,7 +233,9 @@ export type ExtensionMessageType =
   | 'SETTINGS_UPDATE'
   | 'OVERLAY_STATE'
   | 'GET_STATUS'
-  | 'OPEN_SIDE_PANEL';
+  | 'OPEN_SIDE_PANEL'
+  | 'FETCH_TEMPLATES'
+  | 'PERSONALIZE_TEMPLATE';
 
 export interface ExtensionMessage {
   type: ExtensionMessageType;
@@ -227,4 +258,8 @@ export interface StorageSchema {
   pendingTasks: ExtensionTask[];
   lastHealthCheck: string | null;
   connectionState: AppConnectionState;
+  captureLimit: number;
+  autoCapture: boolean;
+  overlayPosition: string;
+  retryQueue: RetryQueueItem[];
 }

@@ -8,6 +8,8 @@ import type {
   HealthResponse,
   ExtensionSettings,
   ContactLookupResponse,
+  OutreachTemplate,
+  PersonalizeResponse,
   WsMessage,
   WsOutMessage,
   AppConnectionState,
@@ -123,6 +125,25 @@ export class AppClient {
         contactUrl,
         templateType,
       }
+    );
+  }
+
+  async fetchTemplates(): Promise<OutreachTemplate[]> {
+    const result = await this.request<{ templates: OutreachTemplate[] }>(
+      'GET',
+      '/api/outreach/templates'
+    );
+    return result.templates;
+  }
+
+  async personalizeTemplate(
+    templateId: string,
+    contactUrl: string
+  ): Promise<PersonalizeResponse> {
+    return this.request<PersonalizeResponse>(
+      'POST',
+      '/api/claude/personalize',
+      { templateId, contactUrl }
     );
   }
 

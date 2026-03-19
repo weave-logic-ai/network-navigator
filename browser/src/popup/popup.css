@@ -244,3 +244,181 @@ body {
   font-size: 10px;
   color: #bbb;
 }
+
+/* ---- Template Section (Phase 5) ---- */
+
+.template-controls {
+  margin-bottom: 8px;
+}
+
+.template-select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.template-select:focus {
+  outline: none;
+  border-color: #0066cc;
+}
+
+.template-preview {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.template-preview-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #333;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.template-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-secondary {
+  background: #e9ecef;
+  color: #333;
+}
+
+.btn-secondary:hover {
+  background: #dee2e6;
+}
+
+.btn-half {
+  flex: 1;
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.template-status {
+  font-size: 11px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.template-status.success {
+  color: #155724;
+  background: #d4edda;
+}
+
+.template-status.error {
+  color: #721c24;
+  background: #f8d7da;
+}
+
+.template-status.info {
+  color: #0c5460;
+  background: #d1ecf1;
+}
+
+/* ---- Settings Section (Phase 6) ---- */
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-toggle h2 {
+  margin-bottom: 0;
+}
+
+.settings-chevron {
+  font-size: 10px;
+  color: #888;
+  transition: transform 0.2s;
+}
+
+.settings-chevron.open {
+  transform: rotate(180deg);
+}
+
+.settings-content {
+  margin-top: 10px;
+}
+
+.setting-item {
+  margin-bottom: 10px;
+}
+
+.setting-label {
+  display: block;
+  font-size: 12px;
+  color: #555;
+  margin-bottom: 4px;
+}
+
+.setting-label input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.setting-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.setting-input-sm {
+  width: 80px;
+}
+
+.setting-input:focus {
+  outline: none;
+  border-color: #0066cc;
+}
+
+/* ---- Rate Warning (Phase 6) ---- */
+
+.rate-warning {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #856404;
+  margin-bottom: 8px;
+  display: none;
+}
+
+.rate-warning.visible {
+  display: block;
+}
+
+.rate-limit-reached {
+  background: #f8d7da;
+  border-color: #dc3545;
+  color: #721c24;
+}
+
+/* ---- Copy feedback ---- */
+
+.copy-feedback {
+  color: #28a745;
+  font-size: 11px;
+  font-weight: 500;
+}

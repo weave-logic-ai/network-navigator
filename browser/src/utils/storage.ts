@@ -4,6 +4,7 @@ import type {
   StorageSchema,
   CapturePayload,
   AppConnectionState,
+  RetryQueueItem,
 } from '../types';
 import { DEFAULT_SETTINGS, DEFAULT_APP_URL } from '../shared/constants';
 
@@ -19,6 +20,10 @@ const STORAGE_DEFAULTS: StorageSchema = {
   pendingTasks: [],
   lastHealthCheck: null,
   connectionState: 'disconnected',
+  captureLimit: 50,
+  autoCapture: false,
+  overlayPosition: 'bottom-right',
+  retryQueue: [],
 };
 
 export async function getStorage<K extends keyof StorageSchema>(
@@ -120,4 +125,76 @@ export async function setConnectionState(
   state: AppConnectionState
 ): Promise<void> {
   await setStorage('connectionState', state);
+}
+
+// ---- Daily Capture Tracking (Phase 6) ----
+
+function getTodayKey(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `captures_${yyyy}-${mm}-${dd}`;
+}
+
+export async function getDailyCaptureCount(): Promise<number> {
+  const key = getTodayKey();
+  const result = await chrome.storage.local.get(key);
+  return (result[key] as number) ?? 0;
+}
+
+export async function incrementDailyCaptureTracking(): Promise<number> {
+  const key = getTodayKey();
+  const result = await chrome.storage.local.get(key);
+  const current = (result[key] as number) ?? 0;
+  const updated = current + 1;
+  await chrome.storage.local.set({ [key]: updated });
+  return updated;
+}
+
+export async function getCaptureLimit(): Promise<number> {
+  return getStorage('captureLimit');
+}
+
+export async function setCaptureLimit(limit: number): Promise<void> {
+  await setStorage('captureLimit', limit);
+}
+
+// ---- Retry Queue (Phase 6) ----
+
+export async function enqueueRetry(
+  item: Omit<RetryQueueItem, 'id' | 'createdAt' | 'retryCount'>
+): Promise<void> {
+  const queue = await getStorage('retryQueue');
+  queue.push({
+    ...item,
+    id: crypto.randomUUID(),
+    retryCount: 0,
+    createdAt: new Date().toISOString(),
+  });
+  await setStorage('retryQueue', queue);
+}
+
+export async function getRetryQueue(): Promise<RetryQueueItem[]> {
+  return getStorage('retryQueue');
+}
+
+export async function removeRetryItem(id: string): Promise<void> {
+  const queue = await getStorage('retryQueue');
+  await setStorage(
+    'retryQueue',
+    queue.filter((item) => item.id !== id)
+  );
+}
+
+export async function updateRetryItem(
+  id: string,
+  updates: Partial<RetryQueueItem>
+): Promise<void> {
+  const queue = await getStorage('retryQueue');
+  const idx = queue.findIndex((item) => item.id === id);
+  if (idx !== -1) {
+    queue[idx] = { ...queue[idx], ...updates };
+    await setStorage('retryQueue', queue);
+  }
 }

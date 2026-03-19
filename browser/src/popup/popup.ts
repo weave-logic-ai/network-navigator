@@ -1,8 +1,9 @@
 // LinkedIn Network Intelligence - Popup UI
 // Quick status, capture, and task management
 
-import type { ExtensionMessage, ExtensionTask } from '../types';
+import type { ExtensionMessage, ExtensionTask, OutreachTemplate } from '../types';
 import { logger } from '../utils/logger';
+import { getDailyCaptureCount, getCaptureLimit } from '../utils/storage';
 
 // ============================================================
 // DOM References
@@ -22,6 +23,25 @@ const captureBtn = document.getElementById('capture-btn')!;
 const taskList = document.getElementById('task-list')!;
 const openSidepanelBtn = document.getElementById('open-sidepanel-btn')!;
 
+// Template DOM References (Phase 5)
+const templateSelector = document.getElementById('template-selector') as HTMLSelectElement;
+const templatePreview = document.getElementById('template-preview')!;
+const templatePreviewText = document.getElementById('template-preview-text')!;
+const templateActions = document.getElementById('template-actions')!;
+const copyTemplateBtn = document.getElementById('copy-template-btn')!;
+const personalizeBtn = document.getElementById('personalize-btn')!;
+const templateStatus = document.getElementById('template-status')!;
+
+// Settings DOM References (Phase 6)
+const settingsToggle = document.getElementById('settings-toggle')!;
+const settingsContent = document.getElementById('settings-content')!;
+const settingsChevron = document.getElementById('settings-chevron')!;
+const settingAppUrl = document.getElementById('setting-app-url') as HTMLInputElement;
+const saveAppUrlBtn = document.getElementById('save-app-url-btn')!;
+const settingAutoCapture = document.getElementById('setting-auto-capture') as HTMLInputElement;
+const settingCaptureLimit = document.getElementById('setting-capture-limit') as HTMLInputElement;
+const settingOverlayPosition = document.getElementById('setting-overlay-position') as HTMLSelectElement;
+
 // ============================================================
 // Status Update
 // ============================================================
@@ -33,8 +53,6 @@ async function updateStatus(): Promise<void> {
       (response) => {
         if (response?.data) {
           const data = response.data;
-
-          // Update connection status
           connectionStatus.className = `status-indicator ${data.connectionState}`;
           connectionStatus.textContent =
             data.connectionState === 'connected'
@@ -44,8 +62,6 @@ async function updateStatus(): Promise<void> {
                 : data.connectionState === 'error'
                   ? 'Error'
                   : 'Disconnected';
-
-          // Update stats
           captureCount.textContent = String(data.dailyCaptureCount ?? 0);
           queueDepth.textContent = String(data.queueDepth ?? 0);
           taskCount.textContent = String(data.taskCount ?? 0);
@@ -64,7 +80,6 @@ async function updatePageInfo(): Promise<void> {
         tabs[0].id,
         { type: 'GET_STATUS' } satisfies ExtensionMessage,
         (response) => {
-          // Clear lastError to suppress "Receiving end does not exist" on non-LinkedIn tabs
           void chrome.runtime.lastError;
           if (response?.payload) {
             const info = response.payload as { pageType?: string; url?: string };
@@ -77,7 +92,6 @@ async function updatePageInfo(): Promise<void> {
         }
       );
     } catch {
-      // Tab doesn't have content script
       pageType.textContent = 'Not a LinkedIn page';
       (captureBtn as HTMLButtonElement).disabled = true;
     }
@@ -102,23 +116,14 @@ function renderTasks(tasks: ExtensionTask[]): void {
       <span class="task-priority ${task.priority}"></span>
       <span class="task-title ${task.targetUrl ? 'task-clickable' : ''}" ${task.targetUrl ? `data-url="${escapeHtml(task.targetUrl)}"` : ''}>${escapeHtml(task.title)}</span>
       <div class="task-actions">
-        ${
-          task.targetUrl
-            ? `<button class="task-action-btn task-go" data-url="${escapeHtml(task.targetUrl)}" title="Go to page">Go</button>`
-            : ''
-        }
-        ${
-          task.targetUrl
-            ? `<button class="task-action-btn task-copy" data-url="${escapeHtml(task.targetUrl)}" title="Copy URL">Copy</button>`
-            : ''
-        }
+        ${task.targetUrl ? `<button class="task-action-btn task-go" data-url="${escapeHtml(task.targetUrl)}" title="Go to page">Go</button>` : ''}
+        ${task.targetUrl ? `<button class="task-action-btn task-copy" data-url="${escapeHtml(task.targetUrl)}" title="Copy URL">Copy</button>` : ''}
       </div>
     </div>
   `
     )
     .join('');
 
-  // Navigate to URL — use current LinkedIn tab if possible
   async function navigateToUrl(url: string): Promise<void> {
     if (url.includes('linkedin.com')) {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -140,7 +145,6 @@ function renderTasks(tasks: ExtensionTask[]): void {
     window.close();
   }
 
-  // Attach go button handlers
   taskList.querySelectorAll('.task-go').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -149,7 +153,6 @@ function renderTasks(tasks: ExtensionTask[]): void {
     });
   });
 
-  // Attach clickable title handlers
   taskList.querySelectorAll('.task-clickable').forEach((el) => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -158,7 +161,6 @@ function renderTasks(tasks: ExtensionTask[]): void {
     });
   });
 
-  // Attach copy-to-clipboard handlers
   taskList.querySelectorAll('.task-copy').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -205,12 +207,11 @@ registerBtn.addEventListener('click', async () => {
   registerError.style.display = 'none';
 
   try {
-    const appUrl =
-      (await new Promise<string>((resolve) => {
-        chrome.storage.local.get('appUrl', (result) => {
-          resolve((result.appUrl as string) || 'http://localhost:3000');
-        });
-      }));
+    const appUrl = await new Promise<string>((resolve) => {
+      chrome.storage.local.get('appUrl', (result) => {
+        resolve((result.appUrl as string) || 'http://localhost:3000');
+      });
+    });
 
     const response = await fetch(`${appUrl}/api/extension/register`, {
       method: 'POST',
@@ -233,8 +234,7 @@ registerBtn.addEventListener('click', async () => {
     mainSection.style.display = 'block';
     await updateStatus();
   } catch (err) {
-    registerError.textContent =
-      'Registration failed. Check your token and try again.';
+    registerError.textContent = 'Registration failed. Check your token and try again.';
     registerError.style.display = 'block';
     logger.error('Registration failed:', (err as Error).message);
   } finally {
@@ -264,6 +264,194 @@ captureBtn.addEventListener('click', () => {
 });
 
 // ============================================================
+// Templates (Phase 5)
+// ============================================================
+
+let loadedTemplates: OutreachTemplate[] = [];
+
+const DEFAULT_TEMPLATES: OutreachTemplate[] = [
+  {
+    id: 'initial_outreach',
+    name: 'Initial Outreach',
+    category: 'initial_outreach',
+    body: 'Hi {{first_name}},\n\nI came across your profile and was impressed by your work in {{industry}}. I would love to connect and learn more about what you are working on.\n\nBest regards',
+    variables: ['first_name', 'industry'],
+  },
+  {
+    id: 'follow_up',
+    name: 'Follow-up',
+    category: 'follow_up',
+    body: 'Hi {{first_name}},\n\nI wanted to follow up on my previous message. I think there could be great synergy between our work in {{industry}}. Would you be open to a brief conversation?\n\nBest regards',
+    variables: ['first_name', 'industry'],
+  },
+  {
+    id: 'meeting_request',
+    name: 'Meeting Request',
+    category: 'meeting_request',
+    body: 'Hi {{first_name}},\n\nI have been following your work at {{company}} and would love to schedule a brief call to discuss potential collaboration. Would you have 15 minutes this week?\n\nLooking forward to hearing from you.',
+    variables: ['first_name', 'company'],
+  },
+];
+
+async function loadTemplates(): Promise<void> {
+  try {
+    const appUrl = await new Promise<string>((resolve) => {
+      chrome.storage.local.get('appUrl', (result) => {
+        resolve((result.appUrl as string) || 'http://localhost:3000');
+      });
+    });
+
+    const response = await fetch(`${appUrl}/api/outreach/templates`, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.templates && data.templates.length > 0) {
+        loadedTemplates = data.templates;
+        updateTemplateSelectorOptions();
+        return;
+      }
+    }
+  } catch {
+    // API unavailable, use defaults
+  }
+
+  loadedTemplates = DEFAULT_TEMPLATES;
+  updateTemplateSelectorOptions();
+}
+
+function updateTemplateSelectorOptions(): void {
+  templateSelector.innerHTML = '<option value="">Select a template...</option>';
+  for (const tpl of loadedTemplates) {
+    const opt = document.createElement('option');
+    opt.value = tpl.id;
+    opt.textContent = tpl.name;
+    templateSelector.appendChild(opt);
+  }
+}
+
+function showTemplateStatus(message: string, type: 'success' | 'error' | 'info'): void {
+  templateStatus.textContent = message;
+  templateStatus.className = `template-status ${type}`;
+  templateStatus.style.display = 'block';
+  setTimeout(() => { templateStatus.style.display = 'none'; }, 3000);
+}
+
+templateSelector.addEventListener('change', () => {
+  const selectedId = templateSelector.value;
+  if (!selectedId) {
+    templatePreview.style.display = 'none';
+    templateActions.style.display = 'none';
+    return;
+  }
+  const template = loadedTemplates.find((t) => t.id === selectedId);
+  if (template) {
+    templatePreviewText.textContent = template.body;
+    templatePreview.style.display = 'block';
+    templateActions.style.display = 'flex';
+  }
+});
+
+copyTemplateBtn.addEventListener('click', async () => {
+  const selectedId = templateSelector.value;
+  const template = loadedTemplates.find((t) => t.id === selectedId);
+  if (!template) return;
+  try {
+    await navigator.clipboard.writeText(template.body);
+    const originalText = copyTemplateBtn.textContent;
+    copyTemplateBtn.textContent = 'Copied!';
+    setTimeout(() => { copyTemplateBtn.textContent = originalText; }, 1500);
+  } catch {
+    showTemplateStatus('Failed to copy to clipboard', 'error');
+  }
+});
+
+personalizeBtn.addEventListener('click', async () => {
+  const selectedId = templateSelector.value;
+  if (!selectedId) return;
+
+  personalizeBtn.setAttribute('disabled', 'true');
+  personalizeBtn.textContent = 'Personalizing...';
+
+  try {
+    const appUrl = await new Promise<string>((resolve) => {
+      chrome.storage.local.get('appUrl', (result) => {
+        resolve((result.appUrl as string) || 'http://localhost:3000');
+      });
+    });
+
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const contactUrl = tabs[0]?.url || '';
+
+    const response = await fetch(`${appUrl}/api/claude/personalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateId: selectedId, contactUrl }),
+    });
+
+    if (!response.ok) throw new Error('Personalization failed');
+
+    const data = await response.json();
+    templatePreviewText.textContent = data.personalizedText;
+    showTemplateStatus('Template personalized', 'success');
+  } catch {
+    showTemplateStatus('Could not personalize. Check app connection.', 'error');
+  } finally {
+    personalizeBtn.removeAttribute('disabled');
+    personalizeBtn.textContent = 'Personalize';
+  }
+});
+
+// ============================================================
+// Settings (Phase 6)
+// ============================================================
+
+settingsToggle.addEventListener('click', () => {
+  const isVisible = settingsContent.style.display !== 'none';
+  settingsContent.style.display = isVisible ? 'none' : 'block';
+  settingsChevron.classList.toggle('open', !isVisible);
+});
+
+async function loadSettings(): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ['appUrl', 'autoCapture', 'captureLimit', 'overlayPosition'],
+      (result) => {
+        settingAppUrl.value = (result.appUrl as string) || 'http://localhost:3000';
+        settingAutoCapture.checked = !!result.autoCapture;
+        settingCaptureLimit.value = String(result.captureLimit ?? 50);
+        settingOverlayPosition.value = (result.overlayPosition as string) || 'bottom-right';
+        resolve();
+      }
+    );
+  });
+}
+
+saveAppUrlBtn.addEventListener('click', async () => {
+  const url = settingAppUrl.value.trim();
+  if (!url) return;
+  await chrome.storage.local.set({ appUrl: url });
+  saveAppUrlBtn.textContent = 'Saved!';
+  setTimeout(() => { saveAppUrlBtn.textContent = 'Save'; }, 1500);
+});
+
+settingAutoCapture.addEventListener('change', async () => {
+  await chrome.storage.local.set({ autoCapture: settingAutoCapture.checked });
+});
+
+settingCaptureLimit.addEventListener('change', async () => {
+  const limit = parseInt(settingCaptureLimit.value, 10);
+  if (!isNaN(limit) && limit > 0) {
+    await chrome.storage.local.set({ captureLimit: limit });
+  }
+});
+
+settingOverlayPosition.addEventListener('change', async () => {
+  await chrome.storage.local.set({ overlayPosition: settingOverlayPosition.value });
+});
+
+// ============================================================
 // Side Panel
 // ============================================================
 
@@ -281,6 +469,10 @@ openSidepanelBtn.addEventListener('click', async () => {
 
 async function init(): Promise<void> {
   const isRegistered = await checkRegistration();
+
+  // Always load settings regardless of registration state
+  await loadSettings();
+
   if (isRegistered) {
     await updateStatus();
     await updatePageInfo();
@@ -290,6 +482,22 @@ async function init(): Promise<void> {
       const tasks = (result.pendingTasks || []) as ExtensionTask[];
       renderTasks(tasks.filter((t) => t.status === 'pending'));
     });
+
+    // Load templates (Phase 5)
+    await loadTemplates();
+
+    // Check capture rate (Phase 6)
+    const dailyCount = await getDailyCaptureCount();
+    const limit = await getCaptureLimit();
+    const remaining = Math.max(0, limit - dailyCount);
+    captureCount.textContent = String(dailyCount);
+
+    if (dailyCount >= limit) {
+      (captureBtn as HTMLButtonElement).disabled = true;
+      captureBtn.textContent = `Limit reached (${limit})`;
+    } else if (dailyCount >= limit * 0.8) {
+      captureBtn.textContent = `Capture (${remaining} left)`;
+    }
   }
 }
 
