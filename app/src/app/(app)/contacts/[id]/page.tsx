@@ -25,6 +25,7 @@ import {
   ArrowRight,
   Pencil,
 } from "lucide-react";
+import { DimensionParallel } from "@/components/charts/dimension-parallel";
 
 interface ContactDetail {
   id: string;
@@ -863,51 +864,75 @@ export default function ContactDetailPage() {
 
         <TabsContent value="scores" className="mt-4">
           {scores ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">Score Breakdown</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">
-                      Composite: {(scores.compositeScore * 100).toFixed(1)}%
-                    </span>
-                    <TierBadge tier={scores.tier} />
-                  </div>
-                  {scores.dimensions.map((dim) => (
-                    <div key={dim.dimension} className="space-y-1">
-                      <div className="flex items-center justify-between text-xs">
-                        <span>
-                          {DIMENSION_LABELS[dim.dimension] || dim.dimension}
-                        </span>
-                        <span className="text-muted-foreground">
-                          {(dim.rawValue * 100).toFixed(0)}% (w:{" "}
-                          {(dim.weight * 100).toFixed(0)}%)
-                        </span>
-                      </div>
-                      <Progress value={dim.rawValue * 100} className="h-1.5" />
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">Score Breakdown</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        Composite: {(scores.compositeScore * 100).toFixed(1)}%
+                      </span>
+                      <TierBadge tier={scores.tier} />
                     </div>
-                  ))}
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">Classification</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  <InfoRow label="Persona" value={scores.persona} />
-                  <InfoRow label="Behavioral" value={scores.behavioralPersona} />
-                  <InfoRow
-                    label="Scored"
-                    value={
-                      scores.scoredAt
-                        ? new Date(scores.scoredAt).toLocaleDateString()
-                        : null
-                    }
-                  />
-                </CardContent>
-              </Card>
+                    {scores.dimensions.map((dim) => (
+                      <div key={dim.dimension} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span>
+                            {DIMENSION_LABELS[dim.dimension] || dim.dimension}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {(dim.rawValue * 100).toFixed(0)}% (w:{" "}
+                            {(dim.weight * 100).toFixed(0)}%)
+                          </span>
+                        </div>
+                        <Progress value={dim.rawValue * 100} className="h-1.5" />
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">Classification</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <InfoRow label="Persona" value={scores.persona} />
+                    <InfoRow label="Behavioral" value={scores.behavioralPersona} />
+                    <InfoRow
+                      label="Scored"
+                      value={
+                        scores.scoredAt
+                          ? new Date(scores.scoredAt).toLocaleDateString()
+                          : null
+                      }
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+              {scores.dimensions.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">Dimension Profile</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <DimensionParallel
+                      data={[
+                        {
+                          name: displayName,
+                          dimensions: Object.fromEntries(
+                            scores.dimensions.map((d) => [
+                              DIMENSION_LABELS[d.dimension] || d.dimension,
+                              d.rawValue,
+                            ])
+                          ),
+                        },
+                      ]}
+                    />
+                  </CardContent>
+                </Card>
+              )}
             </div>
           ) : (
             <Card>

@@ -35,6 +35,8 @@ import { KanbanColumn } from "@/components/outreach/kanban-column";
 import { TemplateCard } from "@/components/outreach/template-card";
 import { CampaignRow } from "@/components/outreach/campaign-row";
 import { Plus, Search } from "lucide-react";
+import { OutreachFunnel } from "@/components/charts/outreach-funnel";
+import { OutreachSequenceTree } from "@/components/charts/outreach-sequence-tree";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -299,11 +301,25 @@ export default function OutreachPage() {
           <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
           <TabsTrigger value="campaigns">Campaigns</TabsTrigger>
+          <TabsTrigger value="sequences">Sequences</TabsTrigger>
           <TabsTrigger value="performance">Performance</TabsTrigger>
         </TabsList>
 
         {/* Pipeline */}
         <TabsContent value="pipeline">
+          <Card className="mb-4">
+            <CardHeader>
+              <CardTitle className="text-base">Pipeline Funnel</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <OutreachFunnel
+                data={PIPELINE_STAGES.map((stage) => ({
+                  stage: stage.replace(/_/g, " "),
+                  count: (stages[stage] ?? []).length,
+                }))}
+              />
+            </CardContent>
+          </Card>
           <div className="mb-4 flex items-center gap-3">
             <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -475,6 +491,45 @@ export default function OutreachPage() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+        </TabsContent>
+
+        {/* Sequences */}
+        <TabsContent value="sequences">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Outreach Sequences</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <OutreachSequenceTree
+                data={{
+                  name: "Initial",
+                  children: [
+                    {
+                      name: "Replied",
+                      count: (stages["replied"] ?? []).length,
+                      children: [
+                        { name: "Meeting", count: (stages["meeting_booked"] ?? []).length },
+                      ],
+                    },
+                    {
+                      name: "No Reply",
+                      count: 0,
+                      children: [
+                        {
+                          name: "Follow-up",
+                          count: 0,
+                          children: [
+                            { name: "Replied", count: 0 },
+                            { name: "Close", count: (stages["lost"] ?? []).length },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                }}
+              />
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* Performance */}
