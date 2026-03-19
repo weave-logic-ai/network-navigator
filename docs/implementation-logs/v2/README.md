@@ -36,6 +36,7 @@ v2/
 | 1 | Complete | 2026-03-12 | 2026-03-13 | 44 tables, CSV import, REST API, app shell, 76 tests |
 | 2 | Complete | 2026-03-14 | 2026-03-14 | Scoring engine (9 dims), enrichment (3 providers), graph analytics, 17 API routes, 145 tests |
 | 3 | Complete | 2026-03-14 | 2026-03-14 | Dashboard (5 widgets), contact detail (5 tabs), network/discover/enrichment pages |
-| 4 | Not Started | - | - | Extension: capture, parsing, task system |
-| 5 | Not Started | - | - | Intelligence: Claude, goals/tasks, outreach |
-| 6 | Not Started | - | - | Polish: viz catalog, admin, onboarding, security |
+| 4 | Complete | 2026-03-15 | 2026-03-15 | Extension capture, parsing (6 parsers), auth, WebSocket, popup/sidepanel, offline queue |
+| 4.5 | Complete | 2026-03-16 | 2026-03-16 | Discover redesign: niches, ICPs, offerings, action log, auto-scoring, people panel |
+| 5 | Complete | 2026-03-17 | 2026-03-17 | Claude integration, goals/tasks, outreach pipeline, templates, contact detail tabs |
+| 6 | Partial | 2026-03-18 | - | Admin panel, Crunchbase/BuiltWith providers, GDPR erasure. Deferred: viz, RVF, wizard |
