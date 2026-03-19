@@ -32,23 +32,53 @@
 
 ## How to Use This Document
 
-Each vertical section provides a complete, copy-pasteable ICP configuration that can be fed to the LinkedIn Prospector's `configure.mjs generate --json` command. The structure matches the existing `icp-config.json` schema:
+Each vertical section provides a complete ICP configuration. To apply a configuration, use either the v2 API directly or the `configure.mjs generate` script which calls the APIs on your behalf.
 
-```json
+**Option A -- Via API (recommended):**
+
+For each profile in the vertical config, call `POST /api/icps`:
+
+```bash
+POST /api/icps
 {
-  "profiles": { ... },
-  "scoring": { "roleWeight": 0.35, "industryWeight": 0.25, "signalWeight": 0.25, "companySizeWeight": 0.15 },
-  "goldScore": { "icpWeight": 0.35, "networkHubWeight": 0.30, "relationshipWeight": 0.25, "signalBoostWeight": 0.10 },
-  "tiers": { "gold": 0.55, "silver": 0.40, "bronze": 0.28 },
-  "niches": { ... }
+  "name": "Enterprise Software Buyer",
+  "description": "Senior leaders with budget authority for SaaS purchasing decisions",
+  "criteria": {
+    "roles": ["CIO", "CTO", "Chief Digital", "VP IT", "VP Engineering", "Director IT"],
+    "industries": ["financial services", "healthcare", "manufacturing", "retail"],
+    "signals": ["digital transformation", "cloud migration", "evaluating solutions"],
+    "companySizeRanges": ["201-500", "501-1000", "1001-5000"]
+  }
 }
 ```
 
+For each niche, call `POST /api/niches`:
+
+```bash
+POST /api/niches
+{
+  "name": "Enterprise IT",
+  "keywords": ["CIO", "IT director", "enterprise technology", "digital transformation"]
+}
+```
+
+**Option B -- Via configure.mjs:**
+
+```bash
+node agent/network-navigator/skills/linkedin-prospector/scripts/configure.mjs generate --json '{
+  "profiles": { ... },
+  "niches": { ... },
+  "offerings": [...]
+}'
+```
+
+This script calls the same POST APIs for each entry. See the [Configuration Guide](configuration-guide.md) for the full JSON format.
+
 **Key conventions:**
-- `rolePatterns` use **partial-match keywords** (e.g., "VP" matches "VP Engineering", "VP Sales", etc.)
+- `roles` use **partial-match keywords** (e.g., "VP" matches "VP Engineering", "VP Sales", etc.)
 - `industries` are **lowercase** keywords/phrases that appear in LinkedIn profiles and company descriptions
 - `signals` are **buying intent** keywords found in headlines, about sections, and experience descriptions
-- `companySizeSweet` defines the ideal employee-count range for target companies
+- `companySizeRanges` are string ranges like "11-50", "51-200", "201-500", "501-1000", "1001-5000"
 
 ---
 

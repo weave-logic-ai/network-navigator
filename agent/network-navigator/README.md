@@ -1,289 +1,110 @@
-# LinkedIn Prospector
+# Network Navigator — v2
 
-A Claude Code skill that turns your LinkedIn connections into a scored, tiered, persona-classified knowledge graph. Install it, configure your ideal customer profiles through conversation, and let Claude handle the searching, scoring, and analysis.
+An API-first Claude Code agent skill for LinkedIn network intelligence. All operations go through the NetworkNav REST API at `localhost:3000` — no Playwright, no local JSON files, no browser automation.
 
-## What You Get
+## Architecture
 
-- **Scored contacts** -- every connection scored on ICP fit, network influence, behavioral signals, and referral potential
-- **Tiered classification** -- gold/silver/bronze tiers with persona labels (buyer, advisor, hub, referral-partner)
-- **Referral partner identification** -- finds warm introducers, co-sellers, and white-label partners in your existing network
-- **Semantic vector search** -- find contacts by meaning, not just keywords, using 384-dim ONNX embeddings powered by [ruvector](https://github.com/ruvnet/ruvector)
-- **Interactive dashboard** -- HTML report with charts, tables, and a 3D network graph
-- **Delta tracking** -- see what changed in your network since your last analysis
+Three subsystems work together:
 
-## Install
-
-### 1. Copy the skill into your project
-
-Clone or copy this repository into your project's `.claude/` directory:
-
-```bash
-cd your-project
-git clone git@github.com:weave-logic-ai/linkedin-prospector.git .claude/linkedin-prospector
-```
-
-This gives you two slash commands in Claude Code: `/linkedin-prospector` and `/network-intel`.
-
-### 2. Install Playwright
-
-From your project root:
-
-```bash
-npm i playwright
-npx playwright install chromium
-```
-
-### 3. Log into LinkedIn
-
-Tell Claude:
-
-```
-/linkedin-prospector log me into LinkedIn
-```
-
-Claude will launch a browser window. Log into LinkedIn manually, then close the browser. Your session is saved and reused for all future searches.
-
-## Getting Started
-
-Everything is done through conversation with Claude. No need to run scripts directly.
-
-### Step 1: Configure your ICP
-
-Tell Claude what kind of contacts you're looking for:
-
-```
-/linkedin-prospector set up my ICP config
-```
-
-Claude will ask you about your services, target buyer roles, industries, and signals, then generate your configuration. Some examples:
-
-```
-/linkedin-prospector I'm a cybersecurity consultant targeting CISOs and IT Directors at mid-market companies
-/linkedin-prospector I run a financial advisory practice focused on tech executives and business owners
-/linkedin-prospector I'm a recruiter specializing in placing engineering leaders at SaaS companies
-```
-
-To verify your config looks right:
-
-```
-/linkedin-prospector validate config
-```
-
-### Step 2: Search for contacts
-
-Tell Claude what niche to search:
-
-```
-/linkedin-prospector find me 20 healthcare IT contacts
-/linkedin-prospector search for SaaS founders in my network
-/linkedin-prospector pull contacts in the ecommerce niche
-```
-
-Claude will search your LinkedIn connections, extract profiles, and cache everything locally.
-
-### Step 3: Enrich profiles
-
-```
-/linkedin-prospector enrich unenriched contacts
-```
-
-Claude visits each profile to pull detailed information -- headline, about section, current role, company, connection count. This data feeds the scoring engine.
-
-### Step 4: Score and analyze
-
-Switch to the analysis command:
-
-```
-/network-intel rebuild and rescore everything
-```
-
-This builds the knowledge graph, runs all three scoring layers (ICP, behavioral, referral), and produces a summary. You can then ask specific questions:
-
-```
-/network-intel who are my best hubs?
-/network-intel find my top prospects
-/network-intel who are my best referral partners?
-/network-intel what should I focus on next?
-/network-intel give me an overview of my network
-```
-
-### Step 5: Generate a report
-
-```
-/network-intel generate a report
-```
-
-Claude creates an interactive HTML dashboard you can open in any browser.
-
-## Slash Command Reference
-
-### `/linkedin-prospector` -- Configure and Pull
-
-Use this command for setup, searching, and data collection:
-
-| What to say | What happens |
-|-------------|--------------|
-| `set up my ICP config` | Interactive configuration for your ideal customer profiles |
-| `validate config` | Check that your configuration is valid |
-| `find me 20 [niche] contacts` | Search your LinkedIn connections by keyword/niche |
-| `enrich unenriched contacts` | Visit profiles to pull detailed data |
-| `how many contacts do I have?` | Show database statistics |
-| `search for [role/industry/keyword]` | Targeted LinkedIn search |
-| `log me into LinkedIn` | Launch browser for manual LinkedIn login |
-
-### `/network-intel` -- Analyze and Report
-
-Use this command for scoring, analysis, and reports:
-
-| What to say | What happens |
-|-------------|--------------|
-| `rebuild and rescore everything` | Full graph build + all 3 scoring layers |
-| `who are my best hubs?` | Top contacts by network influence |
-| `find my top prospects` | Top contacts by ICP fit |
-| `who are my best referral partners?` | Referral partner analysis with explanations |
-| `what should I focus on next?` | Strategic recommendations |
-| `give me an overview` | Network summary with tier/persona distribution |
-| `find contacts similar to [name/URL]` | k-NN vector similarity search |
-| `who talks about [topic]?` | Semantic free-text search across profiles |
-| `any new connections since last time?` | Delta comparison with previous snapshot |
-| `generate a report` | Interactive HTML dashboard |
-| `export my contacts` | JSON export of scored contacts |
-| `deep-scan [contact name/URL]` | Discover a contact's connections (2nd-degree) |
-
-## How It Works
-
-### Five Phases
-
-```
-Phase 0: CONFIGURE  -- Define ICP profiles, target niches, scoring weights
-Phase 1: PULL       -- Search LinkedIn, enrich profiles, cache locally
-Phase 2: SCORE      -- Build knowledge graph, run 3-layer scoring engine, vectorize
-Phase 3: ANALYZE    -- 12 analysis modes (hubs, prospects, referrals, similar, semantic...)
-Phase 4: REPORT     -- Interactive HTML dashboard with 3D graph and charts
-```
-
-### Three-Layer Scoring
-
-**Layer 1 -- ICP + Gold Score**: Scores each contact on role fit, industry match, buying signals, and company size. Produces a composite Gold Score and assigns a tier (gold/silver/bronze) and persona (buyer/advisor/hub/peer).
-
-**Layer 2 -- Behavioral**: Analyzes connection patterns, recency, about section signals, headline keywords, and super-connector indicators. Assigns behavioral personas (super-connector, content-creator, silent-influencer, rising-connector).
-
-**Layer 3 -- Referral**: Scores referral potential based on role complementarity, client overlap, network reach, amplification power, and relationship warmth. Identifies referral partners (warm-introducer, white-label-partner, co-seller, amplifier).
-
-## Configuration
-
-Claude generates your configuration during the setup conversation. Three config files control scoring:
-
-- **`icp-config.json`** -- ICP profiles, role patterns, industries, signals, scoring weights, tier thresholds, niche keywords
-- **`behavioral-config.json`** -- Behavioral persona definitions and scoring rules
-- **`referral-config.json`** -- Referral scoring weights, role tiers, persona thresholds
-
-### Tuning Tips
-
-After your first analysis, review the results and adjust:
-
-| Observation | What to tell Claude |
-|-------------|---------------------|
-| Too many gold contacts | "Raise the gold threshold" |
-| Wrong people flagged as referral partners | "Narrow the referral role patterns" |
-| Buyers showing up as referrals | "Increase the buyer inversion weight" |
-| Network hubs not getting credit | "Increase the network hub weight in gold score" |
-
-Then rescore: `/network-intel rescore everything`
-
-## Data Separation
-
-Your contact data (names, profiles, scores) is stored separately from the skill code. By default it lives in `skills/linkedin-prospector/data/`, but you can redirect it:
-
-```bash
-export PROSPECTOR_DATA_DIR=/path/to/your/data
-```
-
-This keeps PII out of the skill's code tree. Config files always load from the skill directory regardless of this setting.
-
-## Semantic Search (ruvector Integration)
-
-LinkedIn Prospector optionally integrates with [ruvector](https://github.com/ruvnet/ruvector) to add semantic vector search powered by 384-dimensional ONNX embeddings (all-MiniLM-L6-v2). This enables finding contacts by meaning rather than exact keyword matches.
-
-### Quick Setup
-
-```bash
-# Install ruvector (optional dependency)
-cd .claude/linkedin-prospector/skills/linkedin-prospector
-npm i ruvector
-
-# Build the vector store from your scored graph
-node scripts/vectorize.mjs --from-graph
-```
-
-### What You Can Do
-
-```
-# Find contacts with similar profiles to a specific person
-/network-intel find contacts similar to https://linkedin.com/in/someone
-
-# Search by concept -- finds relevant contacts even without exact keyword matches
-/network-intel who talks about AI transformation?
-/network-intel search for people in cloud infrastructure
-
-# DB search also uses vectors when available
-/linkedin-prospector search for "scaling enterprise SaaS"
-```
-
-All existing functionality works without ruvector installed. The vector engine is a transparent enhancement layer. See [docs/semantic-search-guide.md](docs/semantic-search-guide.md) for the full reference.
-
-## Advanced Usage
-
-### Network Expansion
-
-Discover contacts beyond your 1st-degree network:
-
-```
-/network-intel deep-scan https://linkedin.com/in/someone
-/linkedin-prospector batch deep-scan my gold contacts
-/linkedin-prospector batch deep-scan referral partners with min score 0.5
-```
-
-### Delta Tracking
-
-Track changes over time:
-
-```
-/network-intel any new connections since last time?
-/network-intel show my snapshots
-```
-
-### Database Operations
-
-```
-/linkedin-prospector how many contacts do I have?
-/linkedin-prospector search for "machine learning" in my contacts
-/linkedin-prospector export my contacts as JSON
-```
+1. **Web App** (`app/`) — Next.js dashboard with REST API endpoints for contacts, scoring, enrichment, graph analysis, ICPs, niches, and offerings.
+2. **Browser Extension** (`browser/`) — Chrome extension that captures LinkedIn profile data and sends it to the app API.
+3. **Agent Scripts** (`agent/`) — Lightweight `.mjs` scripts that Claude invokes via slash commands. Each script calls the app's REST API.
 
 ## Prerequisites
 
-- **Claude Code** with slash command support
-- **Node.js 18+**
-- **Playwright** with Chromium (`npm i playwright && npx playwright install chromium`)
-- **LinkedIn account** with an active session
-- **ruvector** (optional) -- for semantic vector search (`cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`)
+- Docker Compose running: `docker compose up -d` (starts the app, database, and supporting services)
+- Node.js 18+ (for running agent scripts; only uses built-in `fetch`)
+- Browser extension installed and configured (for LinkedIn data capture)
 
-## Troubleshooting
+## Slash Commands
 
-**"Browser not found"** -- Run `npx playwright install chromium` from your project root.
+### `/linkedin-prospector` — Configure and Manage
 
-**"Not logged in"** -- Use `/linkedin-prospector log me into LinkedIn` to launch the browser and log in manually.
+| What to say | What happens |
+|-------------|--------------|
+| `set up my ICP config` | Interactive ICP/niche/offering configuration |
+| `validate config` | Check current ICP, niche, and offering setup |
+| `list all profiles` | Display all configured ICPs, niches, offerings |
 
-**"No contacts found"** -- Run a search first: `/linkedin-prospector find me 20 [your niche] contacts`
+### `/network-intel` — Analyze and Pipeline
 
-**"Config is example template"** -- Run `/linkedin-prospector set up my ICP config` to customize for your business.
+| What to say | What happens |
+|-------------|--------------|
+| `show me my network summary` | Dashboard stats overview |
+| `who are my best hubs?` | Top contacts by network influence |
+| `find my top prospects` | Top contacts by composite score |
+| `who are my best referral partners?` | Referral candidate analysis |
+| `show network clusters` | Community detection results |
+| `search for "AI startup"` | Hybrid search across contacts |
+| `what should I focus on next?` | AI-recommended next actions |
+| `show contacts at Acme Corp` | Company-filtered contact list |
+| `rescore everything` | Trigger full rescore pipeline |
+| `check system health` | API and extension health check |
+| `enrich contact [id]` | Trigger enrichment for a contact |
+| `export my data` | Full data export as JSON |
 
-**"graph.json missing"** -- Run `/network-intel rebuild and rescore everything`
+## Agent Scripts
 
-**"ruvector not available"** -- Optional dependency for semantic search. Install: `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector`
+All scripts live in `skills/linkedin-prospector/scripts/` and use the shared `api-client.mjs` HTTP client.
 
-**"RVF store not available or empty"** -- Build the vector store: `node scripts/vectorize.mjs --from-graph`
+### api-client.mjs
+
+Lightweight fetch wrapper targeting `http://localhost:3000` (override with `NETWORKNAV_URL` env var). Exports `get`, `post`, `put`, `del`.
+
+### configure.mjs
+
+ICP, niche, and offering configuration manager.
+
+```bash
+node scripts/configure.mjs validate                # Check current config
+node scripts/configure.mjs list                    # Full config listing
+node scripts/configure.mjs generate --json '{...}' # Create from JSON
+```
+
+### pipeline.mjs
+
+Pipeline orchestrator for scoring, enrichment, and graph operations.
+
+```bash
+node scripts/pipeline.mjs --status        # Dashboard stats
+node scripts/pipeline.mjs --score [id]    # Score a contact
+node scripts/pipeline.mjs --rescore-all   # Rescore all (polls until done)
+node scripts/pipeline.mjs --enrich [id]   # Enrich a contact
+node scripts/pipeline.mjs --compute-graph # Recompute network graph
+node scripts/pipeline.mjs --export        # Export data to stdout
+node scripts/pipeline.mjs --health        # Health check
+```
+
+### analyze.mjs
+
+Network analysis with multiple modes.
+
+```bash
+node scripts/analyze.mjs --mode summary
+node scripts/analyze.mjs --mode hubs --top 10
+node scripts/analyze.mjs --mode prospects --top 10
+node scripts/analyze.mjs --mode referrals --top 10
+node scripts/analyze.mjs --mode clusters
+node scripts/analyze.mjs --mode search --query "cloud infrastructure"
+node scripts/analyze.mjs --mode recommend
+node scripts/analyze.mjs --mode company --name "Acme"
+```
+
+## Data Flow
+
+```
+LinkedIn Profile (browser) --> Extension --> POST /api/extension/capture --> Database
+                                                                              |
+Claude Agent --> scripts/*.mjs --> REST API --> Database/Scoring/Graph Engine
+                                                                              |
+Dashboard (Next.js) <-- REST API <-- Database <-------------------------------+
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NETWORKNAV_URL` | `http://localhost:3000` | Base URL for the app API |
 
 ## License
 

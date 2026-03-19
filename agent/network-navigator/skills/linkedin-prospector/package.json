@@ -1,0 +1,14 @@
+{
+  "name": "linkedin-prospector",
+  "version": "2.0.0",
+  "description": "NetworkNav v2 agent scripts — API-first LinkedIn network intelligence",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "configure": "node scripts/configure.mjs",
+    "pipeline": "node scripts/pipeline.mjs",
+    "analyze": "node scripts/analyze.mjs"
+  }
+}
