@@ -33,7 +33,7 @@ const primaryNav = [
   { href: "/discover", label: "Discover", icon: Compass },
   { href: "/enrichment", label: "Enrichment", icon: Database },
   { href: "/outreach", label: "Outreach", icon: Send },
-  { href: "/tasks", label: "Tasks", icon: CheckSquare },
+  { href: "/tasks", label: "Goals & Tasks", icon: CheckSquare },
 ];
 
 const secondaryNav = [

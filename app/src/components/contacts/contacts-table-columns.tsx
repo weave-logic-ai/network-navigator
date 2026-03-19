@@ -38,6 +38,13 @@ export const columns: ColumnDef[] = [
     accessor: (c) => c.tier,
   },
   {
+    key: "referralTier",
+    label: "Referral",
+    width: "100px",
+    sortable: true,
+    accessor: (c) => c.referralTier ?? null,
+  },
+  {
     key: "enrichmentStatus",
     label: "Enrichment",
     width: "120px",

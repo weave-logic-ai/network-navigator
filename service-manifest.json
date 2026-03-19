@@ -1,0 +1,35 @@
+{
+  "project": {
+    "name": "networknav",
+    "description": "",
+    "version": "0.1.0",
+    "client": "weavelogic"
+  },
+  "services": [
+    {
+      "name": "",
+      "description": "",
+      "port": 0,
+      "protocol": "http",
+      "start_command": "",
+      "health_check": "",
+      "dependencies": [],
+      "environment": {}
+    }
+  ],
+  "networking": {
+    "internal_dns": "",
+    "external_dns": "",
+    "load_balancer": false,
+    "ssl_required": false
+  },
+  "deployment": {
+    "strategy": "rolling",
+    "replicas": 1,
+    "resources": {
+      "cpu": "500m",
+      "memory": "512Mi"
+    }
+  },
+  "notes": "Edit this file to define services, ports, and deployment configuration."
+}

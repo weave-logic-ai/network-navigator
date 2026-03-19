@@ -1,0 +1,12 @@
+# Ruflo Configuration - networknav
+project:
+  name: networknav
+  client: weavelogic
+
+topology: hierarchical
+max_agents: 8
+strategy: specialized
+
+memory:
+  backend: hybrid
+  hnsw: true

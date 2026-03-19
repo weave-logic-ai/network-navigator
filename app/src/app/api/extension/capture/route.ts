@@ -9,6 +9,7 @@ import { storePageCache } from '@/lib/capture/capture-store';
 import { wsServer } from '@/lib/websocket/ws-server';
 import { createCaptureConfirmedEvent } from '@/lib/websocket/ws-events';
 import { query } from '@/lib/db/client';
+import { triggerAutoScore } from '@/lib/scoring/auto-score';
 
 export async function POST(req: NextRequest) {
   return withExtensionAuth(req, async (_authReq, extensionId) => {
@@ -82,6 +83,21 @@ export async function POST(req: NextRequest) {
         }
       } catch {
         // Non-critical — task completion is best-effort
+      }
+
+      // Auto-score contact if this is a profile capture and we can resolve the contact
+      if (data.pageType === 'PROFILE' && data.url) {
+        try {
+          const contactResult = await query(
+            `SELECT id FROM contacts WHERE linkedin_url LIKE $1 LIMIT 1`,
+            [`%${data.url.replace(/https?:\/\/(www\.)?linkedin\.com/, '')}%`]
+          );
+          if (contactResult.rows.length > 0) {
+            triggerAutoScore(contactResult.rows[0].id);
+          }
+        } catch {
+          // Non-critical — scoring is best-effort on capture
+        }
       }
 
       const originalSize = Buffer.byteLength(data.html, 'utf-8');

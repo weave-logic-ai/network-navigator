@@ -5,6 +5,8 @@ import { readdir, stat } from 'fs/promises';
 import { join, resolve, basename } from 'path';
 import { getPool } from '@/lib/db/client';
 import { runImportPipeline, detectFileType } from '@/lib/import/pipeline';
+import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
+import { query as dbQuery } from '@/lib/db/client';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -141,11 +143,28 @@ export async function POST(request: NextRequest) {
       selfName || ''
     );
 
+    // Trigger auto-scoring for recently created/updated contacts
+    let scoringTriggered = false;
+    if (summary.newRecords > 0 || summary.updatedRecords > 0) {
+      try {
+        const recentContacts = await dbQuery<{ id: string }>(
+          `SELECT id FROM contacts WHERE updated_at >= NOW() - INTERVAL '2 minutes' AND is_archived = FALSE LIMIT 500`
+        );
+        if (recentContacts.rows.length > 0) {
+          triggerBatchAutoScore(recentContacts.rows.map(r => r.id));
+          scoringTriggered = true;
+        }
+      } catch {
+        // Non-critical
+      }
+    }
+
     return NextResponse.json({
       ...summary,
       directoryPath: resolvedPath,
       recognizedFiles: recognizedPaths.map((p) => basename(p)),
       skippedFiles: skippedFiles.length > 0 ? skippedFiles : undefined,
+      scoringTriggered,
     });
   } catch (error) {
     return NextResponse.json(

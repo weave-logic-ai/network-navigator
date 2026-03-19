@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { X, Search } from "lucide-react";
+import { RescoreAllButton } from "@/components/scoring/rescore-all-button";
 
 interface ToolbarProps {
   search: string;
@@ -95,6 +96,9 @@ export function ContactsTableToolbar({
           <X className="ml-1 h-3 w-3" />
         </Button>
       )}
+      <div className="ml-auto">
+        <RescoreAllButton />
+      </div>
     </div>
   );
 }

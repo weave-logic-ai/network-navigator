@@ -156,6 +156,13 @@ export function ContactsTable() {
                       <TierBadge tier={contact.tier} />
                     </TableCell>
                     <TableCell>
+                      {contact.referralTier ? (
+                        <TierBadge tier={contact.referralTier} />
+                      ) : (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
                       <Badge
                         variant={
                           contact.enrichmentStatus === "enriched"
