@@ -26,6 +26,10 @@ export interface Contact {
   persona?: string | null;
   enrichmentStatus?: string;
   outreachState?: string | null;
+  referralLikelihood?: number | null;
+  referralTier?: string | null;
+  referralPersona?: string | null;
+  behavioralPersona?: string | null;
 }
 
 export type TierValue = "gold" | "silver" | "bronze" | "watch" | null;

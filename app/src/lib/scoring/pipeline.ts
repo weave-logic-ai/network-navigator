@@ -1,4 +1,6 @@
 // Scoring pipeline - orchestrates scoring for single/batch contacts
+// Phase 1: Core 9-dimension composite scoring
+// Phase 2: Referral scoring (6 components)
 
 import { WeightManager } from './weight-manager';
 import { computeCompositeScore } from './composite';
@@ -13,8 +15,10 @@ import {
   ContentRelevanceScorer,
   GraphCentralityScorer,
 } from './scorers';
-import { DimensionScorer, ScoringRunResult, IcpCriteria } from './types';
+import { DimensionScorer, ScoringRunResult, IcpCriteria, ContactScoringData } from './types';
 import * as scoringQueries from '../db/queries/scoring';
+
+const behavioralScorer = new BehavioralScorer();
 
 const ALL_SCORERS: DimensionScorer[] = [
   new IcpFitScorer(),
@@ -23,7 +27,7 @@ const ALL_SCORERS: DimensionScorer[] = [
   new SignalBoostScorer(),
   new SkillsRelevanceScorer(),
   new NetworkProximityScorer(),
-  new BehavioralScorer(),
+  behavioralScorer,
   new ContentRelevanceScorer(),
   new GraphCentralityScorer(),
 ];
@@ -49,8 +53,42 @@ export async function scoreContact(
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
   const defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
 
-  // Compute composite score
+  // Phase 1: Compute composite score (9 dimensions)
   const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);
+
+  // Phase 2: Compute referral scoring
+  try {
+    const { computeReferralScore } = await import('./referral/referral-pipeline');
+    const baselines = await scoringQueries.getScoringBaselines();
+    const referralContext = {
+      p90Mutuals: baselines.p90Mutuals,
+      p90Edges: baselines.p90Edges,
+      totalClusters: baselines.totalClusters,
+      existingGoldScore: score.compositeScore,
+      existingRelationshipStrength:
+        score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0,
+    };
+
+    // Attach existing behavioral persona for referral persona classification
+    contact.existingGoldScore = score.compositeScore;
+    contact.existingRelationshipStrength = referralContext.existingRelationshipStrength;
+    contact.existingBehavioralPersona = score.behavioralPersona;
+
+    const referral = computeReferralScore(contact, referralContext);
+    score.referralLikelihood = referral.likelihood;
+    score.referralTier = referral.tier;
+    score.referralPersona = referral.persona;
+    score.referralDimensions = referral.dimensions;
+    score.referralSignals = referral.signals;
+  } catch (err) {
+    // Referral scoring is non-blocking — log and continue
+    console.error(`[scoring] Referral scoring failed for ${contactId}:`, err);
+  }
+
+  // Extract behavioral signals from the scorer instance
+  if (behavioralScorer.lastSignals) {
+    score.behavioralSignals = behavioralScorer.lastSignals;
+  }
 
   // Store score
   await scoringQueries.upsertContactScore(contactId, score);
@@ -85,39 +123,81 @@ export async function scoreBatch(
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
   const defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
 
+  // Pre-compute baselines for referral scoring (once for the batch)
+  let baselines = { p90Mutuals: 20, p90Edges: 10, totalClusters: 5 };
+  try {
+    baselines = await scoringQueries.getScoringBaselines();
+  } catch {
+    // Use defaults if baselines query fails
+  }
+
   const results: ScoringRunResult[] = [];
 
   for (const contactId of ids) {
-    const contact = await scoringQueries.getContactScoringData(contactId);
-    if (!contact) continue;
+    try {
+      const contact = await scoringQueries.getContactScoringData(contactId);
+      if (!contact) continue;
 
-    const availableDimensions = getAvailableDimensions(contact);
-    const weights = weightManager.redistributeWeights(availableDimensions);
+      const availableDimensions = getAvailableDimensions(contact);
+      const weights = weightManager.redistributeWeights(availableDimensions);
 
-    const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);
-    await scoringQueries.upsertContactScore(contactId, score);
+      // Phase 1
+      const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);
 
-    const icpFits: ScoringRunResult['icpFits'] = [];
-    for (const icp of icpProfiles) {
-      const icpScore = computeCompositeScore(
-        contact,
-        [new IcpFitScorer()],
-        { icp_fit: 1.0 },
-        icp.criteria
-      );
-      const fitScore = icpScore.compositeScore;
-      const breakdown = { dimensions: icpScore.dimensions };
-      await scoringQueries.upsertContactIcpFit(contactId, icp.id, fitScore, breakdown);
-      icpFits.push({ icpProfileId: icp.id, fitScore, breakdown });
+      // Phase 2: Referral scoring
+      try {
+        const { computeReferralScore } = await import('./referral/referral-pipeline');
+        contact.existingGoldScore = score.compositeScore;
+        contact.existingRelationshipStrength =
+          score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0;
+        contact.existingBehavioralPersona = score.behavioralPersona;
+
+        const referral = computeReferralScore(contact, {
+          ...baselines,
+          existingGoldScore: score.compositeScore,
+          existingRelationshipStrength: contact.existingRelationshipStrength,
+        });
+        score.referralLikelihood = referral.likelihood;
+        score.referralTier = referral.tier;
+        score.referralPersona = referral.persona;
+        score.referralDimensions = referral.dimensions;
+        score.referralSignals = referral.signals;
+      } catch {
+        // Non-blocking
+      }
+
+      // Behavioral signals
+      const behavioralDim = score.dimensions.find(d => d.dimension === 'behavioral');
+      if (behavioralDim?.metadata?.behavioralSignals) {
+        score.behavioralSignals = behavioralDim.metadata.behavioralSignals as typeof score.behavioralSignals;
+      }
+
+      await scoringQueries.upsertContactScore(contactId, score);
+
+      const icpFits: ScoringRunResult['icpFits'] = [];
+      for (const icp of icpProfiles) {
+        const icpScore = computeCompositeScore(
+          contact,
+          [new IcpFitScorer()],
+          { icp_fit: 1.0 },
+          icp.criteria
+        );
+        const fitScore = icpScore.compositeScore;
+        const breakdown = { dimensions: icpScore.dimensions };
+        await scoringQueries.upsertContactIcpFit(contactId, icp.id, fitScore, breakdown);
+        icpFits.push({ icpProfileId: icp.id, fitScore, breakdown });
+      }
+
+      results.push({ contactId, score, icpFits });
+    } catch (err) {
+      console.error(`[scoring] Failed to score contact ${contactId}:`, err);
     }
-
-    results.push({ contactId, score, icpFits });
   }
 
   return results;
 }
 
-function getAvailableDimensions(contact: import('./types').ContactScoringData): string[] {
+function getAvailableDimensions(contact: ContactScoringData): string[] {
   const available: string[] = [];
 
   // ICP fit is always available (may score 0 if no ICP)
@@ -144,10 +224,8 @@ function getAvailableDimensions(contact: import('./types').ContactScoringData): 
   // Network proximity: always available (uses degree)
   available.push('network_proximity');
 
-  // Behavioral: need observations or content
-  if (contact.observationCount > 0 || contact.contentTopics.length > 0 || contact.postingFrequency) {
-    available.push('behavioral');
-  }
+  // Behavioral: always include (enhanced scorer handles nulls internally)
+  available.push('behavioral');
 
   // Content relevance: need content topics or about text
   if (contact.contentTopics.length > 0 || contact.about) {

@@ -51,6 +51,13 @@ export function computeCompositeScore(
     behavioralPersona,
     dimensions,
     scoringVersion,
+    // Referral fields — populated separately by the pipeline after Phase 1
+    referralLikelihood: null,
+    referralTier: null,
+    referralPersona: null,
+    referralDimensions: null,
+    behavioralSignals: null,
+    referralSignals: null,
   };
 }
 
@@ -107,7 +114,12 @@ function classifyBehavioralPersona(
   const behavioral = dimMap.get('behavioral') || 0;
   const contentRelevance = dimMap.get('content_relevance') || 0;
 
-  // Super connector: very high network hub
+  // Data insufficient: check if behavioral scorer had enough data
+  const behavioralDim = dimensions.find(d => d.dimension === 'behavioral');
+  const behavioralMeta = behavioralDim?.metadata as { availableComponents?: number } | undefined;
+  if (behavioralMeta && (behavioralMeta.availableComponents ?? 0) < 2) return 'data-insufficient';
+
+  // Super connector: very high network hub + lots of connections
   if (networkHub > 0.7 && (contact.connectionsCount || 0) > 500) return 'super-connector';
 
   // Content creator: high content + behavioral
@@ -115,6 +127,14 @@ function classifyBehavioralPersona(
 
   // Silent influencer: high centrality but low behavioral
   if ((dimMap.get('graph_centrality') || 0) > 0.5 && behavioral < 0.3) return 'silent-influencer';
+
+  // Rising connector: recent connection, growing network
+  if ((contact.connectionsCount || 0) < 500 && contact.connectedAt) {
+    const connectedDays = Math.floor(
+      (Date.now() - new Date(contact.connectedAt).getTime()) / (1000 * 60 * 60 * 24)
+    );
+    if (connectedDays <= 180) return 'rising-connector';
+  }
 
   // Engaged professional: moderate behavioral
   if (behavioral > 0.3) return 'engaged-professional';
