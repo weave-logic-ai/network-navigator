@@ -6,7 +6,7 @@ import { join } from 'path';
 import { createImportSession } from '@/lib/db/queries/import';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
-const UPLOAD_DIR = join(process.cwd(), 'uploads', 'imports');
+const UPLOAD_DIR = join(process.env.NODE_ENV === 'production' ? '/data' : process.cwd(), 'uploads', 'imports');
 
 export async function POST(request: NextRequest) {
   try {

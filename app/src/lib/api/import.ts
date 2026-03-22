@@ -51,10 +51,14 @@ export async function uploadFiles(
 }
 
 export async function startImport(
-  sessionId: string
+  sessionId: string,
+  selfContactId?: string,
+  selfName?: string
 ): Promise<{ sessionId: string; status: string }> {
   return apiPost<{ sessionId: string; status: string }>("/api/import/csv", {
     sessionId,
+    selfContactId: selfContactId || "00000000-0000-0000-0000-000000000000",
+    selfName: selfName || "",
   });
 }
 
