@@ -28,7 +28,31 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ data: result });
+    // Flatten to match ImportSession interface expected by the UI
+    const { session, files } = result;
+    return NextResponse.json({
+      sessionId: session.id,
+      status: session.status,
+      totalFiles: session.total_files,
+      processedFiles: session.processed_files,
+      totalRecords: session.total_records,
+      processedRecords: session.new_records + session.updated_records + session.skipped_records,
+      newRecords: session.new_records,
+      updatedRecords: session.updated_records,
+      skippedRecords: session.skipped_records,
+      erroredRecords: session.error_count,
+      startedAt: session.started_at,
+      completedAt: session.completed_at,
+      error: session.errors?.length > 0 ? (session.errors[0] as { message?: string })?.message || null : null,
+      files: files.map((f) => ({
+        id: f.id,
+        fileName: f.filename,
+        fileSize: f.file_size_bytes,
+        status: f.status,
+        recordsTotal: f.record_count,
+        recordsProcessed: f.processed_count,
+      })),
+    });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to get session status', details: error instanceof Error ? error.message : undefined },
