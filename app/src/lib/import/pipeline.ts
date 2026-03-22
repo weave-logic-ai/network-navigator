@@ -99,10 +99,10 @@ export async function runImportPipeline(
 
   // Ensure the self-contact exists so edge FK constraints are satisfied
   await client.query(
-    `INSERT INTO contacts (id, first_name, last_name, source)
-     VALUES ($1, $2, '', 'self')
+    `INSERT INTO contacts (id, linkedin_url, first_name, last_name)
+     VALUES ($1, $2, $3, '')
      ON CONFLICT (id) DO NOTHING`,
-    [selfContactId, selfName || 'Me']
+    [selfContactId, `self:${selfContactId}`, selfName || 'Me']
   );
 
   // Sort files by processing order
