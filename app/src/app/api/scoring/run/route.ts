@@ -2,6 +2,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { scoreContact, scoreBatch } from '@/lib/scoring/pipeline';
+import { scoreContactWithProvenance } from '@/lib/ecc/causal-graph/scoring-adapter';
+import { ECC_FLAGS } from '@/lib/ecc/types';
 
 export async function POST(request: NextRequest) {
   try {
@@ -13,7 +15,9 @@ export async function POST(request: NextRequest) {
     };
 
     if (contactId) {
-      const result = await scoreContact(contactId, profileName);
+      const result = ECC_FLAGS.causalGraph
+        ? await scoreContactWithProvenance(contactId, profileName)
+        : await scoreContact(contactId, profileName);
       return NextResponse.json({ data: result });
     }
 

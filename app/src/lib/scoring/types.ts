@@ -157,6 +157,7 @@ export interface IcpCriteria {
   companySizeRanges?: string[];
   locations?: string[];
   minConnections?: number;
+  nicheKeywords?: string[];
 }
 
 export interface IcpProfile {

@@ -18,6 +18,7 @@ import {
 import { DimensionScorer, ScoringRunResult, IcpCriteria, ContactScoringData, CompositeScore } from './types';
 import * as scoringQueries from '../db/queries/scoring';
 import { checkAndGenerateTasks } from './task-triggers';
+import { resolveTaxonomyChain } from '../taxonomy/service';
 
 const behavioralScorer = new BehavioralScorer();
 
@@ -52,7 +53,23 @@ export async function scoreContact(
 
   // Load active ICP profiles
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
-  const defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
+  let defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
+
+  // Resolve taxonomy chain to enrich ICP criteria with vertical/niche context
+  if (icpProfiles[0]?.id) {
+    try {
+      const chain = await resolveTaxonomyChain(icpProfiles[0].id);
+      if (chain.vertical || chain.niche) {
+        defaultIcpCriteria = {
+          ...defaultIcpCriteria,
+          ...(chain.vertical ? { industries: [chain.vertical.name] } : {}),
+          ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
+        };
+      }
+    } catch {
+      // Taxonomy resolution is non-blocking — use raw criteria
+    }
+  }
 
   // Phase 1: Compute composite score (9 dimensions)
   const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);

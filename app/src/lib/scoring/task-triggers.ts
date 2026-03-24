@@ -1,8 +1,13 @@
 // Auto-generate tasks when a contact's score changes significantly.
 // Called from the scoring pipeline after upsertContactScore.
+// NOTE: When ECC_IMPULSES=true, task generation is handled by the impulse system
+// (see lib/ecc/impulses/handlers/task-generator.ts). This file remains as the
+// fallback path when the impulse system is disabled.
 
 import { query } from '@/lib/db/client';
 import type { CompositeScore } from './types';
+
+const ECC_IMPULSES_ENABLED = process.env.ECC_IMPULSES === 'true';
 
 /**
  * Check score transitions and generate tasks when thresholds are crossed.
@@ -13,6 +18,13 @@ export async function checkAndGenerateTasks(
   oldScore: CompositeScore | null,
   newScore: CompositeScore
 ): Promise<void> {
+  // When ECC impulse system is active, task generation is handled by impulse handlers.
+  // The impulse scoring-adapter emits tier_changed/persona_assigned impulses,
+  // and the task-generator handler creates the same tasks.
+  if (ECC_IMPULSES_ENABLED) {
+    return;
+  }
+
   // Fetch contact name for task titles
   const contactResult = await query<{ full_name: string }>(
     'SELECT full_name FROM contacts WHERE id = $1',

@@ -4,6 +4,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { enrichContact } from '@/lib/enrichment/waterfall';
+import { enrichContactWithChain } from '@/lib/ecc/exo-chain/enrichment-adapter';
+import { ECC_FLAGS } from '@/lib/ecc/types';
 import { getContactById, updateContact } from '@/lib/db/queries/contacts';
 import { FIELD_TO_COLUMN, FIELD_LABELS, isEffectivelyEmpty } from '@/lib/enrichment/field-map';
 import { triggerAutoScore } from '@/lib/scoring/auto-score';
@@ -108,10 +110,21 @@ export async function POST(request: NextRequest) {
         title: contact.title,
       };
 
-      const results = await enrichContact(enrichmentContact, {
-        targetFields: resolvedTargetFields,
-        budgetLimitCents,
-      });
+      let results;
+      let chainId: string | undefined;
+      if (ECC_FLAGS.exoChain) {
+        const chainResult = await enrichContactWithChain(enrichmentContact, {
+          targetFields: resolvedTargetFields,
+          budgetLimitCents,
+        });
+        results = chainResult.results;
+        chainId = chainResult._chainId;
+      } else {
+        results = await enrichContact(enrichmentContact, {
+          targetFields: resolvedTargetFields,
+          budgetLimitCents,
+        });
+      }
 
       // Build delta for review
       const contactRecord = contact as unknown as Record<string, unknown>;
@@ -136,6 +149,7 @@ export async function POST(request: NextRequest) {
           gatedFields: [...new Set(gatedFields)],
           totalCostCents: totalCost,
           results,
+          _chainId: chainId,
         });
       } else {
         // Legacy: auto-apply all fields that are selected in the delta
@@ -170,6 +184,7 @@ export async function POST(request: NextRequest) {
           delta,
           results,
           scoringTriggered: Object.keys(updates).length > 0,
+          _chainId: chainId,
         });
       }
     }

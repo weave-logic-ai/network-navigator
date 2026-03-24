@@ -56,6 +56,16 @@ export class IcpFitScorer implements DimensionScorer {
       }
     }
 
+    // Niche keywords match (bonus signals from parent niche)
+    if (icpCriteria.nicheKeywords && icpCriteria.nicheKeywords.length > 0) {
+      totalChecks++;
+      const text = [contact.headline, contact.about, ...(contact.tags || [])].join(' ').toLowerCase();
+      const matchCount = icpCriteria.nicheKeywords.filter(k => text.includes(k.toLowerCase())).length;
+      if (matchCount > 0) {
+        matchedChecks += matchCount / icpCriteria.nicheKeywords.length;
+      }
+    }
+
     // Min connections
     if (icpCriteria.minConnections && icpCriteria.minConnections > 0) {
       totalChecks++;

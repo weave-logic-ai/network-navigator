@@ -353,6 +353,7 @@ export async function createIcpProfile(data: {
   description?: string;
   criteria: IcpCriteria;
   weightOverrides?: Record<string, number>;
+  nicheId?: string;
 }): Promise<IcpProfile> {
   const result = await query<{
     id: string; name: string; description: string | null;
@@ -360,9 +361,9 @@ export async function createIcpProfile(data: {
     weight_overrides: Record<string, number>;
     created_at: Date; updated_at: Date;
   }>(
-    `INSERT INTO icp_profiles (name, description, criteria, weight_overrides)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [data.name, data.description ?? null, JSON.stringify(data.criteria), JSON.stringify(data.weightOverrides || {})]
+    `INSERT INTO icp_profiles (name, description, criteria, weight_overrides, niche_id)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [data.name, data.description ?? null, JSON.stringify(data.criteria), JSON.stringify(data.weightOverrides || {}), data.nicheId ?? null]
   );
   return mapIcpProfile(result.rows[0]);
 }

@@ -1,7 +1,6 @@
 // ICP/Niche discovery - cluster contacts by attributes and propose ICP profiles
 
 import * as graphQueries from '../db/queries/graph';
-import * as scoringQueries from '../db/queries/scoring';
 import { IcpDiscoveryResult } from './types';
 
 /**
@@ -77,22 +76,3 @@ export async function discoverIcps(
   return results;
 }
 
-/**
- * Create an ICP profile from a discovery result.
- */
-export async function createIcpFromDiscovery(
-  discovery: IcpDiscoveryResult
-): Promise<{ id: string; name: string }> {
-  const profile = await scoringQueries.createIcpProfile({
-    name: discovery.suggestedName,
-    description: discovery.description,
-    criteria: {
-      roles: discovery.criteria.titlePatterns,
-      industries: discovery.criteria.industries,
-      companySizeRanges: discovery.criteria.companySizes,
-      locations: discovery.criteria.locations,
-    },
-  });
-
-  return { id: profile.id, name: profile.name };
-}
