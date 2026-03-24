@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus, Pencil, Trash2 } from "lucide-react";
+import { Loader2, Plus, Pencil, Trash2, Sparkles } from "lucide-react";
 import { IcpBuilderModal } from "./icp-builder-modal";
+import { DiscoverModal } from "./discover-modal";
 
 interface IcpRow {
   id: string;
@@ -21,6 +22,14 @@ export function IcpsTable() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editIcp, setEditIcp] = useState<IcpRow | undefined>(undefined);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoveries, setDiscoveries] = useState<Array<{
+    suggestedName: string; description: string;
+    contactCount?: number; confidence?: number;
+    criteria?: Record<string, unknown>;
+    sampleContactIds?: string[];
+  }>>([]);
 
   const load = useCallback(async () => {
     try {
@@ -66,6 +75,48 @@ export function IcpsTable() {
     load();
   }
 
+  async function handleDiscover() {
+    setDiscoverOpen(true);
+    setDiscoverLoading(true);
+    setDiscoveries([]);
+    try {
+      const res = await fetch("/api/icp/discover");
+      if (!res.ok) return;
+      const json = await res.json();
+      setDiscoveries(json.data?.discoveries ?? []);
+    } finally {
+      setDiscoverLoading(false);
+    }
+  }
+
+  async function handleAcceptDiscoveries(items: Array<{
+    suggestedName: string; description: string;
+    criteria?: Record<string, unknown>;
+  }>) {
+    // Get niches for matching
+    const nichesRes = await fetch("/api/niches");
+    const nichesJson = await nichesRes.json();
+    const existingNiches: Array<{ id: string; name: string }> = nichesJson.data ?? [];
+
+    for (const d of items) {
+      const industries = (d.criteria as Record<string, unknown>)?.industries;
+      const nicheMatch = Array.isArray(industries)
+        ? existingNiches.find((n) =>
+            industries.some((ind: string) =>
+              n.name.toLowerCase().includes(ind.toLowerCase())
+            )
+          )
+        : undefined;
+
+      await fetch("/api/icp/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nicheId: nicheMatch?.id, discovery: d }),
+      });
+    }
+    load();
+  }
+
   function extractRoles(criteria: Record<string, unknown>): string[] {
     const roles = criteria.roles;
     if (Array.isArray(roles)) return roles as string[];
@@ -95,10 +146,20 @@ export function IcpsTable() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm">ICP Profiles ({icps.length})</CardTitle>
-            <Button size="sm" onClick={handleNew}>
-              <Plus className="h-3 w-3 mr-1" />
-              New ICP
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleDiscover}
+              >
+                <Sparkles className="h-3 w-3 mr-1" />
+                Discover from Network
+              </Button>
+              <Button size="sm" onClick={handleNew}>
+                <Plus className="h-3 w-3 mr-1" />
+                New ICP
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -210,6 +271,15 @@ export function IcpsTable() {
         onClose={() => setModalOpen(false)}
         onSave={handleSaved}
         icp={editIcp}
+      />
+
+      <DiscoverModal
+        open={discoverOpen}
+        onClose={() => setDiscoverOpen(false)}
+        title="Discover ICPs from Network"
+        discoveries={discoveries}
+        loading={discoverLoading}
+        onAccept={handleAcceptDiscoveries}
       />
     </>
   );

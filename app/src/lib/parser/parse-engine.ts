@@ -13,7 +13,8 @@ import { FeedParser } from './parsers/feed-parser';
 import { CompanyParser } from './parsers/company-parser';
 import { ConnectionsParser } from './parsers/connections-parser';
 import { MessagesParser } from './parsers/messages-parser';
-import type { ParseResult } from './types';
+import type { ParseResult, SearchParseData, ProfileParseData } from './types';
+import { upsertContactFromProfile, upsertContactsFromSearch } from './contact-upsert';
 
 // Register all parsers
 parserRegistry.register(new ProfileParser());
@@ -139,6 +140,32 @@ export async function parseCachedPage(cacheId: string): Promise<ParseResult> {
      WHERE id = $2`,
     [config.version, cacheId]
   );
+
+  // Upsert contacts from parsed data (fire-and-forget for non-blocking)
+  if (result.success && result.data) {
+    try {
+      if (pageType === 'SEARCH_PEOPLE' || pageType === 'SEARCH_CONTENT') {
+        const searchData = result.data as SearchParseData;
+        if (searchData.results && searchData.results.length > 0) {
+          const upsertResult = await upsertContactsFromSearch(searchData.results, row.url);
+          // Store import counts in result metadata
+          result.errors = result.errors || [];
+          if (upsertResult.created > 0 || upsertResult.updated > 0) {
+            result.errors.push(
+              `Imported: ${upsertResult.created} new, ${upsertResult.updated} updated, ${upsertResult.skipped} skipped`
+            );
+          }
+        }
+      } else if (pageType === 'PROFILE') {
+        const profileData = result.data as ProfileParseData;
+        if (profileData.name || profileData.headline) {
+          await upsertContactFromProfile(profileData, row.url, result.overallConfidence);
+        }
+      }
+    } catch {
+      // Non-critical — don't fail the parse result if upsert fails
+    }
+  }
 
   return {
     ...result,

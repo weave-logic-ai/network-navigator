@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TierBadge } from "@/components/scoring/tier-badge";
+import { ContactTooltip } from "@/components/contacts/contact-tooltip";
 import { Sparkles, ExternalLink, Search, ChevronLeft, ChevronRight, Loader2, Users } from "lucide-react";
 
 interface Contact {
@@ -78,6 +79,8 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
         sort: sort, order: sort === "score" ? "desc" : "asc",
       });
       if (search.trim()) p.set("search", search.trim());
+      if (selectedIcp) p.set("icpId", selectedIcp);
+      else if (selectedNiche) p.set("nicheId", selectedNiche);
       const res = await fetch(`/api/contacts?${p.toString()}`);
       if (res.ok) {
         const json = await res.json();
@@ -85,7 +88,7 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
         setPag(json.pagination ?? { page: 1, limit: 20, total: 0, totalPages: 0 });
       }
     } catch { /* network error */ } finally { setLoading(false); }
-  }, [page, search, sort]);
+  }, [page, search, sort, selectedNiche, selectedIcp]);
 
   useEffect(() => { setPage(1); }, [selectedNiche, selectedIcp, selectedOfferings, search, sort]);
   useEffect(() => { fetchContacts(); }, [fetchContacts]);
@@ -259,7 +262,9 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
                   <TableRow key={c.id}>
                     <TableCell><Checkbox checked={selected.has(c.id)} onClick={() => toggleSelect(c.id)} label={`Select ${nameOf(c)}`} /></TableCell>
                     <TableCell>
-                      <Link href={`/contacts/${c.id}`} className="text-xs font-medium hover:underline text-primary">{nameOf(c)}</Link>
+                      <ContactTooltip contactId={c.id}>
+                        <Link href={`/contacts/${c.id}`} className="text-xs font-medium hover:underline text-primary">{nameOf(c)}</Link>
+                      </ContactTooltip>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground truncate max-w-[120px] hidden sm:table-cell">{c.title || "\u2014"}</TableCell>
                     <TableCell className="text-xs text-muted-foreground truncate max-w-[120px] hidden md:table-cell">{c.currentCompany || "\u2014"}</TableCell>

@@ -11,22 +11,31 @@ import type { DiscoveredIcp, SaveDiscoveryResult } from './types';
  */
 export async function saveDiscoveredIcp(
   discovery: DiscoveredIcp,
-  nicheId: string
+  nicheId: string | null
 ): Promise<SaveDiscoveryResult> {
-  // Check 1: Name uniqueness within niche
-  const nameCheck = await query<{ id: string }>(
-    `SELECT id FROM icp_profiles WHERE niche_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
-    [nicheId, discovery.suggestedName]
-  );
+  // Check 1: Name uniqueness (within niche if set, or globally)
+  const nameCheck = nicheId
+    ? await query<{ id: string }>(
+        `SELECT id FROM icp_profiles WHERE niche_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1`,
+        [nicheId, discovery.suggestedName]
+      )
+    : await query<{ id: string }>(
+        `SELECT id FROM icp_profiles WHERE niche_id IS NULL AND LOWER(name) = LOWER($1) LIMIT 1`,
+        [discovery.suggestedName]
+      );
   if (nameCheck.rows.length > 0) {
     return { action: 'skipped', existingId: nameCheck.rows[0].id, reason: 'duplicate_name' };
   }
 
-  // Check 2: Criteria overlap with existing ICPs in this niche
-  const existingIcps = await query<{ id: string; criteria: Record<string, unknown> }>(
-    `SELECT id, criteria FROM icp_profiles WHERE niche_id = $1`,
-    [nicheId]
-  );
+  // Check 2: Criteria overlap with existing ICPs in this niche (or all unassigned)
+  const existingIcps = nicheId
+    ? await query<{ id: string; criteria: Record<string, unknown> }>(
+        `SELECT id, criteria FROM icp_profiles WHERE niche_id = $1`,
+        [nicheId]
+      )
+    : await query<{ id: string; criteria: Record<string, unknown> }>(
+        `SELECT id, criteria FROM icp_profiles WHERE niche_id IS NULL`
+      );
 
   for (const existing of existingIcps.rows) {
     const overlap = computeCriteriaOverlap(

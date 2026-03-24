@@ -52,7 +52,17 @@ export async function PUT(
 
   try {
     const body = await request.json();
-    const niche = await updateNiche(id, body);
+    // Map camelCase from frontend to snake_case for DB
+    const dbPayload: Record<string, unknown> = {};
+    if (body.name !== undefined) dbPayload.name = body.name;
+    if (body.description !== undefined) dbPayload.description = body.description;
+    if (body.industryId !== undefined) dbPayload.industry_id = body.industryId;
+    if (body.industry_id !== undefined) dbPayload.industry_id = body.industry_id;
+    if (body.keywords !== undefined) dbPayload.keywords = body.keywords;
+    if (body.affordability !== undefined) dbPayload.affordability = body.affordability;
+    if (body.fitability !== undefined) dbPayload.fitability = body.fitability;
+    if (body.buildability !== undefined) dbPayload.buildability = body.buildability;
+    const niche = await updateNiche(id, dbPayload);
 
     if (!niche) {
       return NextResponse.json({ error: 'Niche not found or no valid fields' }, { status: 404 });

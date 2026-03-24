@@ -55,14 +55,14 @@ export async function scoreContact(
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
   let defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
 
-  // Resolve taxonomy chain to enrich ICP criteria with vertical/niche context
+  // Resolve taxonomy chain to enrich ICP criteria with industry/niche context
   if (icpProfiles[0]?.id) {
     try {
       const chain = await resolveTaxonomyChain(icpProfiles[0].id);
-      if (chain.vertical || chain.niche) {
+      if (chain.industry || chain.niche) {
         defaultIcpCriteria = {
           ...defaultIcpCriteria,
-          ...(chain.vertical ? { industries: [chain.vertical.name] } : {}),
+          ...(chain.industry ? { industries: [chain.industry.name] } : {}),
           ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
         };
       }

@@ -101,8 +101,12 @@ export default function ExtensionPage() {
   const [parsing, setParsing] = useState<string | null>(null);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [generatingToken, setGeneratingToken] = useState(false);
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Capture | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState(false);
   const [autoParse, setAutoParse] = useState(() => {
     if (typeof window !== "undefined") {
       return localStorage.getItem("ext-auto-parse") === "true";
@@ -211,11 +215,15 @@ export default function ExtensionPage() {
 
   async function handleGenerateToken() {
     setGeneratingToken(true);
+    setNewToken(null);
+    setTokenCopied(false);
     try {
       const res = await fetch("/api/extension/tokens", {
         method: "POST",
       });
       if (res.ok) {
+        const json = await res.json();
+        setNewToken(json.data?.token ?? null);
         await loadData();
       }
     } catch {
@@ -223,6 +231,27 @@ export default function ExtensionPage() {
     } finally {
       setGeneratingToken(false);
     }
+  }
+
+  async function handleRevokeToken() {
+    if (!revokeTarget) return;
+    setRevoking(true);
+    try {
+      await fetch(`/api/extension/tokens/${revokeTarget}`, { method: "DELETE" });
+      setRevokeTarget(null);
+      await loadData();
+    } catch {
+      // Handle error
+    } finally {
+      setRevoking(false);
+    }
+  }
+
+  function copyToken() {
+    if (!newToken) return;
+    navigator.clipboard.writeText(newToken);
+    setTokenCopied(true);
+    setTimeout(() => setTokenCopied(false), 2000);
   }
 
   async function handleDelete() {
@@ -449,22 +478,30 @@ export default function ExtensionPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {tokens.length === 0 ? (
+              {tokens.filter((t) => !t.isRevoked).length === 0 ? (
                 <p className="text-sm text-muted-foreground mb-3">
-                  No tokens generated yet.
+                  No active tokens. Generate one to connect the extension.
                 </p>
               ) : (
                 <div className="space-y-2 mb-3">
-                  {tokens.map((t) => (
+                  {tokens.filter((t) => !t.isRevoked).map((t) => (
                     <div key={t.extensionId} className="text-xs border rounded p-2">
                       <div className="flex items-center justify-between">
                         <code className="font-mono">{t.token}</code>
-                        <Badge
-                          variant={t.isRevoked ? "destructive" : "default"}
-                          className="text-[9px]"
-                        >
-                          {t.isRevoked ? "Revoked" : "Active"}
-                        </Badge>
+                        <div className="flex items-center gap-1">
+                          <Badge variant="default" className="text-[9px]">
+                            Active
+                          </Badge>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-5 w-5 p-0 text-muted-foreground hover:text-destructive"
+                            onClick={() => setRevokeTarget(t.extensionId)}
+                            title="Revoke token"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
                       </div>
                       <p className="text-muted-foreground mt-1">
                         {t.lastUsedAt
@@ -514,6 +551,63 @@ export default function ExtensionPage() {
           )}
         </div>
       </div>
+
+      {/* New Token Dialog */}
+      <Dialog open={!!newToken} onOpenChange={(open) => { if (!open) setNewToken(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Token Generated</DialogTitle>
+            <DialogDescription>
+              Copy this token now. It will not be shown again.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border bg-muted/30 p-4">
+            <code className="font-mono text-sm break-all select-all">{newToken}</code>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setNewToken(null)}>
+              Close
+            </Button>
+            <Button onClick={copyToken}>
+              {tokenCopied ? (
+                <>
+                  <CheckCircle className="mr-1.5 h-3.5 w-3.5" />
+                  Copied!
+                </>
+              ) : (
+                "Copy Token"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoke Token Confirmation Dialog */}
+      <Dialog open={!!revokeTarget} onOpenChange={(open) => { if (!open) setRevokeTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke Token</DialogTitle>
+            <DialogDescription>
+              This will permanently revoke this extension token. Any extension using it will lose access immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokeTarget(null)} disabled={revoking}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleRevokeToken} disabled={revoking}>
+              {revoking ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke Token"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>

@@ -1,17 +1,24 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Treemap, ResponsiveContainer, Tooltip } from "recharts";
+import { Button } from "@/components/ui/button";
 
-const TIER_COLORS: Record<string, string> = {
-  gold: "#eab308",
-  silver: "#9ca3af",
-  bronze: "#f97316",
-  watch: "#3b82f6",
-  unscored: "#6b7280",
-};
+const NICHE_COLORS = [
+  "#8b5cf6", "#06b6d4", "#10b981", "#f59e0b",
+  "#ef4444", "#ec4899", "#6366f1", "#14b8a6",
+  "#f97316", "#84cc16", "#0ea5e9", "#a855f7",
+];
+
+const ICP_COLORS = [
+  "#6366f1", "#8b5cf6", "#a855f7", "#d946ef",
+  "#ec4899", "#f43f5e", "#ef4444", "#f97316",
+  "#f59e0b", "#eab308", "#84cc16", "#22c55e",
+  "#10b981", "#14b8a6", "#06b6d4", "#0ea5e9",
+];
 
 interface NicheData {
+  id?: string;
   name: string;
   contactCount: number;
   avgScore: number;
@@ -21,6 +28,7 @@ interface NicheData {
 interface IcpData {
   id: string;
   name: string;
+  nicheId?: string | null;
   matchCount: number;
   firstDegreeCount: number;
   secondDegreeCount: number;
@@ -33,27 +41,17 @@ interface IcpTreemapProps {
   onIcpSelect: (id: string | null) => void;
 }
 
-function getDominantTier(breakdown: Record<string, number>): string {
-  let maxTier = "unscored";
-  let maxCount = 0;
-  for (const [tier, count] of Object.entries(breakdown)) {
-    if (tier !== "unscored" && count > maxCount) {
-      maxTier = tier;
-      maxCount = count;
-    }
-  }
-  return maxTier;
-}
-
 interface TreemapTooltipProps {
   active?: boolean;
   payload?: Array<{
     payload: {
       name: string;
       size: number;
-      avgScore?: number;
+      type?: string;
       matchCount?: number;
       firstDegreeCount?: number;
+      contactCount?: number;
+      avgScore?: number;
     };
   }>;
 }
@@ -65,12 +63,12 @@ function TreemapTooltipContent({ active, payload }: TreemapTooltipProps) {
     <div className="rounded-md border bg-popover px-3 py-2 text-sm shadow-md">
       <p className="font-medium">{d.name}</p>
       <p className="text-muted-foreground">
-        {d.matchCount !== undefined ? `${d.matchCount} matches` : `${d.size} contacts`}
+        {d.matchCount !== undefined ? `${d.matchCount} matches` : `${d.contactCount ?? d.size} contacts`}
       </p>
-      {d.avgScore !== undefined && (
-        <p className="text-muted-foreground">Avg: {d.avgScore.toFixed(1)}</p>
+      {d.avgScore !== undefined && d.avgScore > 0 && (
+        <p className="text-muted-foreground">Avg score: {d.avgScore.toFixed(1)}</p>
       )}
-      {d.firstDegreeCount !== undefined && (
+      {d.firstDegreeCount !== undefined && d.firstDegreeCount > 0 && (
         <p className="text-muted-foreground">1st degree: {d.firstDegreeCount}</p>
       )}
     </div>
@@ -87,21 +85,18 @@ interface TreemapContentProps {
 }
 
 function CustomTreemapContent({ x = 0, y = 0, width = 0, height = 0, name = "", color = "#6b7280" }: TreemapContentProps) {
-  if (width < 30 || height < 20) return null;
+  if (width < 20 || height < 16) return null;
   return (
     <g>
       <rect
-        x={x}
-        y={y}
-        width={width}
-        height={height}
+        x={x} y={y} width={width} height={height}
         fill={color}
         stroke="hsl(var(--background))"
         strokeWidth={2}
         rx={4}
         style={{ cursor: "pointer" }}
       />
-      {width > 50 && height > 30 && (
+      {width > 40 && height > 24 && (
         <text
           x={x + width / 2}
           y={y + height / 2}
@@ -109,7 +104,7 @@ function CustomTreemapContent({ x = 0, y = 0, width = 0, height = 0, name = "", 
           dominantBaseline="central"
           fill="white"
           fontSize={Math.min(12, width / 8)}
-          fontWeight={500}
+          fontWeight={600}
         >
           {name.length > width / 7 ? `${name.slice(0, Math.floor(width / 7))}...` : name}
         </text>
@@ -124,54 +119,97 @@ export function IcpTreemap({
   selectedIcp,
   onIcpSelect,
 }: IcpTreemapProps) {
+  const [mode, setMode] = useState<"niches" | "icps">("niches");
+
   const treeData = useMemo(() => {
-    // If ICP profiles exist, show ICPs as primary rectangles
-    if (icps.length > 0) {
-      return icps.map((icp) => ({
+    if (mode === "icps") {
+      const filtered = icps.filter(i => i.matchCount > 0);
+      if (filtered.length === 0) {
+        return icps.map((icp, i) => ({
+          name: icp.name,
+          size: 1,
+          color: selectedIcp === icp.id ? ICP_COLORS[i % ICP_COLORS.length] : selectedIcp ? `${ICP_COLORS[i % ICP_COLORS.length]}40` : ICP_COLORS[i % ICP_COLORS.length],
+          matchCount: icp.matchCount,
+          firstDegreeCount: icp.firstDegreeCount,
+          icpId: icp.id,
+        }));
+      }
+      return filtered.map((icp, i) => ({
         name: icp.name,
-        size: Math.max(icp.matchCount, 1),
-        color: selectedIcp === icp.id ? "#8b5cf6" : selectedIcp ? "#8b5cf640" : "#8b5cf6",
+        size: icp.matchCount,
+        color: selectedIcp === icp.id ? ICP_COLORS[i % ICP_COLORS.length] : selectedIcp ? `${ICP_COLORS[i % ICP_COLORS.length]}40` : ICP_COLORS[i % ICP_COLORS.length],
         matchCount: icp.matchCount,
         firstDegreeCount: icp.firstDegreeCount,
         icpId: icp.id,
       }));
     }
 
-    // Otherwise show niches
-    return niches.map((n) => ({
+    // Niche mode
+    const filtered = niches.filter(n => n.contactCount > 0);
+    if (filtered.length === 0) {
+      return niches.map((n, i) => ({
+        name: n.name,
+        size: 1,
+        color: NICHE_COLORS[i % NICHE_COLORS.length],
+        contactCount: 0,
+        avgScore: n.avgScore,
+      }));
+    }
+    return filtered.map((n, i) => ({
       name: n.name,
       size: n.contactCount,
-      color: TIER_COLORS[getDominantTier(n.tierBreakdown)] || "#6b7280",
+      color: NICHE_COLORS[i % NICHE_COLORS.length],
+      contactCount: n.contactCount,
       avgScore: n.avgScore,
     }));
-  }, [niches, icps, selectedIcp]);
+  }, [niches, icps, selectedIcp, mode]);
 
   if (treeData.length === 0) {
     return (
       <div className="flex h-[350px] items-center justify-center text-sm text-muted-foreground">
-        No data available for treemap. Import contacts first.
+        No data available. Create niches or ICPs first.
       </div>
     );
   }
 
   return (
-    <ResponsiveContainer width="100%" height={350}>
-      <Treemap
-        data={treeData}
-        dataKey="size"
-        nameKey="name"
-        aspectRatio={4 / 3}
-        stroke="hsl(var(--background))"
-        content={<CustomTreemapContent />}
-        onClick={(node) => {
-          const data = node as unknown as { icpId?: string };
-          if (data.icpId) {
-            onIcpSelect(selectedIcp === data.icpId ? null : data.icpId);
-          }
-        }}
-      >
-        <Tooltip content={<TreemapTooltipContent />} />
-      </Treemap>
-    </ResponsiveContainer>
+    <div>
+      <div className="flex gap-1 mb-3">
+        <Button
+          size="sm"
+          variant={mode === "niches" ? "default" : "outline"}
+          className="h-7 text-xs"
+          onClick={() => setMode("niches")}
+        >
+          By Niche
+        </Button>
+        <Button
+          size="sm"
+          variant={mode === "icps" ? "default" : "outline"}
+          className="h-7 text-xs"
+          onClick={() => setMode("icps")}
+        >
+          By ICP
+        </Button>
+      </div>
+      <ResponsiveContainer width="100%" height={350}>
+        <Treemap
+          data={treeData}
+          dataKey="size"
+          nameKey="name"
+          aspectRatio={4 / 3}
+          stroke="hsl(var(--background))"
+          content={<CustomTreemapContent />}
+          onClick={(node) => {
+            const data = node as unknown as { icpId?: string };
+            if (data.icpId) {
+              onIcpSelect(selectedIcp === data.icpId ? null : data.icpId);
+            }
+          }}
+        >
+          <Tooltip content={<TreemapTooltipContent />} />
+        </Treemap>
+      </ResponsiveContainer>
+    </div>
   );
 }

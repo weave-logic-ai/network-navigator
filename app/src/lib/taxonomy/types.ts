@@ -1,6 +1,6 @@
-// Taxonomy hierarchy types: Vertical -> Niche -> ICP
+// Taxonomy hierarchy types: Industry → Niche → ICP → Offering
 
-export interface Vertical {
+export interface Industry {
   id: string;
   name: string;
   slug: string;
@@ -10,14 +10,14 @@ export interface Vertical {
   updatedAt: string;
 }
 
-export interface VerticalWithNiches extends Vertical {
+export interface IndustryWithNiches extends Industry {
   niches: NicheProfile[];
   nicheCount: number;
 }
 
 export interface NicheProfile {
   id: string;
-  verticalId: string | null;
+  industryId: string | null;
   name: string;
   description: string | null;
   keywords: string[];
@@ -35,7 +35,7 @@ export interface NicheProfile {
 export interface NicheWithIcps extends NicheProfile {
   icps: IcpProfileWithNiche[];
   icpCount: number;
-  vertical?: Vertical;
+  industry?: Industry;
 }
 
 export interface IcpProfileWithNiche {
@@ -51,7 +51,7 @@ export interface IcpProfileWithNiche {
 }
 
 export interface TaxonomyChain {
-  vertical: Vertical | null;
+  industry: Industry | null;
   niche: NicheProfile | null;
   icp: IcpProfileWithNiche | null;
 }

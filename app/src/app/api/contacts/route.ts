@@ -26,6 +26,8 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get('search') || undefined;
     const tagsParam = searchParams.get('tags');
     const tags = tagsParam ? tagsParam.split(',').map((t) => t.trim()) : undefined;
+    const icpId = searchParams.get('icpId') || undefined;
+    const nicheId = searchParams.get('nicheId') || undefined;
 
     const result = await listContacts({
       page,
@@ -36,6 +38,8 @@ export async function GET(request: NextRequest) {
       company,
       tags,
       search,
+      icpId,
+      nicheId,
     });
 
     return NextResponse.json({

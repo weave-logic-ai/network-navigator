@@ -11,6 +11,8 @@ interface ListContactsOptions {
   company?: string;
   tags?: string[];
   search?: string;
+  icpId?: string;
+  nicheId?: string;
   includeArchived?: boolean;
 }
 
@@ -72,6 +74,8 @@ export async function listContacts(
     company,
     tags,
     search,
+    icpId,
+    nicheId,
     includeArchived = false,
   } = options;
 
@@ -107,6 +111,44 @@ export async function listContacts(
     );
     params.push(`%${search}%`);
     paramIdx++;
+  }
+
+  // ICP filter: match contacts against ICP criteria (roles + industries) in real-time
+  if (icpId) {
+    // Build a subquery that matches contact title/headline against ICP role patterns
+    // and company industry against ICP industries
+    conditions.push(`EXISTS (
+      SELECT 1 FROM icp_profiles ip
+      WHERE ip.id = $${paramIdx++}
+        AND (
+          -- Match role patterns against contact title
+          EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(ip.criteria->'roles') AS role
+            WHERE c.title ILIKE '%' || role || '%'
+               OR c.headline ILIKE '%' || role || '%'
+          )
+          OR
+          -- Match industry keywords against company industry or contact headline
+          EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(ip.criteria->'industries') AS ind
+            WHERE c.headline ILIKE '%' || ind || '%'
+               OR c.current_company ILIKE '%' || ind || '%'
+          )
+        )
+    )`);
+    params.push(icpId);
+  }
+
+  // Niche filter: match contacts against niche keywords (require >=2 hits for specificity)
+  if (nicheId && !icpId) {
+    conditions.push(`(
+      SELECT count(*) FROM niche_profiles np, unnest(np.keywords) AS kw
+      WHERE np.id = $${paramIdx++}
+        AND (c.title ILIKE '%' || kw || '%'
+             OR c.headline ILIKE '%' || kw || '%'
+             OR c.current_company ILIKE '%' || kw || '%')
+    ) >= COALESCE((SELECT CASE WHEN array_length(np2.keywords, 1) > 2 THEN 2 ELSE 1 END FROM niche_profiles np2 WHERE np2.id = $${paramIdx - 1}), 1)`);
+    params.push(nicheId);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

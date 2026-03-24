@@ -30,13 +30,13 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { nicheId, discovery } = body as {
-      nicheId: string;
+      nicheId?: string;
       discovery: Parameters<typeof saveDiscoveredIcp>[0];
     };
 
-    if (!nicheId || !discovery) {
+    if (!discovery) {
       return NextResponse.json(
-        { error: 'nicheId and discovery are required' },
+        { error: 'discovery is required' },
         { status: 400 }
       );
     }
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await saveDiscoveredIcp(discovery, nicheId);
+    const result = await saveDiscoveredIcp(discovery, nicheId ?? null);
     return NextResponse.json({ data: result }, { status: result.action === 'created' ? 201 : 200 });
   } catch (error) {
     return NextResponse.json(

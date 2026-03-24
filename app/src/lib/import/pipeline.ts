@@ -19,6 +19,7 @@ import { importEducation } from './education-importer';
 import { importSkills } from './skills-importer';
 import { importCompanyFollows } from './company-follows-importer';
 import { generateEmbeddings } from './embedding-generator';
+import { seedTaxonomyIfEmpty } from '../taxonomy/seed';
 
 // File type detection from filename
 function detectFileType(filename: string): ImportFileType | null {
@@ -189,6 +190,13 @@ export async function runImportPipeline(
     await generateEmbeddings(client);
   } catch {
     allErrors.push({ message: 'Embedding generation failed (non-critical)' });
+  }
+
+  // Post-import: seed taxonomy if empty (industries, niches, offerings, ICPs)
+  try {
+    await seedTaxonomyIfEmpty(client);
+  } catch {
+    allErrors.push({ message: 'Taxonomy seed failed (non-critical)' });
   }
 
   // Complete session

@@ -54,6 +54,7 @@ interface Task {
   task_type: string;
   status: string;
   priority: number;
+  url: string | null;
   due_date: string | null;
   contact_name: string | null;
   created_at: string;
@@ -114,7 +115,19 @@ function TaskItem({
             <p
               className={`text-sm font-medium truncate ${task.status === "completed" ? "line-through text-muted-foreground" : ""}`}
             >
-              {task.title}
+              {task.url ? (
+                <a
+                  href={task.url}
+                  target={task.url.startsWith("http") ? "_blank" : "_self"}
+                  rel="noopener noreferrer"
+                  className="hover:underline text-primary"
+                >
+                  {task.title}
+                  {task.url.startsWith("http") && <ExternalLink className="h-3 w-3 inline ml-1" />}
+                </a>
+              ) : (
+                task.title
+              )}
             </p>
             <div className="flex flex-wrap items-center gap-1.5 mt-1">
               <Badge variant="outline" className="text-[10px] px-1.5 py-0">
@@ -421,6 +434,7 @@ export default function GoalsTasksPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showGoalForm, setShowGoalForm] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [showStandaloneForm, setShowStandaloneForm] = useState(false);
   const [newGoalTitle, setNewGoalTitle] = useState("");
   const [newGoalDesc, setNewGoalDesc] = useState("");
@@ -583,8 +597,58 @@ export default function GoalsTasksPage() {
     }
   }
 
-  function handleGenerateGoals() {
-    alert("Goal suggestions from Claude are not available yet. This feature will call POST /api/claude/suggestions when the API is ready.");
+  async function handleGenerateGoals() {
+    setGenerating(true);
+    try {
+      // Run tick with tasks page context to generate goals
+      const res = await fetch("/api/goals/tick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: "tasks" }),
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      const newGoals = json.data?.newGoals ?? [];
+
+      if (newGoals.length === 0) {
+        // Try broader context — discover page checks find more
+        const res2 = await fetch("/api/goals/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page: "discover" }),
+        });
+        if (res2.ok) {
+          const json2 = await res2.json();
+          const more = json2.data?.newGoals ?? [];
+          if (more.length === 0) {
+            // No goals found — auto-accept any pending suggested goals
+            const sugRes = await fetch("/api/goals?status=suggested");
+            if (sugRes.ok) {
+              const sugJson = await sugRes.json();
+              const suggested = sugJson.data ?? [];
+              for (const g of suggested.slice(0, 3)) {
+                await fetch(`/api/goals/${g.id}/accept`, { method: "POST" });
+              }
+            }
+          }
+        }
+      } else {
+        // Auto-accept generated goals
+        const goalsRes = await fetch("/api/goals?status=suggested");
+        if (goalsRes.ok) {
+          const goalsJson = await goalsRes.json();
+          for (const g of (goalsJson.data ?? []).slice(0, 3)) {
+            await fetch(`/api/goals/${g.id}/accept`, { method: "POST" });
+          }
+        }
+      }
+
+      loadGoals();
+    } catch {
+      // silent
+    } finally {
+      setGenerating(false);
+    }
   }
 
   // ── Filter ──
@@ -639,8 +703,13 @@ export default function GoalsTasksPage() {
               variant="outline"
               size="sm"
               onClick={handleGenerateGoals}
+              disabled={generating}
             >
-              <Sparkles className="h-4 w-4 mr-1" />
+              {generating ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4 mr-1" />
+              )}
               Generate
             </Button>
             <Button size="sm" onClick={() => setShowGoalForm(true)}>

@@ -24,6 +24,7 @@ const NICHE_COLORS = [
 ];
 
 interface NicheData {
+  id?: string;
   name: string;
   contactCount: number;
   avgScore: number;
@@ -34,11 +35,14 @@ interface NicheData {
 interface WedgeChartProps {
   niches: NicheData[];
   totalContacts: number;
+  addressedCount?: number;
+  unaddressedCount?: number;
   selectedNiche: string | null;
   onNicheSelect: (name: string | null) => void;
 }
 
 interface WedgeArc {
+  id: string;
   name: string;
   contactCount: number;
   avgScore: number;
@@ -83,6 +87,8 @@ const tooltipStyles = {
 function WedgeChartInner({
   niches,
   totalContacts,
+  addressedCount = 0,
+  unaddressedCount = 0,
   selectedNiche,
   onNicheSelect,
   width,
@@ -129,6 +135,7 @@ function WedgeChartInner({
       const dynamicOuter = scoreScale(n.avgScore);
 
       return {
+        id: n.id || n.name,
         name: n.name,
         contactCount: n.contactCount,
         avgScore: n.avgScore,
@@ -158,7 +165,7 @@ function WedgeChartInner({
         arcs.push({
           tier,
           count,
-          parentName: wedge.name,
+          parentName: wedge.id,
           startAngle: tierAngle,
           endAngle: tierAngle + tierSweep,
           innerRadius: wedge.outerRadius + 2,
@@ -199,8 +206,8 @@ function WedgeChartInner({
         <Group top={centerY} left={centerX}>
           {/* Main niche wedges */}
           {wedgeArcs.map((arc) => {
-            const isSelected = selectedNiche === arc.name;
-            const isHovered = hoveredNiche === arc.name;
+            const isSelected = selectedNiche === arc.id;
+            const isHovered = hoveredNiche === arc.id;
             const isDimmed = selectedNiche && !isSelected;
             const opacity = isDimmed ? 0.25 : isHovered ? 1 : 0.85;
 
@@ -218,9 +225,9 @@ function WedgeChartInner({
                 cornerRadius={3}
                 cursor="pointer"
                 onClick={() =>
-                  onNicheSelect(selectedNiche === arc.name ? null : arc.name)
+                  onNicheSelect(selectedNiche === arc.id ? null : arc.id)
                 }
-                onMouseEnter={() => setHoveredNiche(arc.name)}
+                onMouseEnter={() => setHoveredNiche(arc.id)}
                 onMouseLeave={() => {
                   setHoveredNiche(null);
                   hideTooltip();
@@ -287,19 +294,30 @@ function WedgeChartInner({
             fill="hsl(var(--foreground))"
             fontSize={22}
             fontWeight={700}
-            dy={-6}
+            dy={-14}
           >
-            {totalContacts}
+            {addressedCount > 0 ? `${Math.round((addressedCount / (totalContacts || 1)) * 100)}%` : String(totalContacts)}
           </Text>
           <Text
             textAnchor="middle"
             verticalAnchor="middle"
             fill="hsl(var(--muted-foreground))"
-            fontSize={11}
-            dy={14}
+            fontSize={10}
+            dy={4}
           >
-            contacts
+            {addressedCount > 0 ? `${addressedCount} addressed` : "contacts"}
           </Text>
+          {unaddressedCount > 0 && (
+            <Text
+              textAnchor="middle"
+              verticalAnchor="middle"
+              fill="hsl(var(--muted-foreground))"
+              fontSize={10}
+              dy={18}
+            >
+              {`${unaddressedCount} unaddressed`}
+            </Text>
+          )}
         </Group>
       </svg>
 
@@ -307,9 +325,12 @@ function WedgeChartInner({
       <div className="absolute bottom-2 left-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
         {niches.map((n, i) => (
           <button
-            key={n.name}
+            key={n.id || n.name}
             className="flex items-center gap-1 opacity-80 hover:opacity-100 transition-opacity"
-            onClick={() => onNicheSelect(selectedNiche === n.name ? null : n.name)}
+            onClick={() => {
+              const nId = n.id || n.name;
+              onNicheSelect(selectedNiche === nId ? null : nId);
+            }}
           >
             <span
               className="inline-block h-2.5 w-2.5 rounded-sm"

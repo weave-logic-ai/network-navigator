@@ -1,8 +1,8 @@
-// GET /api/niches - list all niches (optionally filtered by verticalId)
+// GET /api/niches - list all niches (optionally filtered by industryId)
 // POST /api/niches - create a niche
 
 import { NextRequest, NextResponse } from 'next/server';
-import { listNiches, listNichesByVertical, createNiche } from '@/lib/db/queries/niches';
+import { listNiches, listNichesByIndustry, createNiche } from '@/lib/db/queries/niches';
 
 function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -16,10 +16,10 @@ function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const verticalId = searchParams.get('verticalId');
+    const industryId = searchParams.get('industryId');
 
-    const niches = verticalId
-      ? await listNichesByVertical(verticalId)
+    const niches = industryId
+      ? await listNichesByIndustry(industryId)
       : await listNiches();
 
     return NextResponse.json({
@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
     const niche = await createNiche({
       name: body.name,
       description: body.description,
-      verticalId: body.verticalId,
+      industryId: body.industryId,
       keywords: body.keywords,
       affordability: body.affordability,
       fitability: body.fitability,

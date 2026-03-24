@@ -4,13 +4,25 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { X, Save, Loader2, Plus } from "lucide-react";
+
+interface IndustryOption {
+  id: string;
+  name: string;
+}
 
 interface NicheRow {
   id: string;
   name: string;
   description: string | null;
-  industry: string | null;
+  industryId: string | null;
   keywords: string[];
   affordability: number | null;
   fitability: number | null;
@@ -61,7 +73,9 @@ function ScoreButtons({
 export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilderModalProps) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [industry, setIndustry] = useState("");
+  const [industryId, setIndustryId] = useState<string | null>(null);
+  const [industries, setIndustries] = useState<IndustryOption[]>([]);
+  const [newIndustryName, setNewIndustryName] = useState("");
   const [keywords, setKeywords] = useState<string[]>([]);
   const [keywordInput, setKeywordInput] = useState("");
   const [affordability, setAffordability] = useState<number | null>(null);
@@ -71,11 +85,20 @@ export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilder
 
   const isEdit = !!niche;
 
+  // Load industries on open
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/industries")
+      .then((r) => r.json())
+      .then((json) => setIndustries(json.data ?? []))
+      .catch(() => {});
+  }, [open]);
+
   useEffect(() => {
     if (niche) {
       setName(niche.name);
       setDescription(niche.description ?? "");
-      setIndustry(niche.industry ?? "");
+      setIndustryId(niche.industryId);
       setKeywords(niche.keywords ?? []);
       setAffordability(niche.affordability);
       setFitability(niche.fitability);
@@ -83,13 +106,14 @@ export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilder
     } else {
       setName("");
       setDescription("");
-      setIndustry("");
+      setIndustryId(null);
       setKeywords([]);
       setAffordability(null);
       setFitability(null);
       setBuildability(null);
     }
     setKeywordInput("");
+    setNewIndustryName("");
   }, [niche, open]);
 
   function addKeyword() {
@@ -111,6 +135,27 @@ export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilder
     }
   }
 
+  async function addIndustry() {
+    const trimmed = newIndustryName.trim();
+    if (!trimmed) return;
+    try {
+      const res = await fetch("/api/industries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const created = json.data;
+        setIndustries((prev) => [...prev, { id: created.id, name: created.name }]);
+        setIndustryId(created.id);
+        setNewIndustryName("");
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleSave() {
     if (!name.trim()) return;
     setSaving(true);
@@ -118,7 +163,7 @@ export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilder
       const payload = {
         name: name.trim(),
         description: description.trim() || undefined,
-        industry: industry.trim() || undefined,
+        industryId: industryId || undefined,
         keywords,
         affordability,
         fitability,
@@ -180,15 +225,48 @@ export function NicheBuilderModal({ open, onClose, onSave, niche }: NicheBuilder
             />
           </div>
 
-          {/* Industry */}
+          {/* Industry selector */}
           <div className="space-y-1.5">
             <p className="text-xs font-medium text-muted-foreground">Industry</p>
-            <Input
-              value={industry}
-              onChange={(e) => setIndustry(e.target.value)}
-              placeholder="e.g., Healthcare, SaaS, Finance"
-              className="h-8 text-sm"
-            />
+            <Select
+              value={industryId ?? "none"}
+              onValueChange={(v) => setIndustryId(v === "none" ? null : v)}
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder="Select industry..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No industry</SelectItem>
+                {industries.map((ind) => (
+                  <SelectItem key={ind.id} value={ind.id}>
+                    {ind.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex gap-1.5">
+              <Input
+                value={newIndustryName}
+                onChange={(e) => setNewIndustryName(e.target.value)}
+                placeholder="Add new industry..."
+                className="h-7 text-xs"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addIndustry();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2"
+                onClick={addIndustry}
+              >
+                <Plus className="h-3 w-3" />
+              </Button>
+            </div>
           </div>
 
           {/* Keywords */}

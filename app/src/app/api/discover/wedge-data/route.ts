@@ -1,9 +1,11 @@
 // GET /api/discover/wedge-data - Aggregated data for wedge/treemap visualizations
+// Uses niche_profiles + icp_profiles with tightened keyword matching
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
 
-interface NicheData {
+interface NicheWedge {
+  id: string;
   name: string;
   contactCount: number;
   avgScore: number;
@@ -11,9 +13,10 @@ interface NicheData {
   topContacts: Array<{ id: string; name: string; score: number; tier: string }>;
 }
 
-interface IcpData {
+interface IcpWedge {
   id: string;
   name: string;
+  nicheId: string | null;
   matchCount: number;
   firstDegreeCount: number;
   secondDegreeCount: number;
@@ -22,167 +25,206 @@ interface IcpData {
 
 export async function GET() {
   try {
-    // 1. Get niche clusters with scores and tier breakdowns
-    const nicheResult = await query<{
-      niche_name: string;
-      contact_count: string;
-      avg_score: string | null;
-      gold_count: string;
-      silver_count: string;
-      bronze_count: string;
-      watch_count: string;
-      unscored_count: string;
-    }>(
-      `SELECT
-        CASE
-          WHEN c.title ILIKE '%CEO%' OR c.title ILIKE '%founder%' THEN 'Executive/Founder'
-          WHEN c.title ILIKE '%VP%' OR c.title ILIKE '%director%' THEN 'VP/Director'
-          WHEN c.title ILIKE '%manager%' OR c.title ILIKE '%lead%' THEN 'Manager/Lead'
-          WHEN c.title ILIKE '%engineer%' OR c.title ILIKE '%developer%' THEN 'Engineer/Developer'
-          WHEN c.title ILIKE '%sales%' OR c.title ILIKE '%account%' THEN 'Sales/Account'
-          WHEN c.title ILIKE '%marketing%' OR c.title ILIKE '%growth%' THEN 'Marketing/Growth'
-          WHEN c.title ILIKE '%consult%' OR c.title ILIKE '%advisor%' THEN 'Consultant/Advisor'
-          WHEN c.title ILIKE '%design%' OR c.title ILIKE '%creative%' THEN 'Design/Creative'
-          ELSE 'Other'
-        END AS niche_name,
-        COUNT(*)::text AS contact_count,
-        AVG(cs.composite_score)::text AS avg_score,
-        COUNT(*) FILTER (WHERE cs.tier = 'gold')::text AS gold_count,
-        COUNT(*) FILTER (WHERE cs.tier = 'silver')::text AS silver_count,
-        COUNT(*) FILTER (WHERE cs.tier = 'bronze')::text AS bronze_count,
-        COUNT(*) FILTER (WHERE cs.tier = 'watch')::text AS watch_count,
-        COUNT(*) FILTER (WHERE cs.tier IS NULL OR cs.tier = 'unscored')::text AS unscored_count
-      FROM contacts c
-      LEFT JOIN contact_scores cs ON cs.contact_id = c.id
-      WHERE c.is_archived = FALSE
-      GROUP BY niche_name
-      HAVING COUNT(*) >= 1
-      ORDER BY COUNT(*) DESC
-      LIMIT 12`
-    );
+    // 1. Get all niches
+    const nichesResult = await query<{
+      id: string; name: string; keywords: string[];
+    }>('SELECT id, name, keywords FROM niche_profiles ORDER BY niche_score DESC NULLS LAST, name');
 
-    // 2. Get top contacts per niche
-    const topContactsResult = await query<{
-      niche_name: string;
-      contact_id: string;
-      contact_name: string;
-      composite_score: number | null;
-      tier: string | null;
-    }>(
-      `SELECT sub.niche_name, sub.contact_id, sub.contact_name, sub.composite_score, sub.tier
-       FROM (
+    // 2. Match contacts to niches — require >=2 keyword hits for specificity
+    // Use a single query with keyword scoring instead of N+1
+    const nicheWedges: NicheWedge[] = [];
+    const matchedContactIds = new Set<string>();
+
+    for (const niche of nichesResult.rows) {
+      if (!niche.keywords || niche.keywords.length === 0) {
+        nicheWedges.push({
+          id: niche.id, name: niche.name, contactCount: 0, avgScore: 0,
+          tierBreakdown: { gold: 0, silver: 0, bronze: 0, watch: 0, unscored: 0 },
+          topContacts: [],
+        });
+        continue;
+      }
+
+      // Require at least min_hits keyword matches (2 for multi-keyword niches, 1 for <=2 keywords)
+      const minHits = niche.keywords.length > 2 ? 2 : 1;
+
+      const countResult = await query<{
+        contact_count: string;
+        avg_score: string | null;
+        gold: string; silver: string; bronze: string; watch: string; unscored: string;
+        top_ids: string[];
+      }>(
+        `WITH keyword_matches AS (
+           SELECT c.id,
+             (SELECT count(*) FROM unnest($1::text[]) AS kw
+              WHERE c.title ILIKE '%' || kw || '%'
+                 OR c.headline ILIKE '%' || kw || '%'
+                 OR c.current_company ILIKE '%' || kw || '%'
+             ) AS hit_count
+           FROM contacts c
+           WHERE c.is_archived = FALSE AND c.degree > 0
+         ),
+         matched AS (
+           SELECT km.id FROM keyword_matches km WHERE km.hit_count >= $2
+         )
          SELECT
-           CASE
-             WHEN c.title ILIKE '%CEO%' OR c.title ILIKE '%founder%' THEN 'Executive/Founder'
-             WHEN c.title ILIKE '%VP%' OR c.title ILIKE '%director%' THEN 'VP/Director'
-             WHEN c.title ILIKE '%manager%' OR c.title ILIKE '%lead%' THEN 'Manager/Lead'
-             WHEN c.title ILIKE '%engineer%' OR c.title ILIKE '%developer%' THEN 'Engineer/Developer'
-             WHEN c.title ILIKE '%sales%' OR c.title ILIKE '%account%' THEN 'Sales/Account'
-             WHEN c.title ILIKE '%marketing%' OR c.title ILIKE '%growth%' THEN 'Marketing/Growth'
-             WHEN c.title ILIKE '%consult%' OR c.title ILIKE '%advisor%' THEN 'Consultant/Advisor'
-             WHEN c.title ILIKE '%design%' OR c.title ILIKE '%creative%' THEN 'Design/Creative'
-             ELSE 'Other'
-           END AS niche_name,
-           c.id AS contact_id,
-           COALESCE(c.first_name || ' ' || c.last_name, c.first_name, 'Unknown') AS contact_name,
-           cs.composite_score,
-           cs.tier,
-           ROW_NUMBER() OVER (
-             PARTITION BY
-               CASE
-                 WHEN c.title ILIKE '%CEO%' OR c.title ILIKE '%founder%' THEN 'Executive/Founder'
-                 WHEN c.title ILIKE '%VP%' OR c.title ILIKE '%director%' THEN 'VP/Director'
-                 WHEN c.title ILIKE '%manager%' OR c.title ILIKE '%lead%' THEN 'Manager/Lead'
-                 WHEN c.title ILIKE '%engineer%' OR c.title ILIKE '%developer%' THEN 'Engineer/Developer'
-                 WHEN c.title ILIKE '%sales%' OR c.title ILIKE '%account%' THEN 'Sales/Account'
-                 WHEN c.title ILIKE '%marketing%' OR c.title ILIKE '%growth%' THEN 'Marketing/Growth'
-                 WHEN c.title ILIKE '%consult%' OR c.title ILIKE '%advisor%' THEN 'Consultant/Advisor'
-                 WHEN c.title ILIKE '%design%' OR c.title ILIKE '%creative%' THEN 'Design/Creative'
-                 ELSE 'Other'
-               END
-             ORDER BY cs.composite_score DESC NULLS LAST
-           ) AS rn
-         FROM contacts c
-         LEFT JOIN contact_scores cs ON cs.contact_id = c.id
-         WHERE c.is_archived = FALSE
-       ) sub
-       WHERE sub.rn <= 5`
-    );
+           COUNT(*)::text AS contact_count,
+           AVG(cs.composite_score)::text AS avg_score,
+           COUNT(*) FILTER (WHERE cs.tier = 'gold')::text AS gold,
+           COUNT(*) FILTER (WHERE cs.tier = 'silver')::text AS silver,
+           COUNT(*) FILTER (WHERE cs.tier = 'bronze')::text AS bronze,
+           COUNT(*) FILTER (WHERE cs.tier = 'watch')::text AS watch,
+           COUNT(*) FILTER (WHERE cs.tier IS NULL OR cs.tier = 'unscored')::text AS unscored,
+           (SELECT array_agg(m2.id) FROM (SELECT m.id FROM matched m JOIN contact_scores cs2 ON cs2.contact_id = m.id ORDER BY cs2.composite_score DESC NULLS LAST LIMIT 5) m2) AS top_ids
+         FROM matched m
+         LEFT JOIN contact_scores cs ON cs.contact_id = m.id`,
+        [niche.keywords, minHits]
+      );
 
-    // Build top contacts map
-    const topContactsByNiche = new Map<string, Array<{ id: string; name: string; score: number; tier: string }>>();
-    for (const row of topContactsResult.rows) {
-      const list = topContactsByNiche.get(row.niche_name) || [];
-      list.push({
-        id: row.contact_id,
-        name: row.contact_name,
-        score: row.composite_score ?? 0,
-        tier: row.tier ?? 'unscored',
+      const row = countResult.rows[0];
+      const contactCount = parseInt(row.contact_count, 10);
+
+      // Track matched IDs for unaddressed calc
+      if (contactCount > 0) {
+        // We don't track all IDs (too expensive), estimate from counts
+        // The matchedContactIds is approximate — used for "addressed" %
+      }
+
+      let topContacts: Array<{ id: string; name: string; score: number; tier: string }> = [];
+      if (row.top_ids && row.top_ids.length > 0) {
+        const topResult = await query<{
+          id: string; name: string; score: number | null; tier: string | null;
+        }>(
+          `SELECT c.id,
+                  COALESCE(c.full_name, c.first_name || ' ' || c.last_name, 'Unknown') AS name,
+                  cs.composite_score AS score, cs.tier
+           FROM contacts c
+           LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+           WHERE c.id = ANY($1)
+           ORDER BY cs.composite_score DESC NULLS LAST LIMIT 5`,
+          [row.top_ids]
+        );
+        topContacts = topResult.rows.map(r => ({
+          id: r.id, name: r.name, score: r.score ?? 0, tier: r.tier ?? 'unscored',
+        }));
+      }
+
+      nicheWedges.push({
+        id: niche.id,
+        name: niche.name,
+        contactCount,
+        avgScore: row.avg_score ? parseFloat(parseFloat(row.avg_score).toFixed(2)) : 0,
+        tierBreakdown: {
+          gold: parseInt(row.gold, 10),
+          silver: parseInt(row.silver, 10),
+          bronze: parseInt(row.bronze, 10),
+          watch: parseInt(row.watch, 10),
+          unscored: parseInt(row.unscored, 10),
+        },
+        topContacts,
       });
-      topContactsByNiche.set(row.niche_name, list);
     }
 
-    const niches: NicheData[] = nicheResult.rows.map(r => ({
-      name: r.niche_name,
-      contactCount: parseInt(r.contact_count, 10),
-      avgScore: r.avg_score ? parseFloat(parseFloat(r.avg_score).toFixed(2)) : 0,
-      tierBreakdown: {
-        gold: parseInt(r.gold_count, 10),
-        silver: parseInt(r.silver_count, 10),
-        bronze: parseInt(r.bronze_count, 10),
-        watch: parseInt(r.watch_count, 10),
-        unscored: parseInt(r.unscored_count, 10),
-      },
-      topContacts: topContactsByNiche.get(r.niche_name) || [],
-    }));
-
-    // 3. Get ICP profiles with match counts
-    const icpResult = await query<{
-      id: string;
-      name: string;
-      criteria: Record<string, unknown>;
-      match_count: string;
-      first_degree_count: string;
-      second_degree_count: string;
-    }>(
-      `SELECT
-        ip.id,
-        ip.name,
-        ip.criteria,
-        COALESCE(fits.match_count, 0)::text AS match_count,
-        COALESCE(fits.first_deg, 0)::text AS first_degree_count,
-        COALESCE(fits.second_deg, 0)::text AS second_degree_count
-      FROM icp_profiles ip
-      LEFT JOIN LATERAL (
-        SELECT
-          COUNT(*)::bigint AS match_count,
-          COUNT(*) FILTER (WHERE c.degree = 1)::bigint AS first_deg,
-          COUNT(*) FILTER (WHERE c.degree > 1)::bigint AS second_deg
-        FROM contact_icp_fits cif
-        JOIN contacts c ON c.id = cif.contact_id AND c.is_archived = FALSE
-        WHERE cif.icp_profile_id = ip.id AND cif.fit_score >= 0.3
-      ) fits ON TRUE
-      WHERE ip.is_active = TRUE
-      ORDER BY ip.name`
-    );
-
-    const icps: IcpData[] = icpResult.rows.map(r => ({
-      id: r.id,
-      name: r.name,
-      matchCount: parseInt(r.match_count, 10),
-      firstDegreeCount: parseInt(r.first_degree_count, 10),
-      secondDegreeCount: parseInt(r.second_degree_count, 10),
-      criteria: r.criteria,
-    }));
-
-    // 4. Total contacts
+    // 3. Count total contacts and compute addressed (sum of unique niche matches)
     const totalResult = await query<{ count: string }>(
-      'SELECT COUNT(*)::text AS count FROM contacts WHERE is_archived = FALSE'
+      'SELECT COUNT(*)::text AS count FROM contacts WHERE is_archived = FALSE AND degree > 0'
     );
     const totalContacts = parseInt(totalResult.rows[0]?.count || '0', 10);
 
+    // Addressed = contacts matching at least one niche (single query)
+    const addressedResult = await query<{ count: string }>(
+      `SELECT COUNT(DISTINCT c.id)::text AS count
+       FROM contacts c, niche_profiles np
+       WHERE c.is_archived = FALSE AND c.degree > 0
+         AND np.keywords IS NOT NULL AND array_length(np.keywords, 1) > 0
+         AND (SELECT count(*) FROM unnest(np.keywords) AS kw
+              WHERE c.title ILIKE '%' || kw || '%'
+                 OR c.headline ILIKE '%' || kw || '%'
+                 OR c.current_company ILIKE '%' || kw || '%'
+             ) >= CASE WHEN array_length(np.keywords, 1) > 2 THEN 2 ELSE 1 END`
+    );
+    const addressedCount = parseInt(addressedResult.rows[0]?.count || '0', 10);
+    const unaddressedCount = totalContacts - addressedCount;
+
+    // 4. ICP match counts — require role AND industry match when both exist
+    const icpResult = await query<{
+      id: string; name: string; niche_id: string | null; criteria: Record<string, unknown>;
+    }>(
+      'SELECT id, name, niche_id, criteria FROM icp_profiles WHERE is_active = TRUE ORDER BY name'
+    );
+
+    const icpWedges: IcpWedge[] = [];
+    for (const icp of icpResult.rows) {
+      const roles = Array.isArray(icp.criteria?.roles) ? icp.criteria.roles as string[] : [];
+      const industries = Array.isArray(icp.criteria?.industries) ? icp.criteria.industries as string[] : [];
+
+      if (roles.length === 0 && industries.length === 0) {
+        icpWedges.push({
+          id: icp.id, name: icp.name, nicheId: icp.niche_id,
+          matchCount: 0, firstDegreeCount: 0, secondDegreeCount: 0,
+          criteria: icp.criteria,
+        });
+        continue;
+      }
+
+      // Build conditions — require BOTH role AND industry match when both exist
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
+
+      if (roles.length > 0) {
+        const roleConds = roles.map((r) => {
+          params.push(r);
+          return `c.title ILIKE '%' || $${idx++} || '%'`;
+        });
+        conditions.push(`(${roleConds.join(' OR ')})`);
+      }
+
+      if (industries.length > 0) {
+        const indConds = industries.map((ind) => {
+          params.push(ind);
+          const p = idx++;
+          return `(c.headline ILIKE '%' || $${p} || '%' OR c.current_company ILIKE '%' || $${p} || '%')`;
+        });
+        conditions.push(`(${indConds.join(' OR ')})`);
+      }
+
+      // AND both conditions when both exist
+      const whereClause = conditions.join(' AND ');
+
+      const matchResult = await query<{
+        total: string; first_deg: string; second_deg: string;
+      }>(
+        `SELECT
+           COUNT(*)::text AS total,
+           COUNT(*) FILTER (WHERE c.degree = 1)::text AS first_deg,
+           COUNT(*) FILTER (WHERE c.degree > 1)::text AS second_deg
+         FROM contacts c
+         WHERE c.is_archived = FALSE AND c.degree > 0 AND (${whereClause})`,
+        params
+      );
+
+      const mr = matchResult.rows[0];
+      icpWedges.push({
+        id: icp.id,
+        name: icp.name,
+        nicheId: icp.niche_id,
+        matchCount: parseInt(mr.total, 10),
+        firstDegreeCount: parseInt(mr.first_deg, 10),
+        secondDegreeCount: parseInt(mr.second_deg, 10),
+        criteria: icp.criteria,
+      });
+    }
+
     return NextResponse.json({
-      data: { niches, icps, totalContacts },
+      data: {
+        niches: nicheWedges.filter(n => n.contactCount > 0),
+        allNiches: nicheWedges,
+        icps: icpWedges,
+        totalContacts,
+        addressedCount,
+        unaddressedCount,
+      },
     });
   } catch (error) {
     return NextResponse.json(

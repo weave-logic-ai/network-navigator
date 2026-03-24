@@ -57,32 +57,84 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // Auto-complete matching tasks by URL
+      // Auto-complete ONE matching task by URL (not all — avoid over-completing)
       let tasksCompleted = 0;
       try {
-        const taskResult = await query(
+        const taskResult = await query<{ id: string; goal_id: string | null; task_type: string }>(
           `UPDATE tasks SET status = 'completed', completed_at = now()
-           WHERE status = 'pending' AND url IS NOT NULL
-             AND ($1 LIKE '%' || replace(replace(url, 'https://www.linkedin.com', ''), 'https://linkedin.com', '') || '%'
-                  OR url = $1)
-           RETURNING id`,
+           WHERE id = (
+             SELECT id FROM tasks
+             WHERE status = 'pending' AND url IS NOT NULL
+               AND ($1 LIKE '%' || replace(replace(url, 'https://www.linkedin.com', ''), 'https://linkedin.com', '') || '%'
+                    OR url = $1)
+             ORDER BY priority ASC, created_at ASC
+             LIMIT 1
+           )
+           RETURNING id, goal_id, task_type`,
           [data.url]
         );
         tasksCompleted = taskResult.rowCount ?? 0;
 
         // Update goal progress
         if (tasksCompleted > 0) {
-          await query(
-            `UPDATE goals SET current_value = (
-               SELECT COUNT(*) FROM tasks WHERE goal_id = goals.id AND status = 'completed'
-             ) WHERE id IN (
-               SELECT DISTINCT goal_id FROM tasks WHERE goal_id IS NOT NULL AND status = 'completed'
-                 AND completed_at >= now() - interval '5 seconds'
-             )`
-          );
+          const completedTask = taskResult.rows[0];
+          if (completedTask.goal_id) {
+            await query(
+              `UPDATE goals SET current_value = (
+                 SELECT COUNT(*) FROM tasks WHERE goal_id = $1 AND status = 'completed'
+               ) WHERE id = $1`,
+              [completedTask.goal_id]
+            );
+          }
         }
       } catch {
         // Non-critical — task completion is best-effort
+      }
+
+      // For SEARCH_PEOPLE captures: create follow-up task for next page
+      const MAX_SEARCH_PAGES = 10;
+      if (data.pageType === 'SEARCH_PEOPLE' || data.pageType === 'SEARCH_CONTENT') {
+        try {
+          // Parse current page number from URL
+          const urlObj = new URL(data.url);
+          const currentPage = parseInt(urlObj.searchParams.get('page') || '1', 10);
+
+          if (currentPage < MAX_SEARCH_PAGES) {
+            // Build next page URL
+            urlObj.searchParams.set('page', String(currentPage + 1));
+            const nextPageUrl = urlObj.toString();
+
+            // Check if a task for the next page already exists
+            const existingTask = await query<{ id: string }>(
+              `SELECT id FROM tasks WHERE url = $1 AND status IN ('pending', 'in_progress') LIMIT 1`,
+              [nextPageUrl]
+            );
+
+            if (existingTask.rows.length === 0) {
+              // Find the goal_id from the completed task (if any)
+              const goalId = tasksCompleted > 0
+                ? (await query<{ goal_id: string | null }>(
+                    `SELECT goal_id FROM tasks WHERE status = 'completed' AND url LIKE $1 AND goal_id IS NOT NULL ORDER BY completed_at DESC LIMIT 1`,
+                    [`%${urlObj.pathname}%`]
+                  )).rows[0]?.goal_id ?? null
+                : null;
+
+              await query(
+                `INSERT INTO tasks (title, description, task_type, priority, url, goal_id, source, metadata)
+                 VALUES ($1, $2, 'expand_network', 3, $3, $4, 'system', $5)`,
+                [
+                  `Capture search page ${currentPage + 1}`,
+                  `Continue capturing LinkedIn search results — page ${currentPage + 1} of up to ${MAX_SEARCH_PAGES}`,
+                  nextPageUrl,
+                  goalId,
+                  JSON.stringify({ autoCreated: true, pageNumber: currentPage + 1, sourceCapture: data.captureId }),
+                ]
+              );
+            }
+          }
+        } catch {
+          // Non-critical — pagination task creation is best-effort
+        }
       }
 
       // Auto-score contact if this is a profile capture and we can resolve the contact

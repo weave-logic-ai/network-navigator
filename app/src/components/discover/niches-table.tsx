@@ -4,14 +4,20 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus, Pencil, Trash2 } from "lucide-react";
+import { Loader2, Plus, Pencil, Trash2, Sparkles } from "lucide-react";
 import { NicheBuilderModal } from "./niche-builder-modal";
+import { DiscoverModal } from "./discover-modal";
+
+interface IndustryOption {
+  id: string;
+  name: string;
+}
 
 interface NicheRow {
   id: string;
   name: string;
   description: string | null;
-  industry: string | null;
+  industryId: string | null;
   keywords: string[];
   affordability: number | null;
   fitability: number | null;
@@ -38,17 +44,32 @@ function ScoreDots({ value }: { value: number | null }) {
 
 export function NichesTable() {
   const [niches, setNiches] = useState<NicheRow[]>([]);
+  const [industries, setIndustries] = useState<IndustryOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editNiche, setEditNiche] = useState<NicheRow | undefined>(undefined);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoveries, setDiscoveries] = useState<Array<{
+    suggestedName: string; description: string; industry?: string;
+    contactCount?: number; confidence?: number; keywords?: string[];
+    sampleContacts?: Array<{ id: string; name: string; title: string | null }>;
+  }>>([]);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/niches");
-      if (res.ok) {
-        const json = await res.json();
+      const [nichesRes, industriesRes] = await Promise.all([
+        fetch("/api/niches"),
+        fetch("/api/industries"),
+      ]);
+      if (nichesRes.ok) {
+        const json = await nichesRes.json();
         setNiches(json.data ?? []);
+      }
+      if (industriesRes.ok) {
+        const json = await industriesRes.json();
+        setIndustries(json.data ?? []);
       }
     } catch {
       // empty state
@@ -60,6 +81,11 @@ export function NichesTable() {
   useEffect(() => {
     load();
   }, [load]);
+
+  function industryName(id: string | null): string {
+    if (!id) return "--";
+    return industries.find((i) => i.id === id)?.name ?? "--";
+  }
 
   function handleNew() {
     setEditNiche(undefined);
@@ -87,6 +113,47 @@ export function NichesTable() {
     load();
   }
 
+  async function handleDiscover() {
+    setDiscoverOpen(true);
+    setDiscoverLoading(true);
+    setDiscoveries([]);
+    try {
+      const res = await fetch("/api/niches/discover");
+      if (!res.ok) return;
+      const json = await res.json();
+      setDiscoveries(json.data?.discoveries ?? []);
+    } finally {
+      setDiscoverLoading(false);
+    }
+  }
+
+  async function handleAcceptDiscoveries(items: Array<{
+    suggestedName: string; description: string; industry?: string;
+    keywords?: string[];
+  }>) {
+    for (const d of items) {
+      // Try to match discovered industry to an existing one
+      const match = industries.find(
+        (i) =>
+          d.industry &&
+          (i.name.toLowerCase().includes(d.industry.toLowerCase()) ||
+           d.industry.toLowerCase().includes(i.name.toLowerCase().split(" ")[0]))
+      );
+
+      await fetch("/api/niches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: d.suggestedName,
+          description: d.description,
+          industryId: match?.id,
+          keywords: [d.suggestedName.toLowerCase(), ...(d.keywords ?? [])].slice(0, 10),
+        }),
+      });
+    }
+    load();
+  }
+
   if (loading) {
     return (
       <Card>
@@ -104,10 +171,20 @@ export function NichesTable() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm">Niches ({niches.length})</CardTitle>
-            <Button size="sm" onClick={handleNew}>
-              <Plus className="h-3 w-3 mr-1" />
-              New Niche
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleDiscover}
+              >
+                <Sparkles className="h-3 w-3 mr-1" />
+                Discover from Network
+              </Button>
+              <Button size="sm" onClick={handleNew}>
+                <Plus className="h-3 w-3 mr-1" />
+                New Niche
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -144,7 +221,7 @@ export function NichesTable() {
                         </div>
                       </td>
                       <td className="py-2.5 pr-3 text-muted-foreground">
-                        {niche.industry ?? "--"}
+                        {industryName(niche.industryId)}
                       </td>
                       <td className="py-2.5 pr-3">
                         <div className="flex flex-wrap gap-1 max-w-[180px]">
@@ -221,6 +298,15 @@ export function NichesTable() {
         onClose={() => setModalOpen(false)}
         onSave={handleSaved}
         niche={editNiche}
+      />
+
+      <DiscoverModal
+        open={discoverOpen}
+        onClose={() => setDiscoverOpen(false)}
+        title="Discover Niches from Network"
+        discoveries={discoveries}
+        loading={discoverLoading}
+        onAccept={handleAcceptDiscoveries}
       />
     </>
   );

@@ -77,8 +77,8 @@ export async function getContactScoringData(contactId: string): Promise<ContactS
     degree_centrality: number | null;
     observation_count: string; content_topics: string[] | null;
     posting_frequency: string | null; avg_engagement: number | null;
-    connected_at: string | null;
-    connection_count_raw: string | null;
+    connected_at: string | null;  // approximated from created_at
+    connection_count_raw: string | null;  // same as connections_count
     discovered_via: string[] | null;
     cluster_ids: string[] | null;
   }>(
@@ -92,8 +92,8 @@ export async function getContactScoringData(contactId: string): Promise<ContactS
       COALESCE((SELECT COUNT(*) FROM behavioral_observations bo WHERE bo.contact_id = c.id), 0)::text AS observation_count,
       cp.topics AS content_topics,
       cp.posting_frequency, cp.avg_engagement,
-      c.connected_at::text AS connected_at,
-      c.connections_count_raw AS connection_count_raw,
+      c.created_at::text AS connected_at,
+      c.connections_count::text AS connection_count_raw,
       COALESCE(
         (SELECT array_agg(DISTINCT e2.source_contact_id::text)
          FROM edges e2 WHERE e2.target_contact_id = c.id AND e2.edge_type = 'discovered_via'),
@@ -101,7 +101,7 @@ export async function getContactScoringData(contactId: string): Promise<ContactS
       ) AS discovered_via,
       COALESCE(
         (SELECT array_agg(DISTINCT cm.cluster_id::text)
-         FROM cluster_members cm WHERE cm.contact_id = c.id),
+         FROM cluster_memberships cm WHERE cm.contact_id = c.id),
         ARRAY[]::text[]
       ) AS cluster_ids
     FROM contacts c

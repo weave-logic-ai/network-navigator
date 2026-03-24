@@ -6,7 +6,7 @@ export interface NicheRow {
   id: string;
   name: string;
   description: string | null;
-  vertical_id: string | null;
+  industry_id: string | null;
   keywords: string[];
   company_size_range: string | null;
   geo_focus: string[];
@@ -21,7 +21,7 @@ export interface NicheRow {
 
 export async function listNiches(): Promise<NicheRow[]> {
   const result = await query<NicheRow>(
-    `SELECT id, name, description, vertical_id, keywords, company_size_range,
+    `SELECT id, name, description, industry_id, keywords, company_size_range,
             geo_focus, member_count, affordability, fitability, buildability,
             niche_score, created_at, updated_at
      FROM niche_profiles
@@ -32,7 +32,7 @@ export async function listNiches(): Promise<NicheRow[]> {
 
 export async function getNiche(id: string): Promise<NicheRow | null> {
   const result = await query<NicheRow>(
-    `SELECT id, name, description, vertical_id, keywords, company_size_range,
+    `SELECT id, name, description, industry_id, keywords, company_size_range,
             geo_focus, member_count, affordability, fitability, buildability,
             niche_score, created_at, updated_at
      FROM niche_profiles
@@ -45,20 +45,44 @@ export async function getNiche(id: string): Promise<NicheRow | null> {
 export async function createNiche(data: {
   name: string;
   description?: string;
-  verticalId?: string;
+  industryId?: string;
   keywords?: string[];
   affordability?: number;
   fitability?: number;
   buildability?: number;
 }): Promise<NicheRow> {
+  // Auto-associate to industry if not explicitly set
+  let industryId = data.industryId ?? null;
+  if (!industryId) {
+    const searchText = [data.name, data.description, ...(data.keywords ?? [])].filter(Boolean).join(' ').toLowerCase();
+    const matchResult = await query<{ id: string }>(
+      `SELECT id FROM industries
+       WHERE LOWER(name) != 'general'
+         AND (LOWER(name) = ANY(string_to_array($1, ' '))
+              OR $1 ILIKE '%' || LOWER(SPLIT_PART(name, ' ', 1)) || '%')
+       ORDER BY length(name) DESC
+       LIMIT 1`,
+      [searchText]
+    );
+    if (matchResult.rows[0]) {
+      industryId = matchResult.rows[0].id;
+    } else {
+      // Fall back to General
+      const generalResult = await query<{ id: string }>(
+        `SELECT id FROM industries WHERE slug = 'general' LIMIT 1`
+      );
+      if (generalResult.rows[0]) industryId = generalResult.rows[0].id;
+    }
+  }
+
   const result = await query<NicheRow>(
-    `INSERT INTO niche_profiles (name, description, vertical_id, keywords, affordability, fitability, buildability)
+    `INSERT INTO niche_profiles (name, description, industry_id, keywords, affordability, fitability, buildability)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       data.name,
       data.description ?? null,
-      data.verticalId ?? null,
+      industryId,
       data.keywords ?? [],
       data.affordability ?? null,
       data.fitability ?? null,
@@ -72,7 +96,7 @@ export async function updateNiche(
   id: string,
   data: Record<string, unknown>
 ): Promise<NicheRow | null> {
-  const allowedKeys = ['name', 'description', 'vertical_id', 'keywords', 'affordability', 'fitability', 'buildability'];
+  const allowedKeys = ['name', 'description', 'industry_id', 'keywords', 'affordability', 'fitability', 'buildability'];
   const setClauses: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
@@ -100,28 +124,28 @@ export async function deleteNiche(id: string): Promise<boolean> {
   return result.rows.length > 0;
 }
 
-export async function listNichesByVertical(verticalId: string): Promise<NicheRow[]> {
+export async function listNichesByIndustry(industryId: string): Promise<NicheRow[]> {
   const result = await query<NicheRow>(
-    `SELECT id, name, description, vertical_id, keywords, company_size_range,
+    `SELECT id, name, description, industry_id, keywords, company_size_range,
             geo_focus, member_count, affordability, fitability, buildability,
             niche_score, created_at, updated_at
      FROM niche_profiles
-     WHERE vertical_id = $1
+     WHERE industry_id = $1
      ORDER BY niche_score DESC NULLS LAST, name`,
-    [verticalId]
+    [industryId]
   );
   return result.rows;
 }
 
-export async function findNicheByVerticalAndName(verticalId: string, name: string): Promise<NicheRow | null> {
+export async function findNicheByIndustryAndName(industryId: string, name: string): Promise<NicheRow | null> {
   const result = await query<NicheRow>(
-    `SELECT id, name, description, vertical_id, keywords, company_size_range,
+    `SELECT id, name, description, industry_id, keywords, company_size_range,
             geo_focus, member_count, affordability, fitability, buildability,
             niche_score, created_at, updated_at
      FROM niche_profiles
-     WHERE vertical_id = $1 AND LOWER(name) = LOWER($2)
+     WHERE industry_id = $1 AND LOWER(name) = LOWER($2)
      LIMIT 1`,
-    [verticalId, name]
+    [industryId, name]
   );
   return result.rows[0] ?? null;
 }
