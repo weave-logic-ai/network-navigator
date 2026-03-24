@@ -1,27 +1,22 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import dynamic from "next/dynamic";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NetworkGraph } from "@/components/network/network-graph";
 import { GraphControls } from "@/components/network/graph-controls";
 import { ClusterSidebar } from "@/components/network/cluster-sidebar";
+import { TaxonomyGraph } from "@/components/network/taxonomy-graph";
+import { ConversationGraph } from "@/components/network/conversation-graph";
+import { KnowledgeGraphView as KnowledgeGraph } from "@/components/network/knowledge-graph";
 import type {
   LayoutMode,
   ColorByMode,
   SizeByMode,
   EdgeFilterMode,
 } from "@/components/network/network-graph";
-import { Layers } from "lucide-react";
-
-// Dynamic import for Sigma.js — no SSR since it needs canvas/DOM
-const SigmaGraph = dynamic(
-  () =>
-    import("@/components/network/sigma-graph").then((m) => m.SigmaGraph),
-  { ssr: false, loading: () => <div className="h-[600px] flex items-center justify-center text-muted-foreground">Loading graph...</div> }
-);
+import { Layers, Network, GitBranch, MessageSquare, Brain } from "lucide-react";
 
 export default function NetworkPage() {
   const [computing, setComputing] = useState(false);
@@ -32,10 +27,8 @@ export default function NetworkPage() {
   const [edgeFilter, setEdgeFilter] = useState<EdgeFilterMode>("all");
   const [showClusters, setShowClusters] = useState(false);
   const [clusterSidebarOpen, setClusterSidebarOpen] = useState(false);
-  const [highlightedCluster, setHighlightedCluster] = useState<string | null>(
-    null
-  );
-  const [activeTab, setActiveTab] = useState<string>("sigma");
+  const [highlightedCluster, setHighlightedCluster] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("graph");
 
   const handleCompute = useCallback(async () => {
     setComputing(true);
@@ -43,7 +36,7 @@ export default function NetworkPage() {
       await fetch("/api/graph/compute", { method: "POST" });
       setRefreshKey((k) => k + 1);
     } catch {
-      // Handle error silently
+      // silent
     } finally {
       setComputing(false);
     }
@@ -56,77 +49,80 @@ export default function NetworkPage() {
         description="Visualize your professional network"
         actions={
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setClusterSidebarOpen(true)}
-            >
-              <Layers className="mr-1.5 h-3.5 w-3.5" />
-              Communities
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleCompute}
-              disabled={computing}
-            >
-              {computing ? "Computing..." : "Compute Graph"}
-            </Button>
+            {activeTab === "graph" && (
+              <>
+                <Button variant="outline" size="sm" onClick={() => setClusterSidebarOpen(true)}>
+                  <Layers className="mr-1.5 h-3.5 w-3.5" />
+                  Communities
+                </Button>
+                <Button size="sm" onClick={handleCompute} disabled={computing}>
+                  {computing ? "Computing..." : "Compute Graph"}
+                </Button>
+              </>
+            )}
           </div>
         }
       />
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
-        <TabsList className="w-auto self-start mb-2">
-          <TabsTrigger value="sigma">Sigma (10K+)</TabsTrigger>
-          <TabsTrigger value="classic">Classic (3D)</TabsTrigger>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
+        <TabsList className="mx-0 w-fit">
+          <TabsTrigger value="graph" className="gap-1.5">
+            <Network className="h-3.5 w-3.5" />
+            Graph
+          </TabsTrigger>
+          <TabsTrigger value="taxonomy" className="gap-1.5">
+            <GitBranch className="h-3.5 w-3.5" />
+            Taxonomy
+          </TabsTrigger>
+          <TabsTrigger value="conversations" className="gap-1.5">
+            <MessageSquare className="h-3.5 w-3.5" />
+            Conversations
+          </TabsTrigger>
+          <TabsTrigger value="knowledge" className="gap-1.5">
+            <Brain className="h-3.5 w-3.5" />
+            Knowledge
+          </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="sigma" className="flex-1 overflow-hidden mt-0">
-          <div className="h-full rounded-lg border bg-background overflow-hidden">
-            <SigmaGraph
-              limit={500}
-              onNodeClick={(id: string) => {
-                window.location.href = `/contacts/${id}`;
-              }}
+        <TabsContent value="graph" className="flex flex-1 gap-4 overflow-hidden mt-4">
+          <GraphControls
+            layout={layout} colorBy={colorBy} sizeBy={sizeBy}
+            edgeFilter={edgeFilter} showClusters={showClusters}
+            onLayoutChange={setLayout} onColorByChange={setColorBy}
+            onSizeByChange={setSizeBy} onEdgeFilterChange={setEdgeFilter}
+            onShowClustersChange={setShowClusters}
+          />
+          <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
+            <NetworkGraph
+              layout={layout} colorBy={colorBy} sizeBy={sizeBy}
+              edgeFilter={edgeFilter} showClusters={showClusters}
+              highlightedCluster={highlightedCluster} refreshKey={refreshKey}
             />
           </div>
         </TabsContent>
 
-        <TabsContent value="classic" className="flex-1 overflow-hidden mt-0">
-          <div className="flex flex-1 gap-4 overflow-hidden h-full">
-            <GraphControls
-              layout={layout}
-              colorBy={colorBy}
-              sizeBy={sizeBy}
-              edgeFilter={edgeFilter}
-              showClusters={showClusters}
-              onLayoutChange={setLayout}
-              onColorByChange={setColorBy}
-              onSizeByChange={setSizeBy}
-              onEdgeFilterChange={setEdgeFilter}
-              onShowClustersChange={setShowClusters}
-            />
+        <TabsContent value="taxonomy" className="flex-1 overflow-hidden mt-4">
+          <div className="h-full rounded-lg border bg-background overflow-hidden">
+            <TaxonomyGraph />
+          </div>
+        </TabsContent>
 
-            <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
-              <NetworkGraph
-                layout={layout}
-                colorBy={colorBy}
-                sizeBy={sizeBy}
-                edgeFilter={edgeFilter}
-                showClusters={showClusters}
-                highlightedCluster={highlightedCluster}
-                refreshKey={refreshKey}
-              />
-            </div>
+        <TabsContent value="conversations" className="flex-1 overflow-hidden mt-4">
+          <div className="h-full rounded-lg border bg-background overflow-hidden">
+            <ConversationGraph />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="knowledge" className="flex-1 overflow-hidden mt-4">
+          <div className="h-full rounded-lg border bg-background overflow-hidden">
+            <KnowledgeGraph />
           </div>
         </TabsContent>
       </Tabs>
 
       <ClusterSidebar
-        open={clusterSidebarOpen}
-        onOpenChange={setClusterSidebarOpen}
-        highlightedCluster={highlightedCluster}
-        onHighlightCluster={setHighlightedCluster}
+        open={clusterSidebarOpen} onOpenChange={setClusterSidebarOpen}
+        highlightedCluster={highlightedCluster} onHighlightCluster={setHighlightedCluster}
       />
     </div>
   );

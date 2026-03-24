@@ -19,7 +19,6 @@ import { IcpsTable } from "@/components/discover/icps-table";
 import { PeoplePanel } from "@/components/discover/people-panel";
 import { HistoryPanel } from "@/components/discover/history-panel";
 import { Loader2, X } from "lucide-react";
-import { useGoalEngine } from "@/hooks/use-goal-engine";
 
 interface NicheData {
   name: string;
@@ -38,13 +37,6 @@ interface IcpData {
   criteria: Record<string, unknown>;
 }
 
-interface IcpProfile {
-  id: string;
-  name: string;
-  nicheId: string | null;
-  isActive: boolean;
-}
-
 interface Offering {
   id: string;
   name: string;
@@ -56,54 +48,44 @@ interface NicheProfile {
   id: string;
   name: string;
   description: string | null;
-  industryId: string | null;
+  industry: string | null;
   keywords: string[];
-  memberCount: number;
+  member_count: number;
 }
 
 export default function DiscoverPage() {
   const [niches, setNiches] = useState<NicheData[]>([]);
   const [icps, setIcps] = useState<IcpData[]>([]);
   const [totalContacts, setTotalContacts] = useState(0);
-  const [addressedCount, setAddressedCount] = useState(0);
-  const [unaddressedCount, setUnaddressedCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   const [selectedNiche, setSelectedNiche] = useState<string | null>(null);
   const [selectedIcp, setSelectedIcp] = useState<string | null>(null);
 
-  // Goal engine — fires on niche/ICP selection changes
-  useGoalEngine({
-    selectedNicheId: selectedNiche ?? undefined,
-    selectedIcpId: selectedIcp ?? undefined,
-  });
-
   // Niche profiles (user-defined) for dropdown
   const [nicheProfiles, setNicheProfiles] = useState<NicheProfile[]>([]);
-
-  // ICP profiles (user-defined) for dropdown — distinct from wedge-data ICPs
-  const [icpProfiles, setIcpProfiles] = useState<IcpProfile[]>([]);
 
   // Offerings
   const [offerings, setOfferings] = useState<Offering[]>([]);
   const [selectedOfferings, setSelectedOfferings] = useState<string[]>([]);
   const [offeringInput, setOfferingInput] = useState("");
 
+  // Track whether user has manually changed selections
+  const [userOverrode, setUserOverrode] = useState(false);
+
   const loadData = useCallback(async () => {
     try {
-      const [wedgeRes, offeringsRes, nichesRes, icpsRes] = await Promise.all([
+      const [wedgeRes, offeringsRes, nichesRes, desiredRes] = await Promise.all([
         fetch("/api/discover/wedge-data"),
         fetch("/api/offerings"),
         fetch("/api/niches"),
-        fetch("/api/icps"),
+        fetch("/api/profile/desired-icp"),
       ]);
       if (wedgeRes.ok) {
         const json = await wedgeRes.json();
         setNiches(json.data?.niches ?? []);
         setIcps(json.data?.icps ?? []);
         setTotalContacts(json.data?.totalContacts ?? 0);
-        setAddressedCount(json.data?.addressedCount ?? 0);
-        setUnaddressedCount(json.data?.unaddressedCount ?? 0);
       }
       if (offeringsRes.ok) {
         const json = await offeringsRes.json();
@@ -113,16 +95,27 @@ export default function DiscoverPage() {
         const json = await nichesRes.json();
         setNicheProfiles(json.data || []);
       }
-      if (icpsRes.ok) {
-        const json = await icpsRes.json();
-        setIcpProfiles(json.data || []);
+      // C4: Pre-select saved desired ICP defaults (only on initial load)
+      if (desiredRes.ok) {
+        const json = await desiredRes.json();
+        const config = json.data as {
+          nicheId: string | null;
+          icpId: string | null;
+          offeringIds: string[];
+          isDefault: boolean;
+        } | null;
+        if (config?.isDefault && !userOverrode) {
+          if (config.nicheId) setSelectedNiche(config.nicheId);
+          if (config.icpId) setSelectedIcp(config.icpId);
+          if (config.offeringIds?.length) setSelectedOfferings(config.offeringIds);
+        }
       }
     } catch {
       // Empty state
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userOverrode]);
 
   useEffect(() => {
     loadData();
@@ -178,9 +171,7 @@ export default function DiscoverPage() {
           <label className="text-xs font-medium text-muted-foreground mb-1 block">Niche</label>
           <Select
             value={selectedNiche ?? "all"}
-            onValueChange={(v) => {
-              setSelectedNiche(v === "all" ? null : v);
-            }}
+            onValueChange={(v) => { setUserOverrode(true); setSelectedNiche(v === "all" ? null : v); }}
           >
             <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="All niches" />
@@ -196,21 +187,21 @@ export default function DiscoverPage() {
           </Select>
         </div>
 
-        {/* ICP Profile selector — filtered by selected niche */}
+        {/* ICP Profile selector */}
         <div className="w-48">
           <label className="text-xs font-medium text-muted-foreground mb-1 block">ICP Profile</label>
           <Select
             value={selectedIcp ?? "all"}
-            onValueChange={(v) => setSelectedIcp(v === "all" ? null : v)}
+            onValueChange={(v) => { setUserOverrode(true); setSelectedIcp(v === "all" ? null : v); }}
           >
             <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="All ICPs" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All ICPs</SelectItem>
-              {icpProfiles.map((p) => (
+              {icps.map((p) => (
                 <SelectItem key={p.id} value={p.id}>
-                  {p.name}
+                  {p.name} ({p.matchCount})
                 </SelectItem>
               ))}
             </SelectContent>
@@ -280,8 +271,6 @@ export default function DiscoverPage() {
           <WedgeChart
             niches={niches}
             totalContacts={totalContacts}
-            addressedCount={addressedCount}
-            unaddressedCount={unaddressedCount}
             selectedNiche={selectedNiche}
             onNicheSelect={setSelectedNiche}
           />
