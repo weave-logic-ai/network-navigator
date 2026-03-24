@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NetworkGraph } from "@/components/network/network-graph";
 import { GraphControls } from "@/components/network/graph-controls";
 import { ClusterSidebar } from "@/components/network/cluster-sidebar";
@@ -13,6 +15,13 @@ import type {
   EdgeFilterMode,
 } from "@/components/network/network-graph";
 import { Layers } from "lucide-react";
+
+// Dynamic import for Sigma.js — no SSR since it needs canvas/DOM
+const SigmaGraph = dynamic(
+  () =>
+    import("@/components/network/sigma-graph").then((m) => m.SigmaGraph),
+  { ssr: false, loading: () => <div className="h-[600px] flex items-center justify-center text-muted-foreground">Loading graph...</div> }
+);
 
 export default function NetworkPage() {
   const [computing, setComputing] = useState(false);
@@ -26,6 +35,7 @@ export default function NetworkPage() {
   const [highlightedCluster, setHighlightedCluster] = useState<string | null>(
     null
   );
+  const [activeTab, setActiveTab] = useState<string>("sigma");
 
   const handleCompute = useCallback(async () => {
     setComputing(true);
@@ -65,32 +75,52 @@ export default function NetworkPage() {
         }
       />
 
-      <div className="flex flex-1 gap-4 overflow-hidden">
-        <GraphControls
-          layout={layout}
-          colorBy={colorBy}
-          sizeBy={sizeBy}
-          edgeFilter={edgeFilter}
-          showClusters={showClusters}
-          onLayoutChange={setLayout}
-          onColorByChange={setColorBy}
-          onSizeByChange={setSizeBy}
-          onEdgeFilterChange={setEdgeFilter}
-          onShowClustersChange={setShowClusters}
-        />
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
+        <TabsList className="w-auto self-start mb-2">
+          <TabsTrigger value="sigma">Sigma (10K+)</TabsTrigger>
+          <TabsTrigger value="classic">Classic (3D)</TabsTrigger>
+        </TabsList>
 
-        <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
-          <NetworkGraph
-            layout={layout}
-            colorBy={colorBy}
-            sizeBy={sizeBy}
-            edgeFilter={edgeFilter}
-            showClusters={showClusters}
-            highlightedCluster={highlightedCluster}
-            refreshKey={refreshKey}
-          />
-        </div>
-      </div>
+        <TabsContent value="sigma" className="flex-1 overflow-hidden mt-0">
+          <div className="h-full rounded-lg border bg-background overflow-hidden">
+            <SigmaGraph
+              limit={500}
+              onNodeClick={(id: string) => {
+                window.location.href = `/contacts/${id}`;
+              }}
+            />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="classic" className="flex-1 overflow-hidden mt-0">
+          <div className="flex flex-1 gap-4 overflow-hidden h-full">
+            <GraphControls
+              layout={layout}
+              colorBy={colorBy}
+              sizeBy={sizeBy}
+              edgeFilter={edgeFilter}
+              showClusters={showClusters}
+              onLayoutChange={setLayout}
+              onColorByChange={setColorBy}
+              onSizeByChange={setSizeBy}
+              onEdgeFilterChange={setEdgeFilter}
+              onShowClustersChange={setShowClusters}
+            />
+
+            <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
+              <NetworkGraph
+                layout={layout}
+                colorBy={colorBy}
+                sizeBy={sizeBy}
+                edgeFilter={edgeFilter}
+                showClusters={showClusters}
+                highlightedCluster={highlightedCluster}
+                refreshKey={refreshKey}
+              />
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
 
       <ClusterSidebar
         open={clusterSidebarOpen}
