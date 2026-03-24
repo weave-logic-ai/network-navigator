@@ -25,7 +25,7 @@ import {
   ArrowRight,
   Pencil,
 } from "lucide-react";
-import { DimensionParallel } from "@/components/charts/dimension-parallel";
+import { DimensionRadar } from "@/components/contacts/dimension-radar";
 
 interface ContactDetail {
   id: string;
@@ -61,6 +61,24 @@ interface ScoreBreakdown {
     weightedValue: number;
     weight: number;
   }>;
+}
+
+interface IcpCriterionResult {
+  criterion: string;
+  label: string;
+  matched: boolean;
+  matchDetail: string | null;
+  rawValue: string | null;
+  score: number;
+}
+
+interface IcpBreakdown {
+  icpId: string | null;
+  icpName: string;
+  nicheId: string | null;
+  nicheName: string | null;
+  overallFit: number;
+  criteria: IcpCriterionResult[];
 }
 
 const DIMENSION_LABELS: Record<string, string> = {
@@ -129,6 +147,7 @@ export default function ContactDetailPage() {
   const contactId = params.id as string;
   const [contact, setContact] = useState<ContactDetail | null>(null);
   const [scores, setScores] = useState<ScoreBreakdown | null>(null);
+  const [icpBreakdown, setIcpBreakdown] = useState<IcpBreakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [enriching, setEnriching] = useState<string | null>(null);
   const [enrichResult, setEnrichResult] = useState<string | null>(null);
@@ -172,10 +191,11 @@ export default function ContactDetailPage() {
 
   const loadContact = useCallback(async () => {
     try {
-      const [contactRes, scoresRes, providersRes] = await Promise.all([
+      const [contactRes, scoresRes, providersRes, icpRes] = await Promise.all([
         fetch(`/api/contacts/${contactId}`),
         fetch(`/api/contacts/${contactId}/scores`),
         fetch("/api/enrichment/providers"),
+        fetch(`/api/contacts/${contactId}/icp-breakdown`),
       ]);
 
       if (contactRes.ok) {
@@ -191,6 +211,11 @@ export default function ContactDetailPage() {
       if (providersRes.ok) {
         const json = await providersRes.json();
         setProviders(json.data || []);
+      }
+
+      if (icpRes.ok) {
+        const json = await icpRes.json();
+        setIcpBreakdown(json.data);
       }
     } catch {
       // Error state handled by null checks
@@ -917,19 +942,74 @@ export default function ContactDetailPage() {
                     <CardTitle className="text-sm">Dimension Profile</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <DimensionParallel
-                      data={[
-                        {
-                          name: displayName,
-                          dimensions: Object.fromEntries(
-                            scores.dimensions.map((d) => [
-                              DIMENSION_LABELS[d.dimension] || d.dimension,
-                              d.rawValue,
-                            ])
-                          ),
-                        },
-                      ]}
+                    <DimensionRadar
+                      dimensions={scores.dimensions}
+                      labels={DIMENSION_LABELS}
                     />
+                  </CardContent>
+                </Card>
+              )}
+
+              {icpBreakdown && icpBreakdown.criteria.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm flex items-center justify-between">
+                      <span>ICP Fit Breakdown</span>
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {(icpBreakdown.overallFit * 100).toFixed(0)}% fit
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="text-xs text-muted-foreground">
+                      Scored against:{" "}
+                      <span className="font-medium text-foreground">
+                        {icpBreakdown.icpName}
+                      </span>
+                      {icpBreakdown.nicheName && (
+                        <span>
+                          {" "}
+                          ({icpBreakdown.nicheName})
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      {icpBreakdown.criteria.map((c) => (
+                        <div
+                          key={c.criterion}
+                          className="flex items-start gap-2 text-sm"
+                        >
+                          <span
+                            className={`mt-0.5 flex-shrink-0 text-xs ${
+                              c.matched
+                                ? "text-green-600"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            {c.matched ? "+" : "-"}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between">
+                              <span
+                                className={
+                                  c.matched
+                                    ? "font-medium"
+                                    : "text-muted-foreground"
+                                }
+                              >
+                                {c.label}
+                              </span>
+                              <span className="text-xs text-muted-foreground ml-2">
+                                {(c.score * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div className="text-xs text-muted-foreground truncate">
+                              {c.matchDetail || c.rawValue}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </CardContent>
                 </Card>
               )}
