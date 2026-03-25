@@ -105,8 +105,25 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
   const newGoals: GoalCandidate[] = [];
   const errors: string[] = [];
 
+  // Gate: skip most goals until user has imported data
+  const importCheck = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM import_sessions WHERE status = 'completed'`
+  );
+  const hasImportedData = parseInt(importCheck.rows[0].c, 10) > 0;
+
+  if (!hasImportedData) {
+    // No data yet — don't suggest anything; let them import first
+    return { newGoals, errors };
+  }
+
+  // Gate: skip outreach/relationship/hub goals until user has set an ICP
+  const icpCheck = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM icp_profiles WHERE is_active = TRUE`
+  );
+  const hasActiveIcp = parseInt(icpCheck.rows[0].c, 10) > 0;
+
   // Gather checks
-  const contextCheckFns = selectContextChecks(ctx);
+  const contextCheckFns = hasActiveIcp ? selectContextChecks(ctx) : [];
   const bgCheckFns = selectBackgroundChecks();
   const allChecks = [...contextCheckFns, ...bgCheckFns];
 

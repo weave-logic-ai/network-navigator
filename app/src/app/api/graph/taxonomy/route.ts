@@ -53,11 +53,11 @@ export async function GET() {
          ip.is_active AS i_is_active,
          (
            SELECT COUNT(*)::text
-           FROM contact_scores cs
-           WHERE cs.icp_profile_id = ip.id
+           FROM contact_icp_fits cif
+           WHERE cif.icp_profile_id = ip.id
          ) AS icp_match_count
-       FROM verticals v
-       LEFT JOIN niche_profiles np ON np.vertical_id = v.id
+       FROM industries v
+       LEFT JOIN niche_profiles np ON np.industry_id = v.id
        LEFT JOIN icp_profiles ip ON ip.niche_id = np.id
        ORDER BY v.name, np.name, ip.name`
     );
@@ -128,12 +128,12 @@ export async function GET() {
          ip.name AS i_name,
          (
            SELECT COUNT(*)::text
-           FROM contact_scores cs
-           WHERE cs.icp_profile_id = ip.id
+           FROM contact_icp_fits cif
+           WHERE cif.icp_profile_id = ip.id
          ) AS icp_match_count
        FROM niche_profiles np
        LEFT JOIN icp_profiles ip ON ip.niche_id = np.id
-       WHERE np.vertical_id IS NULL
+       WHERE np.industry_id IS NULL
        ORDER BY np.name, ip.name`
     );
 

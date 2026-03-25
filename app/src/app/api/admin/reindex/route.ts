@@ -42,53 +42,40 @@ export async function POST(request: NextRequest) {
           errors: embedResult.errors,
         });
 
-        // Phase 2: Niche member counts
+        // Phase 2: Niche member counts (single batch query)
         send({ phase: 'niche-counts', status: 'starting', detail: 'Updating niche member counts...' });
 
-        const nichesResult = await query<{ id: string; keywords: string[] }>(
-          'SELECT id, keywords FROM niche_profiles'
+        const nicheCountResult = await query<{ id: string; member_count: string }>(
+          `UPDATE niche_profiles np SET member_count = sub.cnt
+           FROM (
+             SELECT np2.id, COUNT(DISTINCT c.id)::text AS cnt
+             FROM niche_profiles np2
+             CROSS JOIN LATERAL unnest(np2.keywords) AS kw(word)
+             JOIN contacts c ON c.is_archived = FALSE AND c.degree > 0
+               AND (c.title ILIKE '%' || kw.word || '%'
+                 OR c.headline ILIKE '%' || kw.word || '%'
+                 OR c.current_company ILIKE '%' || kw.word || '%')
+             WHERE np2.keywords IS NOT NULL AND array_length(np2.keywords, 1) > 0
+             GROUP BY np2.id
+           ) sub
+           WHERE np.id = sub.id
+           RETURNING np.id, np.member_count::text`
         );
 
-        let nichesDone = 0;
-        for (const niche of nichesResult.rows) {
-          if (!niche.keywords || niche.keywords.length === 0) {
-            nichesDone++;
-            continue;
-          }
-
-          const kwConditions = niche.keywords.map((_, i) =>
-            `c.title ILIKE '%' || $${i + 2} || '%' OR c.headline ILIKE '%' || $${i + 2} || '%' OR c.current_company ILIKE '%' || $${i + 2} || '%'`
-          ).join(' OR ');
-
-          const countResult = await query<{ ct: string }>(
-            `SELECT COUNT(*)::text AS ct FROM contacts c
-             WHERE c.is_archived = FALSE AND c.degree > 0 AND (${kwConditions})`,
-            [niche.id, ...niche.keywords]
-          );
-
-          await query(
-            'UPDATE niche_profiles SET member_count = $1 WHERE id = $2',
-            [parseInt(countResult.rows[0].ct, 10), niche.id]
-          );
-
-          nichesDone++;
-          if (nichesDone % 5 === 0) {
-            send({
-              phase: 'niche-counts',
-              status: 'progress',
-              current: nichesDone,
-              total: nichesResult.rows.length,
-            });
-          }
-        }
+        // Zero out niches with no matches
+        await query(
+          `UPDATE niche_profiles SET member_count = 0
+           WHERE keywords IS NULL OR array_length(keywords, 1) IS NULL OR array_length(keywords, 1) = 0
+              OR id NOT IN (SELECT id FROM niche_profiles WHERE member_count > 0)`
+        );
 
         send({
           phase: 'niche-counts',
           status: 'complete',
-          total: nichesResult.rows.length,
+          total: nicheCountResult.rowCount ?? 0,
         });
 
-        // Phase 3: ICP fit scoring (populate contact_icp_fits using embeddings if available)
+        // Phase 3: ICP fit scoring (batch per ICP using criteria roles/industries)
         send({ phase: 'icp-scores', status: 'starting', detail: 'Computing ICP fit scores...' });
 
         const icpsResult = await query<{ id: string; criteria: Record<string, unknown> }>(
@@ -105,47 +92,43 @@ export async function POST(request: NextRequest) {
             continue;
           }
 
-          // Build match conditions
-          const conditions: string[] = [];
-          const params: unknown[] = [];
-          let idx = 1;
-
-          if (roles.length > 0) {
-            const roleConds = roles.map((r) => {
-              params.push(r);
-              return `c.title ILIKE '%' || $${idx++} || '%'`;
-            });
-            conditions.push(`(${roleConds.join(' OR ')})`);
+          // Use unnest-based matching instead of building dynamic ILIKE chains
+          // Match: any role keyword in title AND any industry keyword in headline/company
+          if (roles.length > 0 && industries.length > 0) {
+            await query(
+              `INSERT INTO contact_icp_fits (contact_id, icp_profile_id, fit_score, computed_at)
+               SELECT c.id, $3::uuid, 0.5, NOW()
+               FROM contacts c
+               WHERE c.is_archived = FALSE AND c.degree > 0
+                 AND EXISTS (SELECT 1 FROM unnest($1::text[]) r WHERE c.title ILIKE '%' || r || '%')
+                 AND EXISTS (SELECT 1 FROM unnest($2::text[]) ind WHERE c.headline ILIKE '%' || ind || '%' OR c.current_company ILIKE '%' || ind || '%')
+               ON CONFLICT (contact_id, icp_profile_id) DO UPDATE SET
+                 fit_score = 0.5, computed_at = NOW()`,
+              [roles, industries, icp.id]
+            );
+          } else if (roles.length > 0) {
+            await query(
+              `INSERT INTO contact_icp_fits (contact_id, icp_profile_id, fit_score, computed_at)
+               SELECT c.id, $2::uuid, 0.5, NOW()
+               FROM contacts c
+               WHERE c.is_archived = FALSE AND c.degree > 0
+                 AND EXISTS (SELECT 1 FROM unnest($1::text[]) r WHERE c.title ILIKE '%' || r || '%')
+               ON CONFLICT (contact_id, icp_profile_id) DO UPDATE SET
+                 fit_score = 0.5, computed_at = NOW()`,
+              [roles, icp.id]
+            );
+          } else {
+            await query(
+              `INSERT INTO contact_icp_fits (contact_id, icp_profile_id, fit_score, computed_at)
+               SELECT c.id, $2::uuid, 0.5, NOW()
+               FROM contacts c
+               WHERE c.is_archived = FALSE AND c.degree > 0
+                 AND EXISTS (SELECT 1 FROM unnest($1::text[]) ind WHERE c.headline ILIKE '%' || ind || '%' OR c.current_company ILIKE '%' || ind || '%')
+               ON CONFLICT (contact_id, icp_profile_id) DO UPDATE SET
+                 fit_score = 0.5, computed_at = NOW()`,
+              [industries, icp.id]
+            );
           }
-
-          if (industries.length > 0) {
-            const indConds = industries.map((ind) => {
-              params.push(ind);
-              return `(c.headline ILIKE '%' || $${idx} || '%' OR c.current_company ILIKE '%' || $${idx} || '%')`;
-            });
-            // Fix: each param used once with idx increment
-            industries.forEach(() => idx++);
-            conditions.push(`(${indConds.join(' OR ')})`);
-          }
-
-          const whereClause = conditions.length > 1
-            ? conditions.join(' AND ')
-            : conditions[0] || 'FALSE';
-
-          // Upsert matching contacts into contact_icp_fits
-          const icpIdParam = `$${idx}`;
-          params.push(icp.id);
-
-          await query(
-            `INSERT INTO contact_icp_fits (contact_id, icp_profile_id, fit_score, computed_at)
-             SELECT c.id, ${icpIdParam}, 0.5, NOW()
-             FROM contacts c
-             WHERE c.is_archived = FALSE AND c.degree > 0 AND (${whereClause})
-             ON CONFLICT (contact_id, icp_profile_id) DO UPDATE SET
-               fit_score = 0.5,
-               computed_at = NOW()`,
-            params
-          );
 
           icpsDone++;
           send({

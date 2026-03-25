@@ -53,26 +53,40 @@ export async function scoreContact(
 
   // Load active ICP profiles
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
-  let defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
 
-  // Resolve taxonomy chain to enrich ICP criteria with industry/niche context
-  if (icpProfiles[0]?.id) {
-    try {
-      const chain = await resolveTaxonomyChain(icpProfiles[0].id);
-      if (chain.industry || chain.niche) {
-        defaultIcpCriteria = {
-          ...defaultIcpCriteria,
-          ...(chain.industry ? { industries: [chain.industry.name] } : {}),
-          ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
-        };
-      }
-    } catch {
-      // Taxonomy resolution is non-blocking — use raw criteria
+  // Find the best-matching ICP for this contact's composite score
+  let bestIcpCriteria: IcpCriteria | undefined;
+  let bestIcpFit = -1;
+  const icpFitScorer = new IcpFitScorer();
+  for (const icp of icpProfiles) {
+    const fit = icpFitScorer.score(contact, icp.criteria);
+    if (fit > bestIcpFit) {
+      bestIcpFit = fit;
+      bestIcpCriteria = icp.criteria;
     }
   }
 
-  // Phase 1: Compute composite score (9 dimensions)
-  const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);
+  // Enrich best ICP criteria with taxonomy context
+  if (bestIcpCriteria) {
+    const bestIcp = icpProfiles.find(p => p.criteria === bestIcpCriteria);
+    if (bestIcp?.id) {
+      try {
+        const chain = await resolveTaxonomyChain(bestIcp.id);
+        if (chain.industry || chain.niche) {
+          bestIcpCriteria = {
+            ...bestIcpCriteria,
+            ...(chain.industry ? { industries: [chain.industry.name] } : {}),
+            ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
+          };
+        }
+      } catch {
+        // Taxonomy resolution is non-blocking
+      }
+    }
+  }
+
+  // Phase 1: Compute composite score (9 dimensions) using best-matching ICP
+  const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestIcpCriteria);
 
   // Phase 2: Compute referral scoring
   try {
@@ -168,7 +182,7 @@ export async function scoreBatch(
   // If no IDs provided, score all non-archived contacts
   const ids = contactIds ?? await scoringQueries.getAllContactIds();
   const icpProfiles = await scoringQueries.getActiveIcpProfiles();
-  const defaultIcpCriteria: IcpCriteria | undefined = icpProfiles[0]?.criteria;
+  const batchIcpFitScorer = new IcpFitScorer();
 
   // Pre-compute baselines for referral scoring (once for the batch)
   let baselines = { p90Mutuals: 20, p90Edges: 10, totalClusters: 5 };
@@ -188,8 +202,16 @@ export async function scoreBatch(
       const availableDimensions = getAvailableDimensions(contact);
       const weights = weightManager.redistributeWeights(availableDimensions);
 
+      // Find best-matching ICP for this contact
+      let bestCriteria: IcpCriteria | undefined;
+      let bestFit = -1;
+      for (const icp of icpProfiles) {
+        const fit = batchIcpFitScorer.score(contact, icp.criteria);
+        if (fit > bestFit) { bestFit = fit; bestCriteria = icp.criteria; }
+      }
+
       // Phase 1
-      const score = computeCompositeScore(contact, ALL_SCORERS, weights, defaultIcpCriteria);
+      const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestCriteria);
 
       // Phase 2: Referral scoring
       try {

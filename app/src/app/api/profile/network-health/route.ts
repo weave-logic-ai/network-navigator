@@ -146,7 +146,7 @@ export async function GET() {
 
       // Embedding count
       query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM profile_embeddings`
+        `SELECT COUNT(id)::text AS count FROM profile_embeddings`
       ),
 
       // Recent connections (created in last 30 days)

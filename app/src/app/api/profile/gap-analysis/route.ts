@@ -144,47 +144,69 @@ export async function GET() {
     const desiredIndustries = (icpCriteria.industries as string[]) || [];
     const desiredSignals = (icpCriteria.signals as string[]) || [];
 
-    // Current profile signals
+    // Current profile signals — use full text for substring matching
     const profileSkills = (profile.skills || []).map((s) => s.toLowerCase());
-    const headlineWords = (profile.headline || "")
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 2);
-    const summaryWords = (profile.summary || "")
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 2);
-    const currentSignals = [
-      ...profileSkills,
-      ...headlineWords,
-      ...summaryWords,
-    ];
+    const headlineText = (profile.headline || "").toLowerCase();
+    const summaryText = (profile.summary || "").toLowerCase();
+    const fullProfileText = [headlineText, summaryText, ...profileSkills].join(" ");
     const currentIndustries = profile.industry ? [profile.industry] : [];
 
-    // Compute gaps
-    const missingIndustries = difference(desiredIndustries, currentIndustries);
-    const missingSignals = difference(desiredSignals, currentSignals);
-    const missingNicheKeywords = difference(nicheKeywords, currentSignals);
-    const missingRoles = desiredRoles; // No direct role extraction from profile
+    // Normalize text for fuzzy matching: strip hyphens, &, extra spaces
+    const normalize = (s: string) => s.toLowerCase().replace(/[-&]/g, " ").replace(/\s+/g, " ").trim();
+    const normalizedProfile = normalize(fullProfileText);
+    const normalizedHeadline = normalize(headlineText);
+
+    // Compute gaps — use normalized substring matching against full profile text
+    // Generate common aliases for fuzzy matching
+    const aliases = (kw: string): string[] => {
+      const base = [kw];
+      // e-commerce / ecommerce / e-com / ecom variants
+      if (/e.?comm?erce/i.test(kw) || /e.?com\b/i.test(kw)) {
+        base.push("ecommerce", "e-commerce", "e-com", "ecom");
+      }
+      if (kw.includes("&")) base.push(kw.replace(/&/g, "and"));
+      return base;
+    };
+
+    const profileContains = (keyword: string) => {
+      const variants = aliases(keyword);
+      for (const v of variants) {
+        const vl = v.toLowerCase();
+        if (fullProfileText.includes(vl)) return true;
+        if (normalizedProfile.includes(normalize(vl))) return true;
+      }
+      // Check if any significant word (4+ chars) of the keyword appears in profile
+      const words = normalize(keyword).split(" ").filter((w) => w.length >= 4);
+      if (words.length > 0 && words.some((w) => normalizedProfile.includes(w))) return true;
+      // Reverse check: does any 4+ char word from profile appear in the keyword?
+      // This handles "e-com" in profile matching "ecommerce" keyword
+      const kwNorm = normalize(keyword);
+      const profileWords = normalizedProfile.split(" ").filter((w) => w.length >= 4);
+      return profileWords.some((pw) => kwNorm.includes(pw));
+    };
+
+    const missingIndustries = desiredIndustries.filter((i) => !profileContains(i));
+    const missingSignals = desiredSignals.filter((s) => !profileContains(s));
+    const missingNicheKeywords = nicheKeywords.filter((k) => !profileContains(k));
+    const missingRoles = desiredRoles.filter((r) => !profileContains(r));
 
     // Compute strengths
-    const sharedIndustries = intersect(desiredIndustries, currentIndustries);
-    const sharedSignals = intersect(desiredSignals, currentSignals);
+    const sharedIndustries = desiredIndustries.filter((i) => profileContains(i));
+    const sharedSignals = desiredSignals.filter((s) => profileContains(s));
 
     // Count contacts in desired niche
     let nicheContactCount = 0;
     if (desiredConfig.nicheId) {
       const countResult = await query<{ count: number }>(
-        `SELECT COUNT(DISTINCT cif.contact_id)::int AS count
-         FROM contact_icp_fits cif
-         JOIN icp_profiles ip ON ip.id = cif.icp_profile_id
-         WHERE ip.niche_id = $1`,
+        `SELECT COALESCE(member_count, 0)::int AS count
+         FROM niche_profiles WHERE id = $1`,
         [desiredConfig.nicheId]
       );
       nicheContactCount = countResult.rows[0]?.count ?? 0;
     }
 
     // Compute alignment score (0-100)
+    const matchedNicheKeywords = nicheKeywords.filter((k) => profileContains(k));
     const totalDesired =
       desiredIndustries.length +
       desiredSignals.length +
@@ -193,7 +215,7 @@ export async function GET() {
     const totalMatched =
       sharedIndustries.length +
       sharedSignals.length +
-      intersect(nicheKeywords, currentSignals).length;
+      matchedNicheKeywords.length;
 
     const alignmentScore =
       totalDesired > 0 ? Math.round((totalMatched / totalDesired) * 100) : 0;
@@ -203,7 +225,9 @@ export async function GET() {
 
     // Profile update suggestions for missing niche keywords in headline
     for (const keyword of missingNicheKeywords.slice(0, 2)) {
-      const headlineHas = headlineWords.includes(keyword.toLowerCase());
+      const nkw = normalize(keyword.toLowerCase());
+      const headlineHas = normalizedHeadline.includes(nkw) ||
+        nkw.split(" ").filter((w) => w.length >= 4).some((w) => normalizedHeadline.includes(w));
       if (!headlineHas) {
         suggestions.push({
           type: "profile_update",
@@ -223,7 +247,7 @@ export async function GET() {
 
     // Skill addition suggestions
     for (const signal of missingSignals.slice(0, 2)) {
-      if (!profileSkills.includes(signal.toLowerCase())) {
+      if (!profileContains(signal)) {
         suggestions.push({
           type: "skill_add",
           title: `Add "${signal}" to your Skills section`,

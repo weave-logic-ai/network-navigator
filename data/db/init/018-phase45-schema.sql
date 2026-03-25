@@ -20,7 +20,8 @@ CREATE TRIGGER trg_offerings_updated_at
 INSERT INTO offerings (name, description, sort_order) VALUES
   ('Fractional CTO', 'Strategic technology leadership on a part-time basis', 1),
   ('Automation Assessment', 'Evaluate and identify automation opportunities', 2),
-  ('Agentic Development Pipeline', 'AI-powered development workflow implementation', 3);
+  ('Agentic Development Pipeline', 'AI-powered development workflow implementation', 3)
+ON CONFLICT (name) DO NOTHING;
 
 -- Action log (time machine)
 CREATE TABLE action_log (

@@ -45,8 +45,8 @@ export async function GET() {
         continue;
       }
 
-      // Require at least min_hits keyword matches (2 for multi-keyword niches, 1 for <=2 keywords)
-      const minHits = niche.keywords.length > 2 ? 2 : 1;
+      // Require at least 1 keyword match (consistent with reindex scoring)
+      const minHits = 1;
 
       const countResult = await query<{
         contact_count: string;
@@ -141,7 +141,7 @@ export async function GET() {
               WHERE c.title ILIKE '%' || kw || '%'
                  OR c.headline ILIKE '%' || kw || '%'
                  OR c.current_company ILIKE '%' || kw || '%'
-             ) >= CASE WHEN array_length(np.keywords, 1) > 2 THEN 2 ELSE 1 END`
+             ) >= 1`
     );
     const addressedCount = parseInt(addressedResult.rows[0]?.count || '0', 10);
     const unaddressedCount = totalContacts - addressedCount;

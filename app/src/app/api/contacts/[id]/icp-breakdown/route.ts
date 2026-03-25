@@ -88,9 +88,14 @@ export async function GET(
       icpQuery = `SELECT id, name, niche_id, criteria FROM icp_profiles WHERE id = $1`;
       icpParams = [icpIdParam];
     } else {
-      // Use the first active ICP (matching existing scoring behavior)
-      icpQuery = `SELECT id, name, niche_id, criteria FROM icp_profiles WHERE is_active = true ORDER BY created_at LIMIT 1`;
-      icpParams = [];
+      // Use the best-matching ICP for this contact (highest fit_score from contact_icp_fits)
+      icpQuery = `SELECT ip.id, ip.name, ip.niche_id, ip.criteria
+                  FROM contact_icp_fits cif
+                  JOIN icp_profiles ip ON ip.id = cif.icp_profile_id
+                  WHERE cif.contact_id = $1 AND ip.is_active = TRUE
+                  ORDER BY cif.fit_score DESC
+                  LIMIT 1`;
+      icpParams = [contactId];
     }
 
     const icpRes = await query<{

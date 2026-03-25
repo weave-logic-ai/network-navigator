@@ -15,13 +15,16 @@ import {
   UserCircle,
   PanelLeftClose,
   PanelLeft,
+  Info,
 } from "lucide-react";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { SidebarNavItem } from "./sidebar-nav-item";
+import { useSuggestionEngine } from "@/hooks/use-suggestion-engine";
 import { cn } from "@/lib/utils";
 
 const SIDEBAR_KEY = "sidebar-collapsed";
@@ -46,6 +49,7 @@ const secondaryNav = [
 export function SidebarNav() {
   const [collapsed, setCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const { enabled: suggestionsEnabled, toggle: toggleSuggestions } = useSuggestionEngine();
 
   useEffect(() => {
     const saved = localStorage.getItem(SIDEBAR_KEY);
@@ -109,6 +113,48 @@ export function SidebarNav() {
             ))}
           </nav>
         </ScrollArea>
+        <div className="border-t px-3 py-3">
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex justify-center">
+                  <Switch
+                    checked={suggestionsEnabled}
+                    onCheckedChange={toggleSuggestions}
+                    className="scale-125"
+                  />
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p className="font-medium">Suggestion Engine</p>
+                <p className="text-xs text-muted-foreground max-w-[200px]">
+                  Auto-generates goal and outreach suggestions based on your network data. Keep off until you have imported your contacts and configured an ICP.
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={suggestionsEnabled}
+                onCheckedChange={toggleSuggestions}
+                className="scale-125"
+              />
+              <span className="text-xs font-medium text-muted-foreground select-none">
+                Suggestions
+              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Info className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help shrink-0" />
+                </TooltipTrigger>
+                <TooltipContent side="right" className="max-w-[240px]">
+                  <p className="text-xs">
+                    When enabled, the suggestion engine automatically generates goals and outreach recommendations as you navigate. Keep this off until you have imported your contacts and set up at least one ICP profile.
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+        </div>
       </div>
     </TooltipProvider>
   );

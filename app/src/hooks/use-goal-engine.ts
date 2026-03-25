@@ -32,6 +32,7 @@ interface TickOptions {
   selectedIcpId?: string;
   selectedOfferingIds?: string[];
   viewingContactId?: string;
+  disabled?: boolean;
 }
 
 export function useGoalEngine(options: TickOptions = {}) {
@@ -41,6 +42,7 @@ export function useGoalEngine(options: TickOptions = {}) {
   const abortRef = useRef<AbortController | null>(null);
 
   const fireTick = useCallback(async () => {
+    if (options.disabled) return;
     const now = Date.now();
     if (now - lastTickRef.current < DEBOUNCE_MS) return;
     lastTickRef.current = now;

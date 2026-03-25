@@ -146,7 +146,8 @@ INSERT INTO offerings (name, description, sort_order) VALUES
   ('Due Diligence & Technical Assessment', 'Code audits, architecture reviews, security posture for investors, acquirers, or boards', 3),
   ('Cloud & DevOps Modernization', 'Cloud migration, CI/CD pipeline design, cost optimization, observability, disaster recovery', 4),
   ('Product & Platform Architecture', 'System design for scale, API strategy, data architecture, microservices, tech debt remediation', 5),
-  ('Security & Compliance Program', 'SOC 2 readiness, HIPAA/PCI compliance, security architecture, incident response, vendor risk', 6);
+  ('Security & Compliance Program', 'SOC 2 readiness, HIPAA/PCI compliance, security architecture, incident response, vendor risk', 6)
+ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
 -- ICPs (one per niche — generic fractional CTO buyer persona)

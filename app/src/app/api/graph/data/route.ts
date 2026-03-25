@@ -60,8 +60,9 @@ export async function GET(request: NextRequest) {
     // Collect node IDs for edge filtering
     const nodeIds = nodesResult.rows.map((r) => r.id);
 
-    // Fetch edges where at least one end is in the node set
-    // This captures star-topology edges (self -> connection) properly
+    // Fetch REAL edges only (exclude synthetic mutual-proximity and same-cluster)
+    const REAL_EDGE_TYPES = ['CONNECTED_TO', 'MESSAGED', 'same-company', 'INVITED_BY', 'ENDORSED', 'RECOMMENDED', 'FOLLOWS_COMPANY', 'WORKED_AT', 'EDUCATED_AT', 'WORKS_AT'];
+
     const edgesResult = await query<{
       id: string;
       source_contact_id: string;
@@ -72,8 +73,9 @@ export async function GET(request: NextRequest) {
       `SELECT e.id, e.source_contact_id, e.target_contact_id, e.edge_type, e.weight
        FROM edges e
        WHERE e.target_contact_id = ANY($1)
-         AND e.target_contact_id IS NOT NULL`,
-      [nodeIds]
+         AND e.target_contact_id IS NOT NULL
+         AND e.edge_type = ANY($2)`,
+      [nodeIds, REAL_EDGE_TYPES]
     );
 
     // Add any source nodes that aren't already in the set (e.g., self-contact)

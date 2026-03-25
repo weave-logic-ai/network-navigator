@@ -53,7 +53,7 @@ export async function GET() {
         `SELECT COUNT(*)::text AS count FROM edges`
       ),
       query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM profile_embeddings`
+        `SELECT COUNT(id)::text AS count FROM profile_embeddings`
       ),
       query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM graph_metrics WHERE pagerank > 0`
