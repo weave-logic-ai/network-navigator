@@ -62,7 +62,8 @@ export async function runImportPipeline(
   client: PoolClient,
   filePaths: string[],
   selfContactId: string,
-  selfName: string = ''
+  selfName: string = '',
+  existingSessionId?: string
 ): Promise<ImportSummary> {
   const startTime = Date.now();
   const allErrors: ImportError[] = [];
@@ -91,8 +92,19 @@ export async function runImportPipeline(
     }
   }
 
-  // Create import session
-  const sessionId = await createImportSession(client, files.length);
+  // Use existing session if provided, otherwise create one
+  const sessionId = existingSessionId || await createImportSession(client, files.length);
+  if (existingSessionId) {
+    await updateSessionProgress(client, sessionId, { processedFiles: 0 });
+  }
+
+  // Ensure the self-contact exists so edge FK constraints are satisfied
+  await client.query(
+    `INSERT INTO contacts (id, linkedin_url, first_name, last_name)
+     VALUES ($1, $2, $3, '')
+     ON CONFLICT (id) DO NOTHING`,
+    [selfContactId, `self:${selfContactId}`, selfName || 'Me']
+  );
 
   // Sort files by processing order
   const sortedFiles = files.sort(

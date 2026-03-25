@@ -8,7 +8,7 @@ import { getImportSession, updateImportSession } from '@/lib/db/queries/import';
 import { runImportPipeline } from '@/lib/import/pipeline';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const UPLOAD_DIR = join(process.cwd(), 'uploads', 'imports');
+const UPLOAD_DIR = join(process.env.NODE_ENV === 'production' ? '/data' : process.cwd(), 'uploads', 'imports');
 
 export async function POST(request: NextRequest) {
   try {
@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
     // Fire-and-forget: process in background
     (async () => {
       try {
-        await runImportPipeline(client, filePaths, selfContactId, selfName || '');
+        await runImportPipeline(client, filePaths, selfContactId, selfName || '', sessionId);
       } catch (err) {
         await updateImportSession(sessionId, {
           status: 'failed',
