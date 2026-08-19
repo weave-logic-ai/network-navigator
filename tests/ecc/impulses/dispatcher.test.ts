@@ -69,6 +69,46 @@ describe('dispatchImpulse', () => {
     await expect(dispatchImpulse('missing')).rejects.toThrow('Impulse not found');
   });
 
+  it('warns loudly when no handler is registered for the impulse type', async () => {
+    // Regression guard: an impulse with zero registered handlers returns
+    // handlersExecuted: 0, which is indistinguishable from success. That is
+    // how ECC_IMPULSES=true silently produced zero tasks while
+    // impulse_handlers went unseeded. The dispatch must say so out loud.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockQuery.mockReturnValueOnce(mockRows([impulseRow()])); // load impulse
+      mockQuery.mockReturnValueOnce(mockRows([])); // load handlers -> NONE
+
+      const result = await dispatchImpulse('imp-1');
+
+      expect(result.handlersExecuted).toBe(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toMatch(/\[ecc\/impulses\]/);
+      expect(msg).toMatch(/No enabled handler registered/);
+      expect(msg).toMatch(/tier_changed/); // names the impulse type
+      expect(msg).toMatch(/048-seed-impulse-handlers\.sql/); // points at the fix
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when a handler is registered', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockQuery.mockReturnValueOnce(mockRows([impulseRow()]));
+      mockQuery.mockReturnValueOnce(mockRows([handlerRow()]));
+      mockQuery.mockReturnValueOnce(mockRows([])); // ack insert
+      (executeTaskGenerator as jest.Mock).mockResolvedValueOnce({ tasksCreated: 1 });
+
+      await dispatchImpulse('imp-1');
+
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('routes tier_changed to task_generator and records success ack', async () => {
     mockQuery.mockReturnValueOnce(mockRows([impulseRow()])); // load impulse
     mockQuery.mockReturnValueOnce(mockRows([handlerRow()])); // load handlers

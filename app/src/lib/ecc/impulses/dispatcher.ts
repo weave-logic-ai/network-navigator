@@ -57,6 +57,21 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
   );
 
   const handlers = handlersResult.rows.map(mapHandler);
+
+  // An impulse with no registered handler is dispatched to nobody. That is
+  // indistinguishable from success in the return value (handlersExecuted: 0),
+  // which is exactly how ECC_IMPULSES=true silently produced zero tasks for
+  // as long as impulse_handlers went unseeded. Say so out loud instead.
+  if (handlers.length === 0) {
+    console.warn(
+      `[ecc/impulses] No enabled handler registered for impulse_type ` +
+        `"${impulse.impulseType}" (tenant ${impulse.tenantId}, impulse ${impulseId}). ` +
+        `The impulse was recorded but nothing acted on it. Register a row in ` +
+        `impulse_handlers for this tenant and impulse type — see ` +
+        `data/db/init/048-seed-impulse-handlers.sql.`
+    );
+  }
+
   const results: HandlerExecutionResult[] = [];
 
   for (const handler of handlers) {
