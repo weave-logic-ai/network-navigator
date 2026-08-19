@@ -265,14 +265,14 @@ Scoring weights are managed via the API, not local JSON files. The 9 composite s
 | Dimension | Default Weight | What It Measures |
 |-----------|---------------|------------------|
 | `icp_fit` | 0.20 | How well the contact matches your ICP criteria |
-| `network_hub` | 0.15 | Connection count, cluster breadth, connector role |
+| `network_hub` | 0.10 | Connection count, cluster breadth, connector role |
 | `relationship_strength` | 0.15 | Mutual connections, recency, proximity |
 | `signal_boost` | 0.10 | High-intent keywords in headline/about |
 | `skills_relevance` | 0.10 | Overlap between contact skills and ICP signals |
 | `network_proximity` | 0.05 | Graph distance and shared network paths |
 | `behavioral` | 0.10 | Activity level, engagement signals, connection power |
 | `content_relevance` | 0.10 | Content topics, posting frequency, engagement |
-| `graph_centrality` | 0.05 | PageRank, betweenness, degree centrality |
+| `graph_centrality` | 0.10 | PageRank, betweenness, degree centrality |
 
 Weights must sum to 1.0. Update them via:
 
@@ -282,14 +282,14 @@ PUT /api/scoring/weights
   "name": "default",
   "weights": {
     "icp_fit": 0.20,
-    "network_hub": 0.15,
+    "network_hub": 0.10,
     "relationship_strength": 0.15,
     "signal_boost": 0.10,
     "skills_relevance": 0.10,
     "network_proximity": 0.05,
     "behavioral": 0.10,
     "content_relevance": 0.10,
-    "graph_centrality": 0.05
+    "graph_centrality": 0.10
   }
 }
 ```

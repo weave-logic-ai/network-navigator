@@ -83,7 +83,7 @@ node scripts/pipeline.mjs --health                 # GET  /api/health  and  GET 
 ```
 
 <Callout type="warn">
-`--export` requests `GET /api/admin/export`, which returns a **CSV** response (`Content-Type: text/csv`), not JSON. If you need machine-readable output, query `/api/contacts` directly rather than piping `pipeline.mjs --export`.
+`--export` requests `GET /api/admin/export`, which returns **CSV** (`Content-Type: text/csv`), and writes it out verbatim. Until 2026-08-19 the shared API client parsed every response as JSON, so this flag threw on the CSV body; it now requests a raw response for this path. Expect a `.csv` file, not JSON.
 </Callout>
 
 `--score` and `--enrich` both accept an optional contact ID as the flag's value (`--score abc123`); omit it to let the endpoint pick a target/batch.

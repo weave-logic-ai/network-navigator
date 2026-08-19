@@ -13,7 +13,7 @@ import { relevanceChecks } from './checks/relevance-checks';
 
 const REJECTION_THRESHOLD = 3;   // Need 3 rejections to suppress
 const REJECTION_WINDOW_DAYS = 30;
-const MAX_CONTEXT_CHECKS = 3;
+const MAX_CONTEXT_CANDIDATES = 3;
 const MAX_BACKGROUND_CHECKS = 2;
 
 /**
@@ -59,6 +59,14 @@ async function isDuplicate(goalType: string, ctxHash: string): Promise<boolean> 
 
 /**
  * Select context-aware checks based on the current page/selection.
+ *
+ * Returns ALL checks that apply to this page/context — it does NOT cap the
+ * list here. Capping the check *functions* by push order (as this used to
+ * do) meant some checks never even ran, so their candidates — however
+ * relevant — could never be considered. Instead, every matched check runs,
+ * and the resulting *candidates* are ranked by priority and capped in
+ * tick() via MAX_CONTEXT_CANDIDATES, so the cap drops the least useful
+ * suggestion rather than whichever one happened to be pushed last.
  */
 function selectContextChecks(ctx: TickContext): GoalCheck[] {
   const checks: GoalCheck[] = [];
@@ -88,8 +96,7 @@ function selectContextChecks(ctx: TickContext): GoalCheck[] {
       break;
   }
 
-  // Limit to MAX_CONTEXT_CHECKS
-  return checks.slice(0, MAX_CONTEXT_CHECKS);
+  return checks;
 }
 
 /**
@@ -104,6 +111,13 @@ function selectBackgroundChecks(): GoalCheck[] {
   const pool = [...backgroundChecks, ...signalChecks, ...relevanceChecks];
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, MAX_BACKGROUND_CHECKS);
+}
+
+/**
+ * Format a candidate as "checkType (priority N)" for cap/drop log lines.
+ */
+function describeCandidate(candidate: GoalCandidate): string {
+  return `${candidate.metadata.checkType} (priority ${candidate.priority})`;
 }
 
 /**
@@ -140,14 +154,40 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
     allChecks.map((check) => check(ctx))
   );
 
-  // Collect candidates
-  const candidates: GoalCandidate[] = [];
-  for (const result of results) {
+  // Collect candidates, keeping context-check output separate from
+  // background-check output so the context cap below (MAX_CONTEXT_CANDIDATES)
+  // only applies to context checks — background checks are already capped
+  // upstream, on the check-function pool, via MAX_BACKGROUND_CHECKS.
+  const contextCandidates: GoalCandidate[] = [];
+  const bgCandidates: GoalCandidate[] = [];
+  results.forEach((result, i) => {
     if (result.status === 'fulfilled') {
-      candidates.push(...result.value);
+      const bucket = i < contextCheckFns.length ? contextCandidates : bgCandidates;
+      bucket.push(...result.value);
     }
     // Silently skip failed checks — don't block the tick
+  });
+
+  // Context checks for a single page/selection can produce more candidates
+  // than MAX_CONTEXT_CANDIDATES (e.g. 'discover' with a niche selected runs
+  // icpChecks + hubChecks, up to 4 candidates). Rank by GoalCandidate.priority
+  // (lower = more urgent — the same convention every checks/*.ts module
+  // already uses) and keep the most useful ones. Anything dropped is logged
+  // so the cap is never indistinguishable from "nothing else was relevant".
+  contextCandidates.sort((a, b) => a.priority - b.priority);
+  let keptContextCandidates = contextCandidates;
+  if (contextCandidates.length > MAX_CONTEXT_CANDIDATES) {
+    const dropped = contextCandidates.slice(MAX_CONTEXT_CANDIDATES);
+    keptContextCandidates = contextCandidates.slice(0, MAX_CONTEXT_CANDIDATES);
+    console.warn(
+      `[goals/engine] Context candidate cap reached on page "${ctx.page}": kept ` +
+        `${keptContextCandidates.length}/${contextCandidates.length}, dropped ${dropped.length} ` +
+        `lower-priority candidate(s) — ${dropped.map(describeCandidate).join(', ')}. ` +
+        `Kept: ${keptContextCandidates.map(describeCandidate).join(', ')}.`
+    );
   }
+
+  const candidates: GoalCandidate[] = [...keptContextCandidates, ...bgCandidates];
 
   // Dedup + suppression filter
   for (const candidate of candidates) {

@@ -136,7 +136,7 @@ describe('tick', () => {
     expect(result.newGoals).toEqual([]);
   });
 
-  it('runs icpChecks and hubChecks (truncated to MAX_CONTEXT_CHECKS=3) on discover with a selected niche', async () => {
+  it('runs every matched context check on discover with a selected niche — no check is dropped by push order', async () => {
     mockQuery.mockReturnValueOnce(mockRows([{ c: '1' }])); // hasImportedData
     mockQuery.mockReturnValueOnce(mockRows([{ c: '1' }])); // hasActiveIcp
     mockHealthyEmbeddings();
@@ -145,12 +145,72 @@ describe('tick', () => {
     await tick(ctx);
 
     // Context checks for 'discover' with a niche selected are
-    // [...icpChecks, ...hubChecks] = [icp0, icp1, hub0, hub1], sliced to 3.
+    // [...icpChecks, ...hubChecks] = [icp0, icp1, hub0, hub1]. All of them
+    // run — the cap now applies to the resulting *candidates*, ranked by
+    // priority, not to this check-function list by push order.
     expect(mockIcp0).toHaveBeenCalledWith(ctx);
     expect(mockIcp1).toHaveBeenCalledWith(ctx);
     expect(mockHub0).toHaveBeenCalledWith(ctx);
-    expect(mockHub1).not.toHaveBeenCalled(); // dropped by the MAX_CONTEXT_CHECKS=3 cap
+    expect(mockHub1).toHaveBeenCalledWith(ctx);
     expect(mockRelationship0).not.toHaveBeenCalled();
+  });
+
+  it('caps context candidates by priority when checks produce more than MAX_CONTEXT_CANDIDATES, and logs what was dropped', async () => {
+    mockQuery.mockReturnValueOnce(mockRows([{ c: '1' }])); // hasImportedData
+    mockQuery.mockReturnValueOnce(mockRows([{ c: '1' }])); // hasActiveIcp
+
+    // Four context checks fire (icp0, icp1, hub0, hub1) with distinct
+    // priorities. icp0 is pushed FIRST but has the least-urgent priority (4)
+    // — under the old push-order truncation, hub1 (pushed last) would have
+    // been dropped regardless of relevance. Now the lowest-priority
+    // candidate (icp0) should be the one dropped instead.
+    mockIcp0.mockResolvedValueOnce([candidate({
+      title: 'icp0', priority: 4,
+      metadata: { engine: 'icp_fit', checkType: 'icp0-check', contextHash: 'h-icp0', suggestedTasks: [] },
+    })]);
+    mockIcp1.mockResolvedValueOnce([candidate({
+      title: 'icp1', priority: 1,
+      metadata: { engine: 'icp_fit', checkType: 'icp1-check', contextHash: 'h-icp1', suggestedTasks: [] },
+    })]);
+    mockHub0.mockResolvedValueOnce([candidate({
+      title: 'hub0', priority: 3,
+      metadata: { engine: 'network_hub', checkType: 'hub0-check', contextHash: 'h-hub0', suggestedTasks: [] },
+    })]);
+    mockHub1.mockResolvedValueOnce([candidate({
+      title: 'hub1', priority: 2,
+      metadata: { engine: 'network_hub', checkType: 'hub1-check', contextHash: 'h-hub1', suggestedTasks: [] },
+    })]);
+
+    // Every remaining query in this test (suppression checks for the 3 kept
+    // candidates, plus the embedding-health queries) returns this shape —
+    // treating all kept candidates as suppressed keeps the test focused on
+    // the cap/log behavior without needing dedup/insert mocks per candidate.
+    mockQuery.mockReturnValue(mockRows([{ rejection_count: '3' }]));
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ctx: TickContext = { page: 'discover', selectedNicheId: 'n1' };
+    const result = await tick(ctx);
+
+    expect(mockIcp0).toHaveBeenCalledWith(ctx);
+    expect(mockIcp1).toHaveBeenCalledWith(ctx);
+    expect(mockHub0).toHaveBeenCalledWith(ctx);
+    expect(mockHub1).toHaveBeenCalledWith(ctx);
+
+    // All 4 candidates were suppressed, so nothing gets created — but the
+    // cap/drop logging happens before suppression is even checked.
+    expect(result.newGoals).toEqual([]);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const [warnMessage] = warnSpy.mock.calls[0];
+    expect(warnMessage).toContain('kept 3/4');
+    expect(warnMessage).toContain('dropped 1');
+    expect(warnMessage).toContain('icp1-check (priority 1)');
+    expect(warnMessage).toContain('hub1-check (priority 2)');
+    expect(warnMessage).toContain('hub0-check (priority 3)');
+    expect(warnMessage).toContain('icp0-check (priority 4)'); // the dropped one
+
+    warnSpy.mockRestore();
   });
 
   it('runs only icpChecks on discover without a selected niche', async () => {

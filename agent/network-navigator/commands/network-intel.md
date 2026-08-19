@@ -229,7 +229,7 @@ curl -s http://localhost:3750/api/actions/next | jq .
 ### Export
 
 ```bash
-curl -s http://localhost:3750/api/admin/export --output contacts-export.json
+curl -s http://localhost:3750/api/admin/export --output contacts-export.csv
 ```
 
 ### Graph Computation

@@ -56,14 +56,20 @@ Looks up the contact's tier, persona, and referral persona from `contact_scores`
 | Condition (checked in order) | Recommended Category |
 |-------------------------------|------------------------|
 | Referral persona is `warm-introducer` | `referral_ask` |
-| Referral persona is `white-label-partner` | `partnership_proposal` |
-| Tier `gold` + persona `buyer` | `executive_intro` |
-| Tier `gold` + persona `warm-lead` | `warm_followup` |
-| Tier `silver` + persona `hub` | `network_intro` |
+| Referral persona is `white-label-partner` | `custom` |
+| Tier `gold` + persona `buyer` | `initial_outreach` |
+| Tier `gold` + persona `warm-lead` | `follow_up` |
+| Tier `silver` + persona `hub` | `referral_ask` |
 | Default | `initial_outreach` |
 
-<Callout type="warn">
-The category names `partnership_proposal`, `executive_intro`, `warm_followup`, and `network_intro` produced by this matcher are not in the set of categories the templates API accepts (`initial_outreach`, `follow_up`, `meeting_request`, `referral_ask`, `content_share`, `custom`). In practice this means no template can be created that matches those four categories, so the recommendation endpoint falls through to whatever `initial_outreach` template exists (or returns `null` if none does). This is a mismatch between the recommendation logic and the template schema, not a documentation gap -- worth confirming with the app team before relying on the specialized categories.
+<Callout>
+Every category this matcher can return is one the templates API accepts
+(`initial_outreach`, `follow_up`, `meeting_request`, `referral_ask`,
+`content_share`, `custom`). An earlier version returned four names the
+`outreach_templates.category` CHECK constraint rejects, so those branches
+could never match a real template and silently fell back to
+`initial_outreach`, discarding the persona-specific reasoning. Fixed
+2026-08-19; the mapping above reflects the current code.
 </Callout>
 
 ## Pipeline (Kanban view)

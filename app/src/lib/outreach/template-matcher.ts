@@ -37,6 +37,16 @@ export async function getRecommendedTemplate(
   };
 }
 
+// outreach_templates.category is constrained by a CHECK constraint
+// (data/db/init/006-outreach-schema.sql) and re-validated by
+// POST /api/outreach/templates (VALID_CATEGORIES in
+// app/src/app/api/outreach/templates/route.ts) to exactly:
+//   'initial_outreach' | 'follow_up' | 'meeting_request' |
+//   'referral_ask' | 'content_share' | 'custom'
+// Every branch below must resolve to one of these — a category outside
+// this set can never match a real template, so findTemplateByCategory
+// would always fall through to the initial_outreach default and the
+// persona-specific reasoning would be silently discarded.
 function resolveCategory(
   tier: string,
   persona: string,
@@ -50,29 +60,36 @@ function resolveCategory(
     };
   }
   if (referralPersona === 'white-label-partner') {
+    // No permitted category means "propose a partnership" — that's a
+    // structurally different ask from the standard outreach/follow-up/
+    // meeting/referral/content templates. 'custom' is the schema's
+    // intended escape hatch for exactly this kind of specialized template.
     return {
-      category: 'partnership_proposal',
-      reason: 'Contact is a white-label partner candidate — propose partnership.',
+      category: 'custom',
+      reason: 'Contact is a white-label partner candidate — use a custom partnership proposal template.',
     };
   }
 
   // Tier + persona combinations
   if (tier === 'gold' && persona === 'buyer') {
+    // First contact with a senior decision-maker is still a first contact.
     return {
-      category: 'executive_intro',
-      reason: 'Gold-tier buyer — use executive introduction template.',
+      category: 'initial_outreach',
+      reason: 'Gold-tier buyer — use initial outreach template tailored for an executive audience.',
     };
   }
   if (tier === 'gold' && persona === 'warm-lead') {
     return {
-      category: 'warm_followup',
-      reason: 'Gold-tier warm lead — use warm follow-up template.',
+      category: 'follow_up',
+      reason: 'Gold-tier warm lead — use follow-up template.',
     };
   }
   if (tier === 'silver' && persona === 'hub') {
+    // A "hub" contact is valuable for the introductions/referrals they can
+    // make into their own network — that's what referral_ask covers.
     return {
-      category: 'network_intro',
-      reason: 'Silver-tier hub — use network introduction template.',
+      category: 'referral_ask',
+      reason: 'Silver-tier hub — use referral ask template to tap into their network.',
     };
   }
 
