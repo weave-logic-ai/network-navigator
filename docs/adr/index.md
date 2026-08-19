@@ -19,6 +19,7 @@ their status is updated to `Superseded by ADR-NNN`.
 | [ADR-031](./ADR-031-parser-telemetry-retention.md) | Parser telemetry retention — 90-day raw plus daily aggregate | Accepted (2026-04-17) |
 | [ADR-032](./ADR-032-conflict-resolution-banner.md) | Conflict resolution UI — banner, not silent override | Accepted (2026-04-17) |
 | [ADR-033](./ADR-033-research-mode-rollout.md) | Research-mode rollout — per-user flag plus suggestion-engine nudge | Accepted (2026-04-17) |
+| [ADR-034](./ADR-034-per-component-harness-strategy.md) | Per-component harness strategy — scoring, CI, and the no-op-metric rule | Accepted (2026-08-18) |
 
 ## Sprint grouping
 
@@ -27,9 +28,17 @@ set); source planning under `.planning/research-tools-sprint/`, principally
 `10-decisions.md` which consolidates the operator's answers to the ten open
 questions in `09-open-questions.md`.
 
+ADR-034 is not part of that sprint; it documents the CI/harness/scoring
+architecture adopted for the repo as a whole.
+
+**Caution on numbering**: MetaHarness/ruflo tooling emits its own upstream
+references such as "OIA manifest (ADR-034)" in scan output — that is a
+*different* project's ADR sequence (ruflo's), not this repo's. This
+repo's ADR-034 is the one indexed above.
+
 ## Conventions
 
-- **Numbering**: zero-padded to three digits. Next available: ADR-034.
+- **Numbering**: zero-padded to three digits. Next available: ADR-035.
 - **File name**: `ADR-NNN-<kebab-slug>.md` matching the decision title.
 - **Status values**: `Proposed`, `Accepted`, `Deprecated`, `Superseded by ADR-NNN`.
 - **Dates**: ISO 8601 (YYYY-MM-DD) in the Status line.

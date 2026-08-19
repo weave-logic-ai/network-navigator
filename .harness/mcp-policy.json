@@ -1,0 +1,23 @@
+{
+  "_comment": "Honest snapshot of this repo's ACTUAL MCP governance posture, written for `harness mcp-scan` (metaharness/dist/mcp-scan.js). Every flag below is evidence-based, not aspirational — see _evidence. Do not 'fix' the flags to make the scan pass; fix the actual governance (root .mcp.json / .claude/settings.json) and let this file follow.",
+  "defaultDeny": false,
+  "allowShell": true,
+  "allowNetwork": true,
+  "allowFileWrite": true,
+  "requireApprovalForDangerous": false,
+  "auditLog": false,
+  "toolTimeoutMs": 0,
+  "maxToolCallsPerTurn": 0,
+  "_evidence": {
+    "servers": "Root .mcp.json registers 3 MCP servers: claude-flow (autoStart:false, MCP_GROUP_SECURITY/BROWSER/NEURAL/AGENTIC_FLOW all 'true', CLAUDE_FLOW_MAX_AGENTS:15), ruv-swarm (optional), flow-nexus (optional, requiresAuth).",
+    "defaultDeny": "false — .claude/settings.json permissions.allow includes 'mcp__claude-flow__:*', a blanket grant to every claude-flow tool. Nothing in the repo scopes this to a default-deny + explicit-allow model.",
+    "allowShell": "true — claude-flow exposes terminal_create/terminal_execute and sandbox tools (via the flow-nexus server, MCP_GROUP_BROWSER/AGENTIC_FLOW groups) that run arbitrary commands/code; the blanket 'mcp__claude-flow__:*' allow covers them.",
+    "allowNetwork": "true — http_fetch, browser_act/browser_session_*, github_*, and the flow-nexus/ruv-swarm cloud-sync tools all reach the network; none are host/scope-restricted in .claude/settings.json.",
+    "allowFileWrite": "true — storage_upload/storage_delete, sandbox_upload, and browser download/session tools write to disk or cloud storage; no allowFileWrite=false gate exists.",
+    "requireApprovalForDangerous": "false — no harness-level dangerous-tool approval gate is declared anywhere in this repo. Claude Code's own generic permission-prompt UI is a host feature, not a harness policy this file can take credit for.",
+    "auditLog": "false — .claude/settings.json has PreToolUse/PostToolUse hooks for Bash and Write/Edit (hook-handler.cjs), but no dedicated MCP tool-call audit log. That is a different, narrower mechanism than what this policy field means.",
+    "toolTimeoutMs": "0 (unset) — root .mcp.json declares no per-server or per-tool timeout.",
+    "maxToolCallsPerTurn": "0 (unset) — CLAUDE_FLOW_MAX_AGENTS=15 in .mcp.json's env caps concurrent AGENTS, which is a different metric from tool calls per turn; no equivalent field exists in this repo's config."
+  },
+  "_secretGuard": ".claude/settings.json permissions.deny already blocks Read(./.env) and Read(./.env.*) — this one control IS in place and should show as satisfied, not flagged, when the scanner checks settings.permissions.deny."
+}
