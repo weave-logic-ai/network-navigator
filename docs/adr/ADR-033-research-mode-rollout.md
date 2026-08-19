@@ -1,7 +1,12 @@
 # ADR-033: Research-mode rollout — per-user flag plus suggestion-engine nudge
 
-**Status**: Accepted (date: 2026-04-17) — **Accepted-but-not-implemented;
-code does the literal thing this ADR rejects — Updated: 2026-08-19**
+**Status**: **SUPERSEDED (2026-08-19) by
+[ADR-035](./ADR-035-research-mode-gating-supersedes-033.md)** — originally
+Accepted 2026-04-17, but never implemented; the code does the literal thing
+this ADR rejects. ADR-035 ratifies per-deployment `RESEARCH_*` env flags
+(Q10 Option B) on the grounds that this product has no authentication, so
+the per-user premise below does not yet exist. **Option A is deferred
+pending auth, not rejected** — revisit when authentication lands.
 
 > ## ⚠️ DRIFT WARNING — read this before trusting anything below
 > **(added 2026-08-19, verified against code)**

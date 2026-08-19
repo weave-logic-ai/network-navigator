@@ -18,8 +18,9 @@ their status is updated to `Superseded by ADR-NNN`.
 | [ADR-030](./ADR-030-source-trust-composite-weight.md) | Source trust resolution — composite final_weight = category_default × per_item_multiplier | Accepted (2026-04-17) — Updated 2026-08-19: final_weight is write-time not query-time, formula partial, see file |
 | [ADR-031](./ADR-031-parser-telemetry-retention.md) | Parser telemetry retention — 90-day raw plus daily aggregate | Accepted (2026-04-17) — Updated 2026-08-19: daily roll-up job never built, table permanently empty, see file |
 | [ADR-032](./ADR-032-conflict-resolution-banner.md) | Conflict resolution UI — banner, not silent override | Accepted (2026-04-17) — Updated 2026-08-19: no audit trail on clear, no persisted dismiss state, no impulse trigger, see file |
-| [ADR-033](./ADR-033-research-mode-rollout.md) | Research-mode rollout — per-user flag plus suggestion-engine nudge | **Accepted-but-not-implemented — inverted in practice, Updated 2026-08-19: see drift warning in file** |
+| [ADR-033](./ADR-033-research-mode-rollout.md) | Research-mode rollout — per-user flag plus suggestion-engine nudge | **Superseded by ADR-035 (2026-08-19)** — never implemented; drift warning retained in file |
 | [ADR-034](./ADR-034-per-component-harness-strategy.md) | Per-component harness strategy — scoring, CI, and the no-op-metric rule | Accepted (2026-08-18) |
+| [ADR-035](./ADR-035-research-mode-gating-supersedes-033.md) | Research-mode gating is per-deployment, not per-user (supersedes ADR-033) | Accepted (2026-08-19) |
 
 ## Sprint grouping
 
@@ -38,7 +39,7 @@ repo's ADR-034 is the one indexed above.
 
 ## Conventions
 
-- **Numbering**: zero-padded to three digits. Next available: ADR-035.
+- **Numbering**: zero-padded to three digits. Next available: ADR-036.
 - **File name**: `ADR-NNN-<kebab-slug>.md` matching the decision title.
 - **Status values**: `Proposed`, `Accepted`, `Deprecated`, `Superseded by ADR-NNN`.
 - **Dates**: ISO 8601 (YYYY-MM-DD) in the Status line.
