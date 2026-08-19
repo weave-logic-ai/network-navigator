@@ -1,0 +1,342 @@
+---
+title: Profile API
+description: Owner profile, natural vs. desired ICP, gap analysis, and network health.
+---
+
+# Profile API
+
+Endpoints backing the `/profile` page: the owner's LinkedIn-derived profile, their
+natural ICP (who their profile and network already attract) vs. their desired ICP
+(who they're targeting), the gap between the two, the delta-highlight threshold used
+elsewhere in the app, and the aggregate network health rollup used by the
+[Network Health guide](/docs/guides/network-health).
+
+---
+
+## Get Network Health
+
+```
+GET /api/profile/network-health
+```
+
+Aggregate network health metrics: coverage, scoring distribution, relationship health,
+data completeness, embedding coverage, EMOT (engagement temperature) and SCEN
+(assessment-confidence grade) distributions, and recent activity. Computed on every
+call via a single `Promise.all` of thirteen SQL aggregations — no caching.
+
+**Auth:** None
+
+**Response:**
+
+```json
+{
+  "data": {
+    "totalContacts": 1234,
+    "addressedContacts": 890,
+    "addressedPct": 0.72,
+    "scoredContacts": 1100,
+    "tierDistribution": {
+      "gold": 45,
+      "silver": 120,
+      "bronze": 350,
+      "watch": 500,
+      "unscored": 219
+    },
+    "avgCompositeScore": 0.42,
+    "relationshipDistribution": {
+      "strong": 300,
+      "warm": 250,
+      "cooling": 180,
+      "dormant": 400,
+      "unknown": 104
+    },
+    "avgCompleteness": 0.68,
+    "missingEmailCount": 210,
+    "missingTitleCount": 45,
+    "missingCompanyCount": 60,
+    "embeddingCount": 1100,
+    "embeddingPct": 0.89,
+    "emotDistribution": {
+      "hot": 150,
+      "warm": 400,
+      "cold": 500,
+      "unknown": 184
+    },
+    "scenGradeDistribution": {
+      "A": 200,
+      "B": 350,
+      "C": 400,
+      "D": 200,
+      "F": 84
+    },
+    "recentConnections": 37,
+    "activeGoals": 2,
+    "pendingTasks": 15,
+    "computedAt": "2025-01-15T10:00:00.000Z"
+  }
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|--------------|
+| `totalContacts` | number | Non-archived contact count |
+| `addressedContacts` / `addressedPct` | number | Contacts with at least one ICP fit, and the ratio of total |
+| `scoredContacts` | number | Contacts with a `contact_scores` row |
+| `tierDistribution` | object | Count per tier (gold, silver, bronze, watch, unscored) |
+| `avgCompositeScore` | number | Average composite score across scored contacts |
+| `relationshipDistribution` | object | Bucketed by `message_stats.last_message_at`: `strong` (\<30d), `warm` (30-90d), `cooling` (90-180d), `dormant` (\>180d), `unknown` (no stats) |
+| `avgCompleteness` | number | Average fraction of 6 tracked identity fields filled (email, title, company, headline, location, about) |
+| `missingEmailCount` / `missingTitleCount` / `missingCompanyCount` | number | Contacts missing that specific field |
+| `embeddingCount` / `embeddingPct` | number | Rows in `profile_embeddings`, and coverage ratio |
+| `emotDistribution` | object | Engagement-temperature histogram: `hot` (messaged \<30d), `warm` (created/updated \<90d), `cold` (has some signal, just old), `unknown` (no signal) |
+| `scenGradeDistribution` | object | Grades contacts A-F by how many of the 6 identity fields are filled (A = 6/6, F = ≤2/6) |
+| `recentConnections` | number | Contacts created in the last 30 days |
+| `activeGoals` / `pendingTasks` | number | Counts from `goals`/`tasks` tables |
+| `computedAt` | string | ISO timestamp of computation |
+
+**Error Codes:** `500` — query failure; response body includes `error` and, when available, `details`.
+
+**curl:**
+
+```bash
+curl http://localhost:3750/api/profile/network-health
+```
+
+---
+
+## Get Natural ICP
+
+```
+GET /api/profile/natural-icp
+```
+
+Derives the owner's *natural* ICP — who their profile and network already skew
+toward — from two weighted signal sources: the owner's own LinkedIn profile
+(headline, summary, skills, positions — 60% weight) and their existing network
+(top roles and niches among current contacts — 40% weight). Pure signal
+extraction; nothing is persisted.
+
+**Auth:** None
+
+**Response:** `{ "data": null }` if no `owner_profiles` row exists yet (`is_current = TRUE`), otherwise:
+
+```json
+{
+  "data": {
+    "roles": ["founders", "vp of sales"],
+    "industries": ["SaaS", "Enterprise Software"],
+    "signals": ["b2b", "growth", "outbound"],
+    "profileSignals": {
+      "headlineKeywords": ["growth", "b2b", "saas"],
+      "skillSignals": ["Sales Strategy", "B2B Marketing"],
+      "positionIndustries": ["Acme Inc"],
+      "aboutThemes": ["scaling", "gtm"]
+    },
+    "networkSignals": {
+      "topRoles": [{ "role": "VP Sales", "count": 42 }],
+      "topIndustries": [{ "industry": "Enterprise SaaS", "count": 18 }],
+      "topNiches": [{ "niche": "Enterprise SaaS", "count": 18 }]
+    },
+    "computedAt": "2025-01-15T10:00:00.000Z"
+  }
+}
+```
+
+### Response Fields
+
+`roles`, `industries`, `signals` — deduplicated, capped combined lists (profile signals
+weighted ahead of network signals). `profileSignals` — keyword/skill extraction from
+the owner's own headline, summary, skills, and positions. `networkSignals` — the top
+10 roles (by title prefix before " at ") and top 10 niches among existing contacts,
+each with a count (`topIndustries` is the same niche data, just relabeled). `computedAt` — ISO timestamp.
+
+**Error Codes:** `500` — query failure.
+
+**curl:**
+
+```bash
+curl http://localhost:3750/api/profile/natural-icp
+```
+
+---
+
+## Get / Save Desired ICP
+
+```
+GET  /api/profile/desired-icp
+POST /api/profile/desired-icp
+```
+
+The owner's *desired* ICP — who they're deliberately targeting, as opposed to who
+their profile naturally attracts (see Natural ICP above). Stored as JSON inside
+`owner_profiles.metadata->desiredIcpConfig`; `GET` reads it back, `POST` replaces it
+wholesale.
+
+**Auth:** None
+
+**GET Response:** `{ "data": null }` if nothing saved yet, otherwise:
+
+```json
+{
+  "data": {
+    "nicheId": "uuid",
+    "icpId": "uuid",
+    "offeringIds": ["uuid"],
+    "isDefault": false,
+    "savedAt": "2025-01-15T10:00:00.000Z"
+  }
+}
+```
+
+**POST Body:**
+
+```json
+{
+  "nicheId": "uuid",
+  "icpId": "uuid",
+  "offeringIds": ["uuid"],
+  "isDefault": false
+}
+```
+
+All fields optional; omitted fields default to `null` / `[]` / `false`. Returns the
+same shape as `GET` on success, `404` if no current owner profile row exists to attach
+the config to.
+
+**Error Codes:** `404` — no current owner profile; `500` — query failure.
+
+**curl:**
+
+```bash
+curl http://localhost:3750/api/profile/desired-icp
+curl -X POST http://localhost:3750/api/profile/desired-icp \
+  -H 'Content-Type: application/json' \
+  -d '{"nicheId":"...","icpId":"...","offeringIds":[]}'
+```
+
+---
+
+## Get Gap Analysis
+
+```
+GET /api/profile/gap-analysis
+```
+
+Compares the owner's profile text against the saved Desired ICP config and produces
+an alignment score, the gaps (industries/roles/signals/niche keywords present in the
+desired ICP but not found — via fuzzy substring matching, including common aliases
+like "e-commerce"/"ecommerce" — in the owner's profile text), the overlapping
+strengths, and a ranked list of actionable suggestions (profile edits, content ideas,
+network growth, engagement) with ready-to-use task templates.
+
+**Auth:** None
+
+**Response:** `{ "data": null }` if no `owner_profiles` row exists yet (same
+precondition as Natural ICP, above). If a profile exists but no desired ICP has been
+saved (see above), returns a zeroed-out `GapAnalysis` shape with `alignmentScore: 0`
+and no suggestions. Otherwise:
+
+```json
+{
+  "data": {
+    "alignmentScore": 62,
+    "gaps": {
+      "missingIndustries": ["Fintech"],
+      "missingRoles": ["VP Sales"],
+      "missingSignals": ["outbound"],
+      "missingNicheKeywords": ["e-commerce"],
+      "companySizeMismatch": false
+    },
+    "strengths": {
+      "sharedIndustries": ["SaaS"],
+      "sharedRoles": [],
+      "sharedSignals": ["b2b", "growth"],
+      "nicheContactCount": 18
+    },
+    "suggestions": [
+      {
+        "type": "profile_update",
+        "title": "Add \"e-commerce\" to your headline",
+        "description": "Your headline doesn't mention \"e-commerce\". Enterprise SaaS contacts search for this keyword.",
+        "impact": "high",
+        "effort": "quick",
+        "taskTemplate": {
+          "title": "Update LinkedIn headline to include \"e-commerce\"",
+          "description": "Add \"e-commerce\" to your LinkedIn headline to signal expertise in Enterprise SaaS.",
+          "taskType": "profile_update",
+          "url": "https://www.linkedin.com/in/me/"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Response Fields
+
+`alignmentScore` — 0-100, the share of desired industries/signals/niche-keywords found
+in the profile (desired roles count toward the denominator but never toward the
+numerator, since matched roles aren't tracked — see `sharedRoles` below — so a
+role-heavy desired ICP will score lower even at full alignment). `gaps` — the
+desired-ICP attributes not found in the profile text. `strengths` — the ones that
+were found, plus `nicheContactCount` (current contacts in the desired niche);
+`strengths.sharedRoles` is always `[]` today (only *missing* roles are computed, not
+matched ones) and `gaps.companySizeMismatch` is always `false` (not yet implemented).
+`suggestions` — sorted by impact (high → low) then effort (quick → significant); each
+entry includes a `taskTemplate` shaped for direct use with the
+[Tasks API](/docs/api-reference/goals-tasks).
+
+**Error Codes:** `500` — query failure.
+
+**curl:**
+
+```bash
+curl http://localhost:3750/api/profile/gap-analysis
+```
+
+---
+
+## Get / Update Delta-Highlight Threshold
+
+```
+GET /api/profile/delta-threshold
+PUT /api/profile/delta-threshold
+```
+
+Lightweight settings endpoint backing the delta-highlight threshold slider on
+`/profile`. Owner-level (not per-target), stored as
+`owner_profiles.delta_highlight_threshold`.
+
+**Auth:** None
+
+**GET Response:**
+
+```json
+{ "data": { "threshold": 0.15 } }
+```
+
+If the read fails, `GET` still returns `200` with the default threshold and an
+`error` field, rather than a `500` — the slider always has a usable value.
+
+**PUT Body:**
+
+```json
+{ "threshold": 0.2 }
+```
+
+`threshold` must be a finite number in `[0, 1]`; returns `400` otherwise. On success,
+`PUT` returns the same `{ "data": { "threshold": ... } }` shape as `GET`, echoing the
+persisted value.
+
+**Error Codes:** `400` — invalid threshold; `500` (`PUT` only) — write failure.
+
+**curl:**
+
+```bash
+curl http://localhost:3750/api/profile/delta-threshold
+curl -X PUT http://localhost:3750/api/profile/delta-threshold \
+  -H 'Content-Type: application/json' \
+  -d '{"threshold":0.2}'
+```

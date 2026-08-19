@@ -139,6 +139,24 @@ worst-severity "clean," which is a false clean, not a verified-safe result.
   75 files and caught a genuinely dead `/docs/api-reference/profile`
   reference on its first run); `scripts/` is confirmed to STAY STANDALONE
   and gained 18 assertions over its PII redaction ruleset.
+- **`scripts/` gained a `typecheck` (2026-08-19)** — `tsc --noEmit` over a
+  nodenext + `allowImportingTsExtensions` tsconfig, verified passing with 0
+  errors across all four files, backed by `typescript` and `@types/node` as
+  **typecheck-only** devDependencies. This does NOT undo STAY STANDALONE:
+  *running* the scripts (`node scripts/<name>.ts`) and *testing* them
+  (`node --test`) remain genuinely zero-install, because `redaction.test.ts`
+  imports only `./redaction.ts` and `node:` builtins — verified. Only
+  `npm run typecheck` needs an install, identical in shape to `browser/`'s
+  typecheck dependency, and it is a real check rather than a no-op metric
+  (decision point 4).
+  Note the alternative that was REJECTED, because the reason generalises:
+  pointing `scripts/`'s typecheck at `app/`'s already-installed `tsc` would
+  pass locally and FAIL in CI. Each CI matrix job is independent, installs
+  only its own `working-directory`, and declares no `needs:` — so
+  `app/node_modules` does not exist inside the `scripts` job. Any future
+  cross-component tooling shortcut hits this same wall. This
+  devDependencies-for-typecheck-only shape is now the precedent if folding
+  `scripts/` into `app/` is ever revisited.
 - Because `--if-present` is silent about absent scripts, a future
   contributor could satisfy CI by adding empty scripts. Decision point 4
   exists specifically to make that an explicit violation of documented
