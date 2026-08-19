@@ -1,6 +1,6 @@
 # ADR-034: Per-component harness strategy — scoring, CI, and the no-op-metric rule
 
-**Status**: Accepted (date: 2026-08-18) — **Updated: 2026-08-18**
+**Status**: Accepted (date: 2026-08-18) — **Updated: 2026-08-19**
 
 > **Update 2026-08-18**: every gap this ADR originally recorded as open has
 > since landed. `browser/`, `docs/` and `scripts/` now have real, verified
@@ -91,12 +91,38 @@ worst-severity "clean," which is a false clean, not a verified-safe result.
    build-assertion rather than a unit-test suite; whatever is added must
    verify something real.
 
-5. **The MCP surface false-clean is a recorded gap, not an accepted result.**
-   Until the scanner is fixed to recognize `.mcp.json` (or a
-   `.mcp/servers.json` shim is added in the shape it expects), the
-   `toolSafety: 100` / "clean" verdict for the repo's MCP surface is treated
-   as *unverified*, not *safe*. It must not be cited as a passing security
-   check.
+5. **~~The MCP surface false-clean is a recorded gap.~~ RESOLVED
+   2026-08-18 — and the mechanism above was wrong.** The original text
+   guessed the fix was making the scanner recognize `.mcp.json`, or adding
+   a `.mcp/servers.json` shim. Reading `metaharness/dist/mcp-scan.js`
+   showed otherwise: the scanner reads `.harness/mcp-policy.json`,
+   `.claude/settings.json` and `package.json`, and **never consults the
+   root `.mcp.json` at all** — so the real server registry was structurally
+   invisible to it. (`.mcp/servers.json` belongs to a different command,
+   `harness mcp ls|invoke`.) Fixed by adding `.harness/mcp-policy.json`
+   describing the real posture. The scan moved from `mcpEnabled: false` /
+   "clean" to `mcpEnabled: true` / 8 findings / worst HIGH. The old
+   `toolSafety: 100` was a false clean produced by scanning nothing, and
+   must never be cited as a passing security check.
+
+6. **The permissive MCP posture is an ACCEPTED risk, not an open gap.**
+   Decided by the repo owner 2026-08-19. The blanket `mcp__claude-flow__:*`
+   grant in `.claude/settings.json` stays as-is: this is a single-maintainer
+   local development repo, and the agent tooling needs shell, network and
+   file-write to function. Consequently the 8 findings the scan now reports
+   are **expected output, not a to-do list** — they describe reality, and
+   must not be "fixed" by flipping flags in `.harness/mcp-policy.json`.
+   Knowingly held: arbitrary command execution, unscoped network egress,
+   filesystem and cloud-storage writes, no approval gate, no audit log, no
+   tool timeout, no per-turn call budget. One real control is in place:
+   `permissions.deny` blocks `Read(./.env*)`, so secrets are unreachable.
+   **The scan under-reports this.** metaharness's wildcard check
+   exact-string-matches `mcp__*` / `mcp__*__*`, so the actual
+   `mcp__claude-flow__:*` rule does not trip its `wildcard-tool-perm`
+   finding — the true surface is broader than the 8 findings suggest.
+   This acceptance is scoped to local single-maintainer development and
+   must be revisited before exposing the MCP surface to CI, to a shared or
+   multi-user environment, or to any untrusted input path.
 
 ## Consequences
 
