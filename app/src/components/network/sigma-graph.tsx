@@ -21,6 +21,7 @@ interface SigmaNode {
     pagerank: number;
     score: number;
     degree: number;
+    clusterId: string | null;
   };
 }
 
@@ -58,6 +59,13 @@ interface SigmaGraphProps {
    */
   showProvenanceEdges?: boolean;
   onShowProvenanceEdgesChange?: (next: boolean) => void;
+  /**
+   * ClusterSidebar's "click a cluster to highlight its nodes" feature
+   * (Communities button on the Graph tab). When set to a `clusters.id`,
+   * nodes whose `clusterId` doesn't match are dimmed the same way a search
+   * query dims non-matches — see the node-reducer effect below.
+   */
+  highlightedCluster?: string | null;
 }
 
 const EDGE_TYPE_OPTIONS = [
@@ -76,6 +84,7 @@ export function SigmaGraph({
   onNodeClick,
   showProvenanceEdges = false,
   onShowProvenanceEdgesChange,
+  highlightedCluster = null,
 }: SigmaGraphProps) {
   // Local copy of the toggle: mirrors the parent's value when controlled,
   // otherwise acts as uncontrolled state. Either way, flipping it triggers
@@ -296,8 +305,12 @@ export function SigmaGraph({
     };
   }, [data, onNodeClick]);
 
-  // Search + shift-click flash: the single node reducer combines both
-  // signals so the amber flash survives even when a search is active.
+  // Search + shift-click flash + cluster highlight: the single node reducer
+  // combines all three signals so the amber flash survives even when a
+  // search or cluster filter is active. Search and cluster-highlight are
+  // ANDed — a node must satisfy every active filter to stay fully visible;
+  // failing any one dims it the same way (matches ClusterSidebar's "click a
+  // cluster to highlight its nodes" description).
   useEffect(() => {
     const sigma = sigmaRef.current;
     const graph = graphRef.current;
@@ -306,8 +319,9 @@ export function SigmaGraph({
 
     const hasSearch = Boolean(searchQuery.trim());
     const hasFlash = secondarySetFlash.size > 0;
+    const hasClusterFilter = Boolean(highlightedCluster);
 
-    if (!hasSearch && !hasFlash) {
+    if (!hasSearch && !hasFlash && !hasClusterFilter) {
       sigma.setSetting("nodeReducer", null);
       sigma.setSetting("edgeReducer", null);
       sigma.refresh();
@@ -330,20 +344,26 @@ export function SigmaGraph({
       "nodeReducer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (node: string, data: any) => {
-        // Shift-click amber flash wins over search dimming — the user
-        // needs immediate visual confirmation that the secondary was set.
+        // Shift-click amber flash wins over search/cluster dimming — the
+        // user needs immediate visual confirmation that the secondary was
+        // set.
         if (secondarySetFlash.has(node)) {
           return { ...data, color: "#F59E0B", highlighted: true };
         }
-        if (!hasSearch) return data;
-        if (matchingNodes.has(node)) {
+        const matchesSearch = !hasSearch || matchingNodes.has(node);
+        const matchesCluster =
+          !hasClusterFilter || data.clusterId === highlightedCluster;
+        if (!matchesSearch || !matchesCluster) {
+          return { ...data, color: "#e2e8f0", label: "" };
+        }
+        if (hasSearch || hasClusterFilter) {
           return { ...data, highlighted: true };
         }
-        return { ...data, color: "#e2e8f0", label: "" };
+        return data;
       }
     );
     sigma.refresh();
-  }, [searchQuery, secondarySetFlash]);
+  }, [searchQuery, secondarySetFlash, highlightedCluster]);
 
   const toggleEdgeType = (type: string) => {
     setEdgeTypes((prev) =>

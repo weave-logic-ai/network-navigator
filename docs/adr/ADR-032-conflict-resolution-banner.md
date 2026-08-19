@@ -1,6 +1,33 @@
 # ADR-032: Conflict resolution UI — banner, not silent override
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: Three corrections verified against code.
+> 1. Consequences/Negative claims "When a user clears an override, the
+>    clear action is itself a `causal_node`
+>    (`operation='user_override'` followed by
+>    `operation='user_override_cleared'`)". No such writes exist. `DELETE
+>    /api/targets/[id]/field-overrides`
+>    (`app/src/app/api/targets/[id]/field-overrides/route.ts:100-126`)
+>    calls `clearFieldOverride()` in
+>    `app/src/lib/sources/field-override-service.ts`, which contains zero
+>    references to `causal_node`/`causal_nodes`. Clearing an override
+>    today leaves no audit trail at all — the exact failure mode this ADR
+>    names as something the design preserves against.
+> 2. The Neutral section's per-user, per-target, per-field "`banner_state`
+>    row server-side for the main app" does not exist.
+>    `SourceConflictBanner` (`app/src/components/targets/source-conflict-banner.tsx:104`)
+>    tracks dismissal in `useState<Set<string>>` only — in-memory,
+>    per-page-load, lost on refresh. There is no `banner_state` table
+>    anywhere in `data/db/init/`.
+> 3. The `source.mismatch` impulse type this ADR's "Banner wiring" section
+>    names as the trigger does not exist. `app/src/lib/ecc/types.ts`'s
+>    `ImpulseType` union is `score_computed | tier_changed |
+>    persona_assigned | enrichment_complete | contact_created |
+>    edge_created` — no `source.mismatch` member. In practice,
+>    `SourceConflictBanner` fetches `/api/targets/{id}/field-conflicts` on
+>    component mount (`source-conflict-banner.tsx:109-132`) — a plain REST
+>    poll on page load stands in for the described push-trigger design.
 
 ## Context
 
@@ -56,14 +83,21 @@ resolved. Behavior:
 
 Banner wiring:
 
-- Trigger: the `source.mismatch` impulse fires when a newly-computed
+- ~~Trigger: the `source.mismatch` impulse fires when a newly-computed
   projection disagrees with a user override OR when two sources disagree
-  with non-trivial weight ratio.
+  with non-trivial weight ratio.~~ **Not implemented (2026-08-19)**: no
+  `source.mismatch` impulse type exists. See the update note at the top of
+  this file.
   (`06-evidence-and-provenance.md` §10, lines 230-232)
-- Render: a target-page component consumes the impulse and shows the banner
-  inline with the affected field. Dismissing the banner without clearing
-  the override is allowed — the banner re-appears when another conflicting
-  source arrives.
+- ~~Render: a target-page component consumes the impulse and shows the
+  banner inline with the affected field. Dismissing the banner without
+  clearing the override is allowed — the banner re-appears when another
+  conflicting source arrives.~~ **Correction 2026-08-19**: the component
+  fetches on mount via REST poll, not by consuming an impulse; dismissal
+  is in-memory `useState` only and does not persist across a page
+  reload — so "re-appears when another conflicting source arrives" is
+  accidental (every reload re-shows dismissed banners), not a deliberate
+  re-trigger. See the update note at the top of this file.
 
 ## Consequences
 
@@ -95,19 +129,24 @@ Banner wiring:
   screen real estate. Out of scope this sprint (non-scope in
   `04-targets-and-graph.md` §Non-scope, line 4) but flagged for a future
   pass.
-- **Provenance-chain integrity**. When a user clears an override, the
+- ~~**Provenance-chain integrity**. When a user clears an override, the
   clear action is itself a `causal_node` (`operation='user_override'`
   followed by `operation='user_override_cleared'`) — audit trail stays
   intact. Verified in ADR-029's chain model only for snippets; projection
-  overrides live on their own edge types.
+  overrides live on their own edge types.~~ **Not implemented
+  (2026-08-19)**: `clearFieldOverride()` writes no `causal_node` of any
+  kind. Clearing an override leaves no audit trail. See the update note at
+  the top of this file.
   (`05-source-expansion.md` §13.4, lines 386-388)
 
 ### Neutral
 
-- The banner-dismiss state is per-user, per-target, per-field. Storage in
+- ~~The banner-dismiss state is per-user, per-target, per-field. Storage in
   `chrome.storage.local` on the extension side and in a per-user
   `banner_state` row server-side for the main app. Schema detail is not in
-  this ADR.
+  this ADR.~~ **Not implemented (2026-08-19)**: the main-app side is an
+  in-memory `useState` only, lost on refresh; no `banner_state` table
+  exists. See the update note at the top of this file.
 - ADR-033's research-mode flag gates the banner UI on the main app; the
   sidebar extension banner is always on.
 

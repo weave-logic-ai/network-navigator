@@ -15,6 +15,12 @@ export interface Suggestion {
   description: string;
   impact: "high" | "medium" | "low";
   effort: "quick" | "moderate" | "significant";
+  taskTemplate: {
+    title: string;
+    description: string;
+    taskType: string;
+    url?: string;
+  };
 }
 
 export interface GapAnalysisResult {
@@ -45,6 +51,62 @@ export interface GapAnalysisResult {
   suggestions: Suggestion[];
 }
 
+const EMPTY_GAPS = {
+  missingIndustries: [] as string[],
+  missingRoles: [] as string[],
+  missingSignals: [] as string[],
+  missingNicheKeywords: [] as string[],
+  companySizeMismatch: false,
+};
+
+const EMPTY_STRENGTHS = {
+  sharedIndustries: [] as string[],
+  sharedRoles: [] as string[],
+  sharedSignals: [] as string[],
+  nicheContactCount: 0,
+};
+
+// Normalize for fuzzy matching: strip hyphens/&, collapse whitespace.
+const normalize = (s: string) =>
+  s.toLowerCase().replace(/[-&]/g, " ").replace(/\s+/g, " ").trim();
+
+// Common aliasing (e-commerce/ecommerce, "&" -> "and") so desired-ICP
+// criteria authored with different spelling than the Natural ICP's
+// computed lists still match.
+const aliases = (kw: string): string[] => {
+  const base = [kw];
+  if (/e.?comm?erce/i.test(kw) || /e.?com\b/i.test(kw)) {
+    base.push("ecommerce", "e-commerce", "e-com", "ecom");
+  }
+  if (kw.includes("&")) base.push(kw.replace(/&/g, "and"));
+  return base;
+};
+
+/**
+ * Does `desired` fuzzily match anything in `naturalList`? Used to diff a
+ * desired-ICP criterion against the Natural ICP's computed (and truncated)
+ * roles/industries/signals lists — exact-only matching would miss common
+ * spelling variants (e-commerce vs ecommerce) that both legitimately
+ * describe the same thing.
+ */
+function fuzzyIncludes(desired: string, naturalList: string[]): boolean {
+  const desiredVariants = aliases(desired).map(normalize);
+  const desiredWords = normalize(desired)
+    .split(" ")
+    .filter((w) => w.length >= 4);
+
+  for (const natural of naturalList) {
+    const naturalNorm = normalize(natural);
+    if (desiredVariants.includes(naturalNorm)) return true;
+    if (desiredVariants.some((v) => naturalNorm.includes(v) || v.includes(naturalNorm))) {
+      return true;
+    }
+    const naturalWords = naturalNorm.split(" ").filter((w) => w.length >= 4);
+    if (desiredWords.some((w) => naturalWords.includes(w))) return true;
+  }
+  return false;
+}
+
 /**
  * Run gap analysis between Natural ICP and Desired ICP.
  * Desired ICP is loaded from owner_profiles.metadata.desiredIcpConfig.
@@ -55,7 +117,7 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
 
   // Load desired ICP config from owner profile
   const ownerRes = await query<{ metadata: Record<string, unknown> }>(
-    `SELECT metadata FROM owner_profiles WHERE is_active = TRUE LIMIT 1`
+    `SELECT metadata FROM owner_profiles WHERE is_current = TRUE LIMIT 1`
   ).catch(() => ({ rows: [] }));
 
   const metadata = ownerRes.rows[0]?.metadata || {};
@@ -69,19 +131,8 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
       alignmentScore: 0,
       naturalIcp,
       desiredIcp: null,
-      gaps: {
-        missingIndustries: [],
-        missingRoles: [],
-        missingSignals: [],
-        missingNicheKeywords: [],
-        companySizeMismatch: false,
-      },
-      strengths: {
-        sharedIndustries: [],
-        sharedRoles: [],
-        sharedSignals: [],
-        nicheContactCount: 0,
-      },
+      gaps: EMPTY_GAPS,
+      strengths: EMPTY_STRENGTHS,
       suggestions: [
         {
           type: "profile_update",
@@ -90,6 +141,12 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
             "Go to your Profile page and select a target niche/ICP to enable gap analysis.",
           impact: "high",
           effort: "quick",
+          taskTemplate: {
+            title: "Select a target niche/ICP",
+            description:
+              "Go to your Profile page and select a target niche/ICP to enable gap analysis.",
+            taskType: "profile_update",
+          },
         },
       ],
     };
@@ -111,19 +168,8 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
       alignmentScore: 0,
       naturalIcp,
       desiredIcp: null,
-      gaps: {
-        missingIndustries: [],
-        missingRoles: [],
-        missingSignals: [],
-        missingNicheKeywords: [],
-        companySizeMismatch: false,
-      },
-      strengths: {
-        sharedIndustries: [],
-        sharedRoles: [],
-        sharedSignals: [],
-        nicheContactCount: 0,
-      },
+      gaps: EMPTY_GAPS,
+      strengths: EMPTY_STRENGTHS,
       suggestions: [],
     };
   }
@@ -145,47 +191,46 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
     nicheName = nicheRes.rows[0]?.name || "";
   }
 
-  // Load niche contact count
+  // Load niche contact count — niche_profiles.member_count is the real,
+  // maintained counter (see app/src/lib/taxonomy/service.ts and
+  // app/src/lib/goals/checks/icp-checks.ts). There is no `niche_memberships`
+  // table in this schema.
   let nicheContactCount = 0;
   if (desiredConfig.nicheId) {
-    const countRes = await query<{ cnt: string }>(
-      `SELECT COUNT(*)::text as cnt FROM niche_memberships WHERE niche_id = $1`,
+    const countRes = await query<{ count: number }>(
+      `SELECT COALESCE(member_count, 0)::int AS count
+       FROM niche_profiles WHERE id = $1`,
       [desiredConfig.nicheId]
     );
-    nicheContactCount = parseInt(countRes.rows[0]?.cnt || "0", 10);
+    nicheContactCount = countRes.rows[0]?.count ?? 0;
   }
 
-  // Compare arrays
-  const naturalRolesLower = naturalIcp.roles.map((r) => r.toLowerCase());
-  const naturalIndustriesLower = naturalIcp.industries.map((i) =>
-    i.toLowerCase()
-  );
-  const naturalSignalsLower = naturalIcp.signals.map((s) => s.toLowerCase());
-
+  // Compare desired criteria against the Natural ICP's computed lists
   const missingIndustries = desiredIndustries.filter(
-    (i) => !naturalIndustriesLower.includes(i.toLowerCase())
+    (i) => !fuzzyIncludes(i, naturalIcp.industries)
   );
   const missingRoles = desiredRoles.filter(
-    (r) => !naturalRolesLower.includes(r.toLowerCase())
+    (r) => !fuzzyIncludes(r, naturalIcp.roles)
   );
   const missingSignals = desiredSignals.filter(
-    (s) => !naturalSignalsLower.includes(s.toLowerCase())
+    (s) => !fuzzyIncludes(s, naturalIcp.signals)
   );
   const missingNicheKeywords = desiredKeywords.filter(
-    (k) => !naturalSignalsLower.includes(k.toLowerCase())
+    (k) => !fuzzyIncludes(k, naturalIcp.signals)
   );
 
   const sharedIndustries = desiredIndustries.filter((i) =>
-    naturalIndustriesLower.includes(i.toLowerCase())
+    fuzzyIncludes(i, naturalIcp.industries)
   );
   const sharedRoles = desiredRoles.filter((r) =>
-    naturalRolesLower.includes(r.toLowerCase())
+    fuzzyIncludes(r, naturalIcp.roles)
   );
   const sharedSignals = desiredSignals.filter((s) =>
-    naturalSignalsLower.includes(s.toLowerCase())
+    fuzzyIncludes(s, naturalIcp.signals)
   );
 
-  // Alignment score: weighted combination
+  // Alignment score: 0-100, matching the UI's "{score}%" display and the
+  // shadcn <Progress> component's [0, 100] value range.
   const totalDesired =
     desiredRoles.length +
     desiredIndustries.length +
@@ -197,28 +242,42 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
     sharedSignals.length +
     (desiredKeywords.length - missingNicheKeywords.length);
 
-  const alignmentScore = totalDesired > 0 ? totalMatched / totalDesired : 0;
+  const alignmentScore =
+    totalDesired > 0 ? Math.round((totalMatched / totalDesired) * 100) : 0;
 
   // Generate suggestions
   const suggestions: Suggestion[] = [];
 
   if (missingIndustries.length > 0) {
+    const industry = missingIndustries[0];
     suggestions.push({
       type: "profile_update",
-      title: `Add "${missingIndustries[0]}" to your headline`,
-      description: `Your profile doesn't signal ${missingIndustries[0]} expertise. Add it to attract contacts in this industry.`,
+      title: `Add "${industry}" to your headline`,
+      description: `Your profile doesn't signal ${industry} expertise. Add it to attract contacts in this industry.`,
       impact: "high",
       effort: "quick",
+      taskTemplate: {
+        title: `Update LinkedIn headline to include "${industry}"`,
+        description: `Add "${industry}" to your LinkedIn headline to signal expertise in this industry.`,
+        taskType: "profile_update",
+        url: "https://www.linkedin.com/in/me/",
+      },
     });
   }
 
   if (missingSignals.length > 0) {
+    const signal = missingSignals[0];
     suggestions.push({
       type: "content",
-      title: `Post about ${missingSignals[0]}`,
-      description: `Your desired ICP values "${missingSignals[0]}" but your profile doesn't mention it. Create content to signal expertise.`,
+      title: `Post about ${signal}`,
+      description: `Your desired ICP values "${signal}" but your profile doesn't mention it. Create content to signal expertise.`,
       impact: "medium",
       effort: "moderate",
+      taskTemplate: {
+        title: `Write a post about ${signal}`,
+        description: `Create content covering "${signal}" to build visibility with your desired ICP.`,
+        taskType: "content_creation",
+      },
     });
   }
 
@@ -229,16 +288,29 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
       description: `Only ${nicheContactCount} contacts in your target niche. Aim for 25+.`,
       impact: "medium",
       effort: "significant",
+      taskTemplate: {
+        title: `Find and connect with ${nicheName} professionals`,
+        description: `Search LinkedIn for ${nicheName} professionals. Target: reach 25+ contacts in this niche.`,
+        taskType: "network_growth",
+        url: `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(nicheName)}`,
+      },
     });
   }
 
   if (missingRoles.length > 0) {
+    const role = missingRoles[0];
     suggestions.push({
       type: "engagement",
-      title: `Engage with ${missingRoles[0]} professionals`,
-      description: `Your network lacks ${missingRoles[0]} contacts that match your desired ICP.`,
+      title: `Engage with ${role} professionals`,
+      description: `Your network lacks ${role} contacts that match your desired ICP.`,
       impact: "low",
       effort: "moderate",
+      taskTemplate: {
+        title: `Engage with ${role} professionals`,
+        description: `Find and comment thoughtfully on posts from ${role} professionals this week.`,
+        taskType: "engagement",
+        url: `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(role)}`,
+      },
     });
   }
 

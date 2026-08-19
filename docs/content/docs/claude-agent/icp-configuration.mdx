@@ -1,17 +1,17 @@
 ---
 title: ICP Configuration
-description: Configure Ideal Customer Profiles, scoring weights, tier thresholds, and search niches through the conversational wizard or direct JSON.
+description: Configure Ideal Customer Profiles, niches, offerings, and scoring weights through the app's REST API.
 ---
 
 # ICP Configuration
 
-The ICP (Ideal Customer Profile) configuration is the core of how contacts are scored, tiered, and searched. Three config files drive the system:
+The ICP (Ideal Customer Profile) configuration is the core of how contacts are scored, tiered, and searched. In v2, configuration lives entirely in PostgreSQL and is managed through REST APIs -- there are no local JSON config files.
 
-| File | Purpose | Required |
-|------|---------|----------|
-| `data/icp-config.json` | ICP profiles, scoring weights, tier thresholds, niche keywords | Yes |
-| `data/behavioral-config.json` | Behavioral persona definitions and scoring rules | Optional (ships with defaults) |
-| `data/referral-config.json` | Referral scoring weights, role tiers, persona thresholds | Optional (ships with defaults) |
+| Entity | API | Purpose |
+|--------|-----|---------|
+| ICP Profiles | `POST /api/icps` | Ideal buyer criteria (roles, industries, signals, company size) |
+| Niches | `POST /api/niches` | Named groups of search keywords |
+| Offerings | `POST /api/offerings` | Your services/products, one per business line |
 
 ## Setup Methods
 
@@ -21,34 +21,25 @@ The ICP (Ideal Customer Profile) configuration is the core of how contacts are s
 /linkedin-prospector set up my ICP config
 ```
 
-Claude conducts a structured conversation asking about your business, then generates the configuration non-interactively. This is the recommended approach.
+Claude conducts a structured conversation asking about your business, then creates the configuration via API calls. This is the recommended approach.
 
-### Method 2: Interactive CLI wizard
-
-For humans running scripts directly in a terminal:
-
-```bash
-cd .claude/linkedin-prospector/skills/linkedin-prospector
-node scripts/configure.mjs wizard
-```
-
-### Method 3: Non-interactive CLI
+### Method 2: Non-interactive CLI
 
 Pass the full configuration as JSON for automation:
 
 ```bash
-node scripts/configure.mjs generate --json '{...full config JSON...}'
+node agent/network-navigator/skills/linkedin-prospector/scripts/configure.mjs generate --json '{...full config JSON...}'
 ```
 
-### Method 4: Manual edit
+### Method 3: Direct API calls
 
-Edit `data/icp-config.json` directly, then validate:
+Use `curl` or any HTTP client to call `POST /api/icps`, `/api/niches`, `/api/offerings` directly. See the [API Reference](/docs/api-reference) for full request/response shapes.
 
-```bash
-node scripts/configure.mjs validate
-```
+<Callout type="warn">
+There is no interactive terminal wizard (`configure.mjs wizard`) in v2 -- the script only accepts `validate`, `list`, and `generate --json`. The conversational flow lives in the `/linkedin-prospector` agent, not in the script.
+</Callout>
 
-## The 8-Step Conversational Flow
+## The Agent's Configuration Flow
 
 When you ask Claude to configure your ICP, it follows this structured process:
 
@@ -58,46 +49,41 @@ When you ask Claude to configure your ICP, it follows this structured process:
 
 > "What services do you offer?"
 
-Each service becomes one ICP profile. Example: "I do AI consulting and fractional CTO work" produces two profiles: `ai-consulting` and `fractional-cto`.
+Each service becomes one offering and one or more ICP profiles. Example: "I do AI consulting and fractional CTO work" produces two offerings and two ICP profiles.
 
 ### Ask about target buyers (per service)
 
 > "For [service], who are your ideal buyers? List the job titles starting with highest priority."
 
-Claude maps answers to `rolePatterns`:
-- First 3-5 titles become `high` (decision makers with budget authority)
-- Next 3-5 titles become `medium` (influencers, recommenders)
-- Remaining become `low` (implementers, end users)
-
-Keywords use partial matching: "VP" matches "VP Engineering", "VP Product", etc.
+Maps to the ICP's `criteria.roles` array. Keywords use partial matching: "VP" matches "VP Engineering", "VP Product", etc. "Head of" matches "Head of Engineering", "Head of AI", etc.
 
 ### Ask about target industries
 
 > "What industries are your ideal customers in?"
 
-Mapped to lowercase keywords with synonyms included ("ecommerce" and "e-commerce", "saas" and "software").
+Maps to `criteria.industries`. Include synonyms -- LinkedIn profiles use inconsistent terminology ("ecommerce" and "e-commerce", "saas" and "software").
 
 ### Ask about buying signals
 
 > "What keywords in someone's profile would signal they might need [service]?"
 
-Think about problems ("scaling"), initiatives ("digital transformation"), or technologies ("AI").
+Maps to `criteria.signals`. Think about problems ("scaling"), initiatives ("digital transformation"), or technologies ("AI").
 
 ### Ask about company size (optional)
 
 > "What's the ideal company size range?"
 
-Defaults to `{ "min": 10, "max": 500 }` if unspecified.
+Maps to `criteria.companySizeRanges`. Default: `["11-50", "51-200", "201-500"]`.
 
 ### Ask about search niches
 
-> "What keywords should I search LinkedIn for? Group them into niches."
+> "What keywords should I search for on LinkedIn? Group them into niches."
 
-Each niche is a named group of LinkedIn search keywords.
+Each niche becomes a `POST /api/niches` call with a name and a `keywords` array.
 
-### Assemble and write
+### Assemble and call the API
 
-Claude builds the complete config JSON and runs:
+Claude either calls `POST /api/icps` / `/api/niches` / `/api/offerings` directly, or bundles everything into one call:
 
 ```bash
 node scripts/configure.mjs generate --json '<assembled JSON>'
@@ -109,124 +95,78 @@ node scripts/configure.mjs generate --json '<assembled JSON>'
 node scripts/configure.mjs validate
 ```
 
-Claude reports back: number of profiles created, number of niches defined, and suggests the next step.
+Claude reports back the number of ICP profiles, niches, and offerings created, and suggests the next step (capture contacts via the browser extension).
 
 </Steps>
 
-## Config File Reference
+## ICP Profile Fields
 
-### `icp-config.json` Structure
+**`POST /api/icps` request body:**
 
-```json
-{
-  "profiles": { ... },
-  "scoring": { ... },
-  "goldScore": { ... },
-  "tiers": { ... },
-  "niches": { ... }
-}
-```
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `name` | string | Yes | Human-readable profile name |
+| `description` | string | No | Who this profile targets |
+| `criteria` | object | Yes | Matching criteria (below) |
+| `is_active` | boolean | No | Whether this profile is active (default: true) |
 
-### Profile Definition
-
-Each profile under `profiles` represents one service or offering:
+**`criteria` object:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `label` | string | Human-readable name |
-| `description` | string | Who this profile targets |
-| `rolePatterns.high` | string[] | Decision-maker title keywords (score: 1.0) |
-| `rolePatterns.medium` | string[] | Influencer title keywords (score: 0.7) |
-| `rolePatterns.low` | string[] | End-user title keywords (score: 0.3) |
-| `industries` | string[] | Industry keywords (lowercase, partial match) |
-| `signals` | string[] | Buying intent keywords matched against headline/about |
-| `companySizeSweet` | object | `{ "min": N, "max": N }` ideal employee count |
-| `weight` | number | Profile importance multiplier (0.0-1.0) |
+| `roles` | string[] | Role keywords matched against contact titles |
+| `industries` | string[] | Industry keywords matched against profile text |
+| `signals` | string[] | Buying-intent keywords matched against headline/about |
+| `companySizeRanges` | string[] | Employee count ranges, e.g. `"11-50"`, `"201-500"` |
+| `locations` | string[] | Geographic keywords (optional) |
+| `minConnections` | number | Minimum connection count (optional) |
 
-### Scoring Weights
+## Scoring Weights
 
-Controls how the four ICP fit dimensions are weighted (must sum to 1.0):
+Composite scoring weights are managed via `GET`/`PUT /api/scoring/weights`, not a config file. The nine dimensions must sum to 1.0:
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `roleWeight` | 0.35 | How much title match matters |
-| `industryWeight` | 0.25 | How much industry match matters |
-| `signalWeight` | 0.25 | How much buying signals matter |
-| `companySizeWeight` | 0.15 | How much company size fit matters |
+| Dimension | Default Weight | What It Measures |
+|-----------|-----------------|--------------------|
+| `icp_fit` | 0.20 | Match against your ICP criteria |
+| `network_hub` | 0.10 | Connection count, cluster breadth, connector role |
+| `relationship_strength` | 0.15 | Mutual connections, recency, proximity |
+| `signal_boost` | 0.10 | High-intent keywords in headline/about |
+| `skills_relevance` | 0.10 | Overlap between contact skills and ICP signals |
+| `network_proximity` | 0.05 | Graph distance and shared network paths |
+| `behavioral` | 0.10 | Activity level, engagement signals, connection power |
+| `content_relevance` | 0.10 | Content topics, posting frequency, engagement |
+| `graph_centrality` | 0.10 | PageRank, betweenness, degree centrality |
 
-### Gold Score Weights
-
-Controls the composite Gold Score used for tier assignment (must sum to 1.0):
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `icpWeight` | 0.35 | ICP fit score contribution |
-| `networkHubWeight` | 0.30 | Network centrality/hub score |
-| `relationshipWeight` | 0.25 | Mutual connections, shared context |
-| `signalBoostWeight` | 0.10 | Extra boost from strong signals |
-
-### Tier Thresholds
-
-Contacts are classified into tiers based on their Gold Score (thresholds must be in descending order):
-
-| Tier | Default Threshold | Meaning |
-|------|-------------------|---------|
-| Gold | 0.55 | High-priority prospects |
-| Silver | 0.40 | Worth pursuing |
-| Bronze | 0.28 | Keep on radar |
-| Watch | < 0.28 | Not a current fit |
-
-### Niche Keywords
-
-Maps niche slugs to LinkedIn search terms:
-
-```json
-"niches": {
-  "ai": ["AI", "artificial intelligence", "machine learning"],
-  "ecommerce": ["ecommerce", "DTC", "Shopify", "e-commerce"]
+```bash
+PUT /api/scoring/weights
+{
+  "name": "default",
+  "weights": {
+    "icp_fit": 0.20, "network_hub": 0.10, "relationship_strength": 0.15,
+    "signal_boost": 0.10, "skills_relevance": 0.10, "network_proximity": 0.05,
+    "behavioral": 0.10, "content_relevance": 0.10, "graph_centrality": 0.10
+  }
 }
 ```
 
-## Behavioral Config Reference
+### Tier Thresholds
 
-Behavioral scoring runs after ICP scoring and identifies network behavior patterns. Most users do not need to modify the defaults.
-
-### Scoring Dimensions
-
-| Dimension | Weight | What It Measures |
-|-----------|--------|------------------|
-| `connectionPower` | 0.20 | LinkedIn connection count (500+ = max) |
-| `connectionRecency` | 0.15 | How recently you connected |
-| `aboutSignals` | 0.25 | Behavioral keywords in About section |
-| `headlineSignals` | 0.15 | Profile headline patterns |
-| `superConnectorIndex` | 0.15 | Combo score: 3+ traits = super-connector |
-| `networkAmplifier` | 0.10 | Amplification potential: mutuals x connections |
-
-### Behavioral Personas
-
-| Persona | Criteria |
-|---------|----------|
-| **Super-connector** | 3+ behavioral traits AND 500+ connections |
-| **Content-creator** | Speaker/author/podcast keywords in profile |
-| **Silent-influencer** | 500+ connections but low behavioral signals |
-| **Rising-connector** | < 500 connections, connected within 6 months |
-| **Passive-network** | Default -- no strong behavioral signals |
+| Tier | Default Threshold | Meaning |
+|------|--------------------|---------|
+| Gold | >= 0.55 | High-priority prospects |
+| Silver | >= 0.40 | Worth pursuing |
+| Bronze | >= 0.28 | Keep on radar |
+| Watch | < 0.28 | Not a current fit |
 
 ## Validation
 
-Always validate after modifying config:
+Always validate after modifying configuration:
 
 ```bash
 node scripts/configure.mjs validate
 ```
 
-Checks performed:
-- JSON is valid
-- `profiles` exists with at least one entry
-- Each profile has `rolePatterns`
-- `scoring` weights sum to 1.0
-- `tiers` are in descending order (gold > silver > bronze)
-- Warns if `_example` marker is still present (uncustomized template)
+This calls `GET /api/icps`, `GET /api/niches`, and `GET /api/offerings`, then reports counts and warns if any of the three are empty.
 
 ## Example: Solo AI Consultant
 
@@ -234,66 +174,64 @@ Checks performed:
 {
   "profiles": {
     "ai-consulting": {
-      "label": "AI Consulting",
+      "name": "AI Consulting",
       "description": "Leaders exploring AI for their business",
-      "rolePatterns": {
-        "high": ["CEO", "CTO", "Founder", "Chief Digital"],
-        "medium": ["VP", "Director", "Head of"],
-        "low": ["Manager", "Lead"]
-      },
-      "industries": ["saas", "ecommerce", "fintech", "healthcare"],
-      "signals": ["ai", "artificial intelligence", "automation", "digital transformation"],
-      "companySizeSweet": { "min": 20, "max": 500 },
-      "weight": 1.0
+      "criteria": {
+        "roles": ["CEO", "CTO", "Founder", "Chief Digital", "VP", "Director", "Head of", "Manager", "Lead"],
+        "industries": ["saas", "ecommerce", "fintech", "healthcare"],
+        "signals": ["ai", "artificial intelligence", "automation", "digital transformation"],
+        "companySizeRanges": ["11-50", "51-200", "201-500"]
+      }
     }
   },
-  "scoring": { "roleWeight": 0.35, "industryWeight": 0.25, "signalWeight": 0.25, "companySizeWeight": 0.15 },
-  "goldScore": { "icpWeight": 0.35, "networkHubWeight": 0.30, "relationshipWeight": 0.25, "signalBoostWeight": 0.10 },
-  "tiers": { "gold": 0.55, "silver": 0.40, "bronze": 0.28 },
   "niches": {
-    "ai": ["AI", "artificial intelligence", "machine learning"],
-    "saas": ["SaaS", "software platform", "cloud"],
-    "ecommerce": ["ecommerce", "e-commerce", "DTC", "Shopify"]
-  }
+    "ai": { "name": "AI", "keywords": ["AI", "artificial intelligence", "machine learning"] },
+    "saas": { "name": "SaaS", "keywords": ["SaaS", "software platform", "cloud"] },
+    "ecommerce": { "name": "Ecommerce", "keywords": ["ecommerce", "e-commerce", "DTC", "Shopify"] }
+  },
+  "offerings": [
+    { "name": "AI Consulting", "description": "Strategic AI consulting for mid-market companies" }
+  ]
 }
 ```
 
 ## Example: Multi-Service Agency
 
-Create multiple profiles with different weights to prioritize services:
+Create multiple ICP profiles -- one per service:
 
 ```json
 {
   "profiles": {
     "web-development": {
-      "label": "Web Development",
-      "weight": 1.0,
-      "rolePatterns": { "high": ["CTO", "VP Engineering"], "medium": ["Director"], "low": ["Manager"] },
-      "industries": ["saas", "ecommerce"],
-      "signals": ["replatform", "redesign", "migration"]
+      "name": "Web Development",
+      "criteria": {
+        "roles": ["CTO", "VP Engineering", "Director Engineering", "Head of Product"],
+        "industries": ["saas", "ecommerce", "fintech"],
+        "signals": ["redesign", "new website", "web platform", "migration"]
+      }
     },
     "seo-services": {
-      "label": "SEO Services",
-      "weight": 0.8,
-      "rolePatterns": { "high": ["CMO", "VP Marketing"], "medium": ["Director Marketing"], "low": ["Marketing Manager"] },
-      "industries": ["ecommerce", "media"],
-      "signals": ["organic growth", "SEO", "content strategy"]
+      "name": "SEO Services",
+      "criteria": {
+        "roles": ["CMO", "VP Marketing", "Director Marketing", "Head of Growth"],
+        "industries": ["ecommerce", "saas", "media", "publishing"],
+        "signals": ["organic traffic", "SEO", "search ranking", "content strategy"]
+      }
     }
   }
 }
 ```
 
-Higher `weight` means that profile contributes more to a contact's Gold Score.
+The scoring engine evaluates each contact against all active ICP profiles and uses the best-fit score.
 
 ## Tuning Tips
 
 After your first analysis, review the results and tell Claude what to adjust:
 
 | Observation | What to Tell Claude |
-|-------------|---------------------|
-| Too many gold contacts | "Raise the gold threshold" |
-| Wrong people flagged as referral partners | "Narrow the referral role patterns" |
-| Buyers showing up as referrals | "Increase the buyer inversion weight" |
-| Network hubs not getting credit | "Increase the network hub weight in gold score" |
+|-------------|------------------------|
+| Too many gold contacts | "Raise the gold threshold" or "increase icp_fit weight" |
+| Wrong people flagged as referral partners | "Narrow the referral role criteria" |
+| Network hubs not getting credit | "Increase the network_hub weight" |
 
 Then rescore: `/network-intel rescore everything`

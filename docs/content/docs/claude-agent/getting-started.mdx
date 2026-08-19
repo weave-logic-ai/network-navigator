@@ -1,11 +1,11 @@
 ---
 title: Getting Started
-description: Install prerequisites, configure your ICP profiles, and run your first LinkedIn network analysis.
+description: Start the app, install the browser extension, configure your ICP profiles, and run your first LinkedIn network analysis.
 ---
 
 # Getting Started
 
-This guide walks you through installing the Claude Agent skill, configuring your first Ideal Customer Profile, and running your first search and analysis.
+This guide walks you through starting the NetworkNav app, installing the browser extension, configuring your first Ideal Customer Profile, and scoring your first contacts.
 
 ## Prerequisites
 
@@ -13,62 +13,42 @@ Before you begin, ensure you have these installed:
 
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
+| **Docker** | Latest | Runs the app, PostgreSQL + ruvector, and supporting services via `docker compose` |
+| **Chrome/Chromium** | Latest | Host for the browser extension that captures LinkedIn profiles |
 | **Claude Code** | Latest | Slash command host for `/linkedin-prospector` and `/network-intel` |
-| **Node.js** | 18+ | ES module runtime for all agent scripts |
-| **Playwright** | Latest | Chromium browser automation for LinkedIn interaction |
-| **ruvector** | Latest | 384-dim ONNX embeddings and HNSW vector search (required for semantic search) |
-| **LinkedIn account** | Active session | Source data for contact search and enrichment |
+| **Node.js** | 18+ | ES module runtime for the agent scripts (they use only the built-in `fetch` -- no packages to install) |
 
 <Callout type="info">
-ruvector is a core dependency of the agent's intelligence pipeline. Semantic search, similarity analysis, and vector-enhanced database queries all depend on it. Install it during setup -- not as an afterthought.
+All intelligence -- scoring, enrichment, graph analysis, semantic search -- runs server-side in the app, backed by PostgreSQL with the ruvector extension. The Claude Agent scripts are a thin REST client; there is nothing to install inside the agent itself.
 </Callout>
 
 ## Installation
 
 <Steps>
 
-### Install the skill
-
-Clone or copy the agent into your project's `.claude/` directory:
+### Start the app
 
 ```bash
-cd your-project
-git clone git@github.com:weave-logic-ai/linkedin-prospector.git .claude/linkedin-prospector
+cd /path/to/network-navigator
+docker compose up -d
 ```
 
-This registers two slash commands in Claude Code: `/linkedin-prospector` and `/network-intel`.
+This starts the Next.js app on host port `3750`, PostgreSQL with ruvector, and any supporting services.
 
-### Install Playwright
+### Install the browser extension
+
+1. Open Chrome and navigate to `chrome://extensions`
+2. Enable "Developer mode" (toggle in top right)
+3. Click "Load unpacked" and select the `browser/dist` directory
+4. The NetworkNav icon appears in your toolbar
+
+### Confirm the agent can reach the app
 
 ```bash
-npm install playwright
-npx playwright install chromium
+node agent/network-navigator/skills/linkedin-prospector/scripts/pipeline.mjs --health
 ```
 
-### Install ruvector
-
-```bash
-cd .claude/linkedin-prospector/skills/linkedin-prospector
-npm install ruvector
-```
-
-On first run, the ONNX model (~30MB) is downloaded and cached in `.cache/`. Subsequent runs use the cached model.
-
-### Establish a LinkedIn session
-
-Tell Claude:
-
-```
-/linkedin-prospector log me into LinkedIn
-```
-
-Claude launches a Chromium window via Playwright. Log into LinkedIn manually, then close the browser. Your session persists in `.browser-data/` and is reused for all future searches.
-
-Alternatively, run the script directly:
-
-```bash
-node -e "import('playwright').then(p => p.chromium.launchPersistentContext('.browser-data', {headless:false, channel:'chromium'}).then(c => console.log('Log into LinkedIn, then close the browser')))"
-```
+This checks `/api/health` (app + database) and `/api/extension/health-internal`.
 
 </Steps>
 
@@ -80,7 +60,7 @@ Tell Claude to walk you through configuration:
 /linkedin-prospector set up my ICP config
 ```
 
-Claude will ask about your services, target buyer roles, industries, buying signals, company size, and search niches, then generate the configuration. See [ICP Configuration](/docs/claude-agent/icp-configuration) for the full 8-step flow.
+Claude will ask about your services, target buyer roles, industries, buying signals, company size, and search niches, then create the ICP profiles, niches, and offerings via the app's REST API. See [ICP Configuration](/docs/claude-agent/icp-configuration) for the full flow.
 
 To verify your config:
 
@@ -88,100 +68,98 @@ To verify your config:
 /linkedin-prospector validate config
 ```
 
-## Your First Search
+## Capture Your First Contacts
 
-Search for contacts in a niche defined in your config:
+The agent cannot browse LinkedIn itself -- capture happens through the browser extension as you browse:
 
-```
-/linkedin-prospector find me 20 ecommerce contacts
-```
+1. Navigate to LinkedIn
+2. Click the NetworkNav extension icon
+3. Open the side panel for bulk capture
+4. Browse LinkedIn profiles or search results pages -- the extension captures visible profiles and (if enabled in the popup settings) auto-paginates through search results
 
-Claude checks your local database first, then searches LinkedIn if more contacts are needed. After the search, enrich the profiles:
-
-```
-/linkedin-prospector enrich unenriched contacts
-```
-
-## Build, Score, and Analyze
-
-Switch to the analysis command to score your contacts:
+Or import an existing LinkedIn data export:
 
 ```
-/network-intel rebuild and rescore everything
+POST /api/import/from-directory
+{ "path": "/path/to/linkedin/export" }
 ```
 
-This builds the knowledge graph, runs all three scoring layers (ICP, behavioral, referral), vectorizes contacts for semantic search, and creates a snapshot.
+New contacts captured this way are scored automatically.
+
+## Score and Analyze
+
+To trigger a full rescore of everyone (e.g. after changing ICP criteria or scoring weights):
+
+```
+/network-intel rescore everything
+```
 
 Now explore your network:
 
 ```
-/network-intel give me an overview
+/network-intel show me my network summary
 /network-intel who are my best hubs?
 /network-intel find my top prospects
 /network-intel who are my best referral partners?
 /network-intel what should I focus on next?
 ```
 
-## Generate a Report
+## Review in the Dashboard
 
-```
-/network-intel generate a report
-```
-
-Claude creates an interactive HTML dashboard at `data/network-report.html` with a 3D network graph, Chart.js charts, and sortable tables.
+Open `http://localhost:3750` for the full web dashboard -- contacts table, scoring visualization, graph view, and outreach pipeline.
 
 ## Complete Zero-to-Scored Walkthrough
 
 For those who prefer running scripts directly:
 
 ```bash
-# 1. Install dependencies
-npm install playwright && npx playwright install chromium
-cd .claude/linkedin-prospector/skills/linkedin-prospector && npm install ruvector
+# 1. Start the app
+docker compose up -d
 
-# 2. Log into LinkedIn (manual step in browser window)
-node -e "import('playwright').then(p => p.chromium.launchPersistentContext('.browser-data', {headless:false, channel:'chromium'}).then(c => console.log('Log in, then close')))"
+# 2. Install the browser extension (manual step in Chrome)
 
-# 3. Configure ICP (interactive wizard)
-node scripts/configure.mjs wizard
+# 3. Configure ICP (non-interactive)
+node agent/network-navigator/skills/linkedin-prospector/scripts/configure.mjs generate --json '{
+  "profiles": {
+    "my-service": {
+      "name": "My Service",
+      "criteria": { "roles": ["CEO","CTO"], "industries": ["saas"], "signals": ["ai"] }
+    }
+  },
+  "niches": {
+    "ai": { "name": "AI Leaders", "keywords": ["AI", "machine learning"] }
+  },
+  "offerings": [{ "name": "My Service" }]
+}'
 
 # 4. Validate
-node scripts/configure.mjs validate
+node agent/network-navigator/skills/linkedin-prospector/scripts/configure.mjs validate
 
-# 5. Search
-node scripts/search.mjs --niche ecommerce --max-results 30
+# 5. Capture contacts via the browser extension (browse LinkedIn)
 
-# 6. Enrich
-node scripts/enrich.mjs --unenriched-only --max 50
+# 6. Rescore everything
+node agent/network-navigator/skills/linkedin-prospector/scripts/pipeline.mjs --rescore-all
 
-# 7. Build graph + score + vectorize + snapshot
-node scripts/pipeline.mjs --rebuild
-
-# 8. Generate HTML report
-node scripts/pipeline.mjs --report
-
-# 9. Explore results
-node scripts/analyzer.mjs --mode summary
-node scripts/analyzer.mjs --mode hubs --top 10
-node scripts/analyzer.mjs --mode prospects --top 10
-node scripts/analyzer.mjs --mode referrals --top 10
+# 7. Explore results
+node agent/network-navigator/skills/linkedin-prospector/scripts/analyze.mjs --mode summary
+node agent/network-navigator/skills/linkedin-prospector/scripts/analyze.mjs --mode hubs --top 10
+node agent/network-navigator/skills/linkedin-prospector/scripts/analyze.mjs --mode prospects --top 10
+node agent/network-navigator/skills/linkedin-prospector/scripts/analyze.mjs --mode referrals --top 10
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BROWSER_DATA_DIR` | `.browser-data/` | Path to Playwright persistent browser data |
-| `PROSPECTOR_DATA_DIR` | `skills/linkedin-prospector/data/` | Contact data directory (keeps PII separate from code) |
+| `NETWORKNAV_URL` | `http://localhost:3750` | Base URL the agent scripts use for the app's REST API |
 
 ## Troubleshooting
 
 | Error | Fix |
 |-------|-----|
-| "Browser not found" | Run `npx playwright install chromium` |
-| "Not logged in" | Use `/linkedin-prospector log me into LinkedIn` and log in manually |
-| "No contacts found" | Run a search first: `/linkedin-prospector find me 20 [niche] contacts` |
-| "Config is example template" | Run `/linkedin-prospector set up my ICP config` |
-| "graph.json missing" | Run `/network-intel rebuild and rescore everything` |
-| "ruvector not available" | Install: `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector` |
-| "RVF store not available or empty" | Build the vector store: `node scripts/vectorize.mjs --from-graph` |
+| App not responding at localhost:3750 | Run `docker compose up -d` and check `docker compose logs app` |
+| Extension shows "Not connected" | Confirm the app is up and the extension settings point to `localhost:3750` |
+| "No contacts found" | Capture some via the browser extension, or import a LinkedIn export first |
+| "Failed to create ICP" | Ensure `criteria` is an object with valid fields (roles, industries, signals) |
+| Contacts not scored | Run `/network-intel rescore everything` or `pipeline.mjs --rescore-all` |
+| Hybrid/semantic search returns no results | Check that the ruvector-postgres container is running; search falls back to keyword-only otherwise |

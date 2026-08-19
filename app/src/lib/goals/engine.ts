@@ -8,6 +8,8 @@ import { icpChecks } from './checks/icp-checks';
 import { hubChecks } from './checks/hub-checks';
 import { relationshipChecks } from './checks/relationship-checks';
 import { backgroundChecks } from './checks/background-checks';
+import { signalChecks } from './checks/signal-checks';
+import { relevanceChecks } from './checks/relevance-checks';
 
 const REJECTION_THRESHOLD = 3;   // Need 3 rejections to suppress
 const REJECTION_WINDOW_DAYS = 30;
@@ -92,9 +94,15 @@ function selectContextChecks(ctx: TickContext): GoalCheck[] {
 
 /**
  * Select random background checks.
+ *
+ * Signal Boost (Engine 4) and Content/Skills Relevance (Engine 5) checks
+ * don't have a dedicated page in the context-check switch below — they fire
+ * opportunistically like the rest of the background pool, self-gating on
+ * whatever context fields they need (e.g. selectedNicheId).
  */
 function selectBackgroundChecks(): GoalCheck[] {
-  const shuffled = [...backgroundChecks].sort(() => Math.random() - 0.5);
+  const pool = [...backgroundChecks, ...signalChecks, ...relevanceChecks];
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, MAX_BACKGROUND_CHECKS);
 }
 

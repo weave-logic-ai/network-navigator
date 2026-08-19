@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Users, Building2, GitFork } from "lucide-react";
+import { Loader2, Users, Building2, GitFork, Share2 } from "lucide-react";
 
 interface NetworkContact {
   id: string;
@@ -17,6 +17,7 @@ interface NetworkContact {
 
 interface NetworkData {
   mutualConnections: NetworkContact[];
+  secondDegree: NetworkContact[];
   sameCompany: NetworkContact[];
   edgeCount: number;
 }
@@ -69,6 +70,7 @@ export function NetworkTab({ contactId }: { contactId: string }) {
 
   const hasNoData =
     data.mutualConnections.length === 0 &&
+    data.secondDegree.length === 0 &&
     data.sameCompany.length === 0 &&
     data.edgeCount === 0;
 
@@ -87,7 +89,7 @@ export function NetworkTab({ contactId }: { contactId: string }) {
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <Card>
+      <Card className="md:col-span-2">
         <CardHeader>
           <CardTitle className="text-sm flex items-center gap-2">
             <GitFork className="h-4 w-4" />
@@ -103,6 +105,10 @@ export function NetworkTab({ contactId }: { contactId: string }) {
             <div className="text-center">
               <p className="text-2xl font-bold">{data.mutualConnections.length}</p>
               <p className="text-xs text-muted-foreground">Mutual</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold">{data.secondDegree.length}</p>
+              <p className="text-xs text-muted-foreground">2nd Degree</p>
             </div>
             <div className="text-center">
               <p className="text-2xl font-bold">{data.sameCompany.length}</p>
@@ -127,6 +133,28 @@ export function NetworkTab({ contactId }: { contactId: string }) {
           ) : (
             <div className="space-y-2">
               {data.mutualConnections.map((c) => (
+                <ContactRow key={c.id} contact={c} />
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Share2 className="h-4 w-4" />
+            2nd Degree (via this contact)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {data.secondDegree.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No 2nd degree contacts found.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {data.secondDegree.map((c) => (
                 <ContactRow key={c.id} contact={c} />
               ))}
             </div>

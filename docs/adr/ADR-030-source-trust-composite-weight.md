@@ -1,6 +1,42 @@
 # ADR-030: Source trust resolution — composite final_weight = category_default × per_item_multiplier
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: Two corrections verified against
+> `data/db/init/036-sources-schema.sql` and `app/src/lib/sources/connectors/`.
+> 1. The Decision section's "Conflict resolution uses `final_weight` **at
+>    query time**, not at ingestion time" is inverted from what shipped.
+>    `source_field_values.final_weight` is a Postgres `GENERATED ALWAYS AS
+>    (category_default_snapshot * per_item_multiplier) STORED` column
+>    (`036-sources-schema.sql:194-195`) — computed and frozen at
+>    INSERT/UPDATE time, not recomputed on read. The schema's own comment
+>    admits the gap: writers must keep `category_default_snapshot` in sync
+>    when admins retune category weights, and "a backfill job is a future
+>    item" (`036-sources-schema.sql:174`). A tenant who retunes
+>    `source_type_weights.category_default` today does not change any
+>    existing row's `final_weight` until that row is re-ingested or a
+>    (currently unbuilt) backfill job runs.
+> 2. `per_item_multiplier` implements two of the four signals this ADR
+>    names (engagement score, citation count, recency modifier, manual
+>    override) and only partially at that. Citation count is not
+>    implemented anywhere in `app/src/lib/sources`. A general,
+>    tenant-configurable recency modifier (distinct from ordinary
+>    `referenced_date` temporal resolution, which this ADR explicitly
+>    scopes out) is not implemented. Manual override does not adjust
+>    `per_item_multiplier` at all — user overrides bypass the composite
+>    formula entirely via `source_field_overrides` (ADR-032's
+>    display-time win). Of what *is* implemented:
+>    `app/src/lib/sources/connectors/news/shared.ts:350-353` derives a
+>    1.0/1.2 multiplier from a JSON-LD `viewCount` heuristic — the closest
+>    thing to "engagement" that exists, wired into only the five news-site
+>    connectors (wsj, bloomberg, reuters, techcrunch, cnbc — one of the
+>    seven `source_type` categories this ADR's ordering names).
+>    `app/src/lib/sources/connectors/wayback.ts` derives its multiplier
+>    from snapshot age, not engagement. `app/src/lib/sources/connectors/rss.ts:236-260`
+>    derives its multiplier from cross-feed republication count, not
+>    engagement. `edgar.ts` writes a hardcoded `1.0` and computes nothing
+>    (`edgar.ts:348`). `corporate-blog.ts`, `podcast.ts`, and
+>    `google-news.ts` do not write `source_field_values` rows at all.
 
 ## Context
 
@@ -48,10 +84,18 @@ final_weight = source_category_default × per_item_multiplier
   - **recency modifier** (optional, tenant-configurable, defaults off)
   - **manual override** (user clicks "trust this more/less")
   (`10-decisions.md` Q5, lines 107-112)
-- Conflict resolution uses `final_weight` **at query time**, not at ingestion
-  time. A snippet or source record can move up or down the trust order after
-  the fact as engagement accrues.
-  (`10-decisions.md` Q5, lines 113-114)
+  **Not fully implemented (2026-08-19)**: only a per-connector proxy for
+  "engagement" (news `viewCount`, wayback age-decay, RSS republication
+  count) exists; citation count, a general recency modifier, and manual
+  override as a multiplier component are all unbuilt. See the update note
+  at the top of this file.
+- ~~Conflict resolution uses `final_weight` **at query time**, not at
+  ingestion time. A snippet or source record can move up or down the trust
+  order after the fact as engagement accrues.~~ **Correction 2026-08-19**:
+  `final_weight` is a `GENERATED ... STORED` column computed at write
+  time; it does not move after ingestion without a re-ingest or a backfill
+  job that does not exist yet. See the update note at the top of this
+  file. (`10-decisions.md` Q5, lines 113-114)
 
 Scope:
 
@@ -74,8 +118,11 @@ Scope:
 - **Viral or contested content can surface or be buried** without hard-coding
   per-source exceptions. A blog post that accrues 50,000 shares can legitimately
   outrank a passing news article.
-- **Conflict-reconciliation stays query-time**, so ingesting a new source does
-  not rewrite stored projections — the projection is recomputed on next read.
+- ~~**Conflict-reconciliation stays query-time**, so ingesting a new source
+  does not rewrite stored projections — the projection is recomputed on
+  next read.~~ **Correction 2026-08-19**: not what shipped —
+  `final_weight` is fixed at write time. See the update note at the top of
+  this file.
 - **Per-tenant category defaults** remain one axis of the composite; they are
   not replaced, just multiplied. Tenants can still tune category-level trust
   without touching per-item logic.

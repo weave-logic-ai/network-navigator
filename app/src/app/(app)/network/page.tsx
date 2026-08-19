@@ -4,28 +4,21 @@ import { useState, useCallback } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { NetworkGraph } from "@/components/network/network-graph";
-import { GraphControls } from "@/components/network/graph-controls";
+import { SigmaGraph } from "@/components/network/sigma-graph";
 import { ClusterSidebar } from "@/components/network/cluster-sidebar";
 import { TaxonomyGraph } from "@/components/network/taxonomy-graph";
 import { ConversationGraph } from "@/components/network/conversation-graph";
 import { KnowledgeGraphView as KnowledgeGraph } from "@/components/network/knowledge-graph";
-import type {
-  LayoutMode,
-  ColorByMode,
-  SizeByMode,
-  EdgeFilterMode,
-} from "@/components/network/network-graph";
 import { Layers, Network, GitBranch, MessageSquare, Brain } from "lucide-react";
+
+// Sigma.js renders the full network server-side filtered to this cap (the
+// /api/graph/sigma-data route itself hard-caps at 6000 — see route.ts). This
+// replaces the old Reagraph path's hard-coded 300-node limit.
+const SIGMA_GRAPH_NODE_LIMIT = 6000;
 
 export default function NetworkPage() {
   const [computing, setComputing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [layout, setLayout] = useState<LayoutMode>("forceDirected2d");
-  const [colorBy, setColorBy] = useState<ColorByMode>("tier");
-  const [sizeBy, setSizeBy] = useState<SizeByMode>("score");
-  const [edgeFilter, setEdgeFilter] = useState<EdgeFilterMode>("all");
-  const [showClusters, setShowClusters] = useState(false);
   const [clusterSidebarOpen, setClusterSidebarOpen] = useState(false);
   const [highlightedCluster, setHighlightedCluster] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("graph");
@@ -85,18 +78,14 @@ export default function NetworkPage() {
         </TabsList>
 
         <TabsContent value="graph" className="flex flex-1 gap-4 overflow-hidden mt-4">
-          <GraphControls
-            layout={layout} colorBy={colorBy} sizeBy={sizeBy}
-            edgeFilter={edgeFilter} showClusters={showClusters}
-            onLayoutChange={setLayout} onColorByChange={setColorBy}
-            onSizeByChange={setSizeBy} onEdgeFilterChange={setEdgeFilter}
-            onShowClustersChange={setShowClusters}
-          />
           <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
-            <NetworkGraph
-              layout={layout} colorBy={colorBy} sizeBy={sizeBy}
-              edgeFilter={edgeFilter} showClusters={showClusters}
-              highlightedCluster={highlightedCluster} refreshKey={refreshKey}
+            {/* `key={refreshKey}` forces a remount (and refetch) when
+                "Compute Graph" runs, since SigmaGraph loads its own data
+                internally rather than taking it as a prop. */}
+            <SigmaGraph
+              key={refreshKey}
+              limit={SIGMA_GRAPH_NODE_LIMIT}
+              highlightedCluster={highlightedCluster}
             />
           </div>
         </TabsContent>

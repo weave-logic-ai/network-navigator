@@ -47,15 +47,31 @@ export async function GET(request: NextRequest) {
     const nodesParams: unknown[] = [];
     const paramIdx = 1;
 
+    // Per-contact cluster id, for the ClusterSidebar "highlight" feature.
+    // `cluster_memberships` is many-to-many (a contact can score into
+    // several clusters), so we take the highest-`membership_score` row as
+    // "the" cluster for that contact — the same pattern already used for
+    // pagerank-driven node sizing elsewhere in this route. LEFT JOIN LATERAL
+    // so unclustered contacts still return with cluster_id = NULL.
+    const clusterJoin = `
+        LEFT JOIN LATERAL (
+          SELECT cm.cluster_id
+          FROM cluster_memberships cm
+          WHERE cm.contact_id = c.id
+          ORDER BY cm.membership_score DESC
+          LIMIT 1
+        ) top_cluster ON true`;
+
     if (nicheId) {
       nodesQuery = `
         SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score,
                c.current_company, c.title,
                gm.pagerank, gm.betweenness_centrality,
-               nm.niche_id
+               nm.niche_id, top_cluster.cluster_id
         FROM contacts c
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
         LEFT JOIN niche_memberships nm ON nm.contact_id = c.id AND nm.niche_id = $${paramIdx}
+        ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $${paramIdx + 1}
         ORDER BY nm.niche_id IS NOT NULL DESC, COALESCE(gm.pagerank, 0) DESC
@@ -65,9 +81,10 @@ export async function GET(request: NextRequest) {
       nodesQuery = `
         SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score,
                c.current_company, c.title,
-               gm.pagerank, gm.betweenness_centrality
+               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
         FROM contacts c
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
+        ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $1
         ORDER BY COALESCE(gm.pagerank, 0) DESC
@@ -86,6 +103,7 @@ export async function GET(request: NextRequest) {
       pagerank: number | null;
       betweenness_centrality: number | null;
       niche_id?: string | null;
+      cluster_id: string | null;
     }>(nodesQuery, nodesParams);
 
     const nodeIds = new Set(nodesRes.rows.map((r) => r.id));
@@ -109,6 +127,7 @@ export async function GET(request: NextRequest) {
           pagerank: c.pagerank || 0,
           score: c.composite_score || 0,
           degree: c.degree,
+          clusterId: c.cluster_id || null,
         },
       };
     });

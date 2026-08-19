@@ -1,140 +1,87 @@
 ---
 title: Network Expansion
-description: Deep scanning, batch deep scan, bridge contacts, dry-run preview, and rate limiting for 2nd and 3rd degree network discovery.
+description: How your network grows in v2 -- passive capture, search-result auto-pagination -- and what changed from the retired active deep-scan model.
 ---
 
 # Network Expansion
 
-Deep scanning discovers contacts beyond your 1st-degree network by scanning a contact's LinkedIn connection list. Bridge contacts appearing in multiple scans indicate high-value connectors and hidden network clusters.
+<Callout type="warn">
+The retired v1 architecture actively scanned a contact's connections list via Playwright to discover 2nd-degree contacts (`deep-scan.mjs`, `batch-deep-scan.mjs`). That capability has no v2 equivalent -- the agent cannot drive a browser at all. Network growth in v2 is **passive**: it happens as you browse LinkedIn with the extension installed, not as an automated batch job the agent runs on your behalf.
+</Callout>
 
-## Single Contact Deep Scan
+## How Your Network Grows in v2
 
-Scan one contact's connections to discover 2nd-degree contacts:
+### Passive capture while browsing
 
-```
-/network-intel deep scan https://linkedin.com/in/someone
-```
+The browser extension captures profile and search-result data from any LinkedIn page you visit while it's active. There is no equivalent to "scan this contact's connections" -- you grow your captured network by visiting pages yourself (profiles, search results, company pages).
 
-```bash
-node scripts/deep-scan.mjs --url https://linkedin.com/in/someone
-```
+### Auto-paginate search results
 
-### What Deep Scan Does
+When you capture a LinkedIn people-search or content-search results page, the extension can automatically continue to the next page of results and capture that too. This is opt-in via a popup setting (`autoPaginate`).
 
-1. Navigates to the target's profile page
-2. Finds and clicks the connections link
-3. Paginates through visible connections, extracting name, title, URL, mutual count, and degree
-4. Caches each connections page as raw HTML
-5. Stores discovered contacts in `contacts.json` with `degree: 2` and `discoveredVia` metadata
-6. Marks the scanned contact as `deepScanned: true`
-7. Reports bridge contacts (appearing in multiple scans)
+**How it works:**
 
-### Options
+1. You capture a `SEARCH_PEOPLE` or `SEARCH_CONTENT` results page (manually, or the extension does it as you browse).
+2. The server (`POST /api/extension/capture`) creates a follow-up task for the next page of results, up to a configured cap (`MAX_SEARCH_PAGES`).
+3. If `autoPaginate` is enabled, the extension's service worker waits ~2 seconds, navigates the active tab to that next-page URL, and re-fires capture once the page finishes loading.
+4. This repeats until the server stops creating follow-up tasks at the `MAX_SEARCH_PAGES` cap.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--url <url>` | (required) | LinkedIn profile URL to scan |
-| `--max-pages <N>` | 5 | Pages of connections to scrape |
-| `--max-results <N>` | 100 | Maximum connections to discover |
-| `--depth <N>` | 2 | Store discovered contacts as degree-N |
-| `--mutual-only` | false | Only capture mutual connections |
+This is the closest v2 equivalent to "batch discovery" -- it expands coverage of a single search's results automatically, rather than fanning out through a target contact's connections.
 
-## Batch Deep Scan
+### Importing existing data
 
-Sequentially deep-scans a prioritized list of contacts, then automatically rebuilds the graph and re-scores.
+For a one-time bulk expansion, import a LinkedIn data export:
 
 ```
-/network-intel expand my network through referral partners
-/network-intel deep scan the top hubs
+POST /api/import/from-directory
+{ "path": "/path/to/linkedin/export" }
 ```
 
-### Dry-Run Preview
-
-Always preview before executing:
-
-```bash
-node scripts/batch-deep-scan.mjs --criteria referral --dry-run
-```
-
-This shows the scan list without executing, so you can review who will be scanned.
-
-### Criteria Modes
-
-| Criteria | Who Gets Scanned |
-|----------|-----------------|
-| `gold` | All gold-tier contacts, plus top 5 by ICP fit, network hub, behavioral, and relationship. Default. |
-| `referral` | Gold-referral tier first, then warm-introducers and white-label partners, then top silver-referral. |
-| `hub` | Top 10 contacts by network hub score. |
-| `all` | Gold-tier, gold-referral, top hubs, top ICP, top behavioral, top relationship. Most comprehensive but slowest. |
-
-### Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--criteria <type>` | gold | Targeting criteria |
-| `--min-score <N>` | 0 | Minimum score threshold (0-1) |
-| `--max-pages <N>` | 3 | Pages per scan (conservative) |
-| `--max-results <N>` | 50 | Max connections per scan |
-| `--delay <N>` | 10 | Seconds between scans |
-| `--skip <N>` | 0 | Resume after interruption (skip first N) |
-| `--dry-run` | false | Preview without executing |
-| `--max-targets <N>` | unlimited | Max contacts to scan |
-
-After all scans complete, batch-deep-scan automatically runs: graph-builder, scorer, behavioral-scorer, referral-scorer, and report-generator.
-
-## Bridge Contacts
-
-When the same person appears in multiple deep scans, they are flagged as a **bridge contact**. Bridge contacts are valuable because they:
-
-- Connect multiple parts of your network
-- Indicate hidden clusters of relevant contacts
-- Are strong candidates for warm introductions
-
-Bridge contacts are tracked in `contacts.json` with a `discoveredVia` array listing all contacts whose scans surfaced them.
-
-## Who to Deep Scan First
-
-Prioritize scanning contacts whose connections are most likely relevant to your goals:
-
-1. **Gold-tier contacts** -- Their connections are likely relevant to your ICP
-2. **Gold-referral partners** -- Their connections include your potential buyers
-3. **Top hubs** -- They bridge multiple clusters and have the broadest reach
-
-## Rate Limiting
-
-LinkedIn may throttle or block automated access. The agent uses several strategies:
-
-| Strategy | Detail |
-|----------|--------|
-| **Delay between scans** | Default 10 seconds. Increase with `--delay` for safety. |
-| **Page limits** | Default 3 pages per scan. Fewer pages = lower risk. |
-| **Visible browser** | Runs `headless: false` to reduce detection |
-| **Anti-automation flags** | `--disable-blink-features=AutomationControlled` set automatically |
-| **HTML caching** | Pages cached locally so they never need to be fetched twice |
-
-**Signs of throttling:**
-- Empty search results when results should exist
-- Profile pages showing limited data
-- CAPTCHA challenges
-
-**Recovery:**
-- Wait 30-60 minutes before retrying
-- Re-establish your LinkedIn session if needed
-- Use `reparse.mjs` to re-extract from cached pages without hitting LinkedIn
-
-## Delta Tracking
-
-Track network changes over time after expansion:
+or a CSV:
 
 ```
-/network-intel any new connections since last time?
-/network-intel save a snapshot
+POST /api/import/csv
 ```
 
-```bash
-node scripts/delta.mjs --snapshot    # Create snapshot
-node scripts/delta.mjs --check       # Compare vs. last snapshot
-node scripts/delta.mjs --list        # List all snapshots
+## Growing Toward Your ICP
+
+Since there's no automated deep-scan to prioritize, the practical strategy is:
+
+1. **Define niches** with search keywords that match your ICP (see [ICP Configuration](/docs/claude-agent/icp-configuration)).
+2. **Search LinkedIn manually** using those keywords, with the extension active and `autoPaginate` on to sweep each results page.
+3. **Rescore regularly** as new contacts come in: `/network-intel rescore everything`.
+4. **Use `recommend`** to see what the app suggests doing next with your current data:
+
+```
+/network-intel what should I focus on next?
 ```
 
-The delta report shows new contacts added, contacts removed, tier changes, and recommendations.
+## Graph Analysis of What You Have
+
+Even without active deep-scanning, the app computes graph metrics and community clusters over whatever contacts and edges you've captured:
+
+```
+POST /api/graph/compute   # recompute metrics + detect communities
+GET  /api/graph/data      # nodes/edges for visualization
+GET  /api/graph/communities  # cluster listing
+```
+
+```
+/network-intel recompute the graph
+/network-intel show me clusters
+```
+
+Bridge/connector contacts (people who span multiple clusters) still show up in this analysis -- they're just derived from whatever data you've captured, not discovered by an automated scanning pass.
+
+## What Changed From v1
+
+| Capability | v1 | v2 |
+|-------------|----|----|
+| Discover a contact's connections | `deep-scan.mjs --url <profile>` (Playwright) | Not available |
+| Batch-prioritized expansion | `batch-deep-scan.mjs --criteria gold\|referral\|hub\|all` | Not available |
+| Bridge contact detection across scans | Tracked via `discoveredVia` in `contacts.json` | Not tracked as a distinct concept; graph community detection is the closest analog |
+| Expand a single search's results | Manual re-search | Automated via extension `autoPaginate` |
+| Rate-limit protection for automation | Configurable delay/page-limit flags | N/A -- there is no automated browsing to rate-limit; capture follows your own browsing pace |
+| Snapshot / delta tracking of network changes | `delta.mjs --snapshot / --check / --list` | Not available -- see [Analysis Modes](/docs/claude-agent/analysis-modes#modes-with-no-v2-equivalent) for other retired capabilities |
+
+If you need automated multi-hop network discovery, it would have to be rebuilt -- there is currently no server-side or agent-side equivalent to the v1 deep-scan pipeline.

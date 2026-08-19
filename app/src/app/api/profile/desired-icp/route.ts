@@ -12,17 +12,8 @@ interface DesiredIcpConfig {
   savedAt: string;
 }
 
-// Ensure metadata column exists (idempotent)
-async function ensureMetadataColumn(): Promise<void> {
-  await query(
-    `ALTER TABLE owner_profiles ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'`
-  );
-}
-
 export async function GET() {
   try {
-    await ensureMetadataColumn();
-
     const result = await query<{ metadata: Record<string, unknown> }>(
       `SELECT metadata FROM owner_profiles WHERE is_current = TRUE LIMIT 1`
     );
@@ -48,8 +39,6 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    await ensureMetadataColumn();
-
     const body = await request.json();
     const { nicheId, icpId, offeringIds, isDefault } = body as {
       nicheId?: string | null;
