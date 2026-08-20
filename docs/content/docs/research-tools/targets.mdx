@@ -1,0 +1,117 @@
+---
+title: Research Targets
+description: The research-target model — kinds, primary vs. secondary, breadcrumbs, lenses, and how the graph re-centers on a target.
+---
+
+A **research target** is the first-class answer to "who or what is this session about." Before this sprint, that question was answered implicitly and inconsistently across the app — the owner's dashboard, a contact detail page, a company page, and the extension's sidebar target panel each had their own notion of "current entity." `research_targets` gives every one of those surfaces the same underlying row to point at.
+
+<Callout type="warn">
+The target model is gated behind `RESEARCH_FLAGS.targets` (env var `RESEARCH_TARGETS`), off by default. The backend service and API routes are always callable — the flag controls whether target-aware UI (breadcrumbs, picker, lens controls) renders. See [Snippets](/docs/research-tools/snippets) for the equivalent `RESEARCH_SNIPPETS` flag.
+</Callout>
+
+## Kinds
+
+A target is exactly one of three kinds, enforced by a database check constraint on `research_targets`:
+
+| Kind | Points at | Example |
+|------|-----------|---------|
+| `self` | `owner_profiles.id` | You, the person running the tool |
+| `contact` | `contacts.id` | A person you're researching |
+| `company` | `companies.id` | A company you're researching |
+
+Every existing `owner_profiles` row gets exactly one `kind='self'` target, seeded at migration time (`data/db/init/035-targets-schema.sql`). There is no multi-self concept — the product decision (ADR-027) explicitly rejected "research personas" as a separate self per user in favor of the existing ICP/lens layer covering that need. `getOrCreateSelfTarget()` in `app/src/lib/targets/service.ts` lazily creates the self-target on first read if migration seeding somehow missed it.
+
+`contact` and `company` targets are created on demand — the first time something needs a target row for a given contact or company (a shift-click on the graph, the target picker, a snippet capture), `getOrCreateContactTarget()` / `getOrCreateCompanyTarget()` upsert one. Partial unique indexes (`uq_target_owner`, `uq_target_contact`, `uq_target_company`) guarantee one target per subject per tenant.
+
+## Primary vs. secondary
+
+This is the one place where the shipped behavior is a deliberate narrowing of the original sprint plan, not a gap. The plan (`.planning/research-tools-sprint/04-targets-and-graph.md`) described swappable primary/secondary targets with a UI where clicking any graph node makes it primary. ADR-027 (updated 2026-04-17, corrected 2026-08-19) settled on a simpler v1 model:
+
+- **Primary is always your self-target, and it is immutable.** There is no "swap primary" UI. `research_target_state.primary_target_id` is set once at migration/first-read time and only changes if your self-target itself changes.
+- **Secondary is optional and is what actually moves.** Setting a secondary re-centers the UI around it — the graph re-roots, and the breadcrumb shows it next to your name. Clearing it returns you to the default self-centered view.
+- Swapping primary away from self ("operate on behalf of someone else") is explicitly deferred to a future sprint. The schema doesn't prevent it, but no code path exercises it today.
+
+`research_target_state` (`tenant_id, user_id` primary key) holds the pair:
+
+```sql
+CREATE TABLE research_target_state (
+  tenant_id           UUID NOT NULL REFERENCES tenants(id),
+  user_id             UUID,
+  primary_target_id   UUID REFERENCES research_targets(id) ON DELETE SET NULL,
+  secondary_target_id UUID REFERENCES research_targets(id) ON DELETE SET NULL,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+`GET /api/targets/state` reads the current pair; `PUT /api/targets/state` accepts only `{ secondaryTargetId: string | null }` — there is no primary field on the request body, because primary can't be changed through this endpoint. If the secondary's underlying contact or company was deleted (all three subject FKs on the target row go `NULL` via `ON DELETE SET NULL`), the state service clears the dangling pointer automatically on next read rather than surfacing a broken reference.
+
+`POST /api/targets` with `{ kind: 'contact' | 'company', id }` gets-or-creates a target row for a subject and returns its id, ready to hand to the `PUT /api/targets/state` call above. This is the two-step flow the picker, the shift-click handler, and the "Make this the target" affordances all use.
+
+## Breadcrumbs and switching
+
+The shipped breadcrumb (`app/src/components/targets/target-breadcrumbs.tsx`) is simpler than the multi-level trail sketched in the planning doc (which imagined chained switches like `Acme Inc > Jane Doe > Bob Smith`). Because primary never changes, there's only ever one active pair to show:
+
+```
+Self  >  [Secondary]   [T]
+```
+
+- Hovering the secondary crumb reveals when it was set and which lens was active, with a back-arrow to swap to the prior secondary.
+- History is read from `GET /api/targets/state/history`.
+- Clicking the `X` on the secondary crumb clears it (writes `secondaryTargetId: null`).
+- The `T` key (checked while no input/textarea has focus) opens the target picker modal for a global entity search.
+- When `RESEARCH_FLAGS.targets` is off, the breadcrumb still mounts but with `interactive={false}` — a static label, no hover card, no picker.
+
+### Ways to set a secondary
+
+- **Target picker** — the `T` shortcut, or an explicit open call, searches contacts/companies and calls the create-then-set flow above.
+- **Graph shift-click** — shift-clicking a contact node on the live Graph tab calls `setSecondaryTargetViaShiftClick()` (`app/src/components/network/shift-click.ts`), which upserts a contact target and PUTs it as secondary. The clicked node flashes amber for ~600ms as feedback.
+- Plain (non-shift) node click is wired for `onNodeClick` callbacks but does not itself change the target state — there's no "click re-centers primary" behavior in the shipped code, consistent with primary being immutable.
+
+## Lenses
+
+A **lens** is a saved `(target, config)` bundle — `research_lenses`, keyed to a `primary_target_id` with a JSONB `config` column. Lenses are how a target gets a specific ICP scoring context without hardcoding it onto the target row itself.
+
+Resolution order for "which lens is active for this target right now" (as of migration 045, in `app/src/lib/targets/lens-service.ts`):
+
+1. `research_target_state.last_used_lens_id` for the current owner, if it points at a non-deleted lens belonging to this target.
+2. The target's `is_default = TRUE` lens.
+3. The oldest non-deleted lens attached to the target.
+
+`activateLensForTarget()` writes `last_used_lens_id` rather than flipping `is_default` across sibling rows — an earlier (Phase 1.5) version of this code did the latter, which meant activating a lens was a write per sibling row and was global-per-target rather than per-user (two users on the same target would clobber each other's active lens). Migration 045 fixed both problems.
+
+<Callout>
+The three **seed lenses** that actually ship (`app/src/lib/targets/seed-lenses.ts`) are **"As consultant," "As board member," and "As candidate"** — ICP profiles joined to your self-target through `research_target_icps`. This is different from the planning doc's proposed seed set (`network-overview`, `company-research`, `candidate-vs-predecessor`), which was never built. `seedResearchLensesForCurrentOwner()` is idempotent and is invoked from a script/admin action, not from a migration.
+</Callout>
+
+### Lens deep links
+
+`?lens=<id>` on a page loads a tenant-local lens by id. A second form, `?lens=opaque:<base64>`, carries a self-contained, unsigned lens config for sharing across tenants or with someone who doesn't have access to the lens row (`app/src/lib/targets/lens-url.ts`). The opaque payload is `{ v: 1, name?, config }` — versioned so a future config shape change doesn't get silently misapplied by an older build. It is deliberately unsigned: applying a decoded config is transient (no DB write, no activation), so a tampered link can at most show the viewer a different view, not act with authority.
+
+## Graph re-centering
+
+This is the part of the sprint most likely to be misdescribed if you go by the planning doc alone, so it's worth being precise about what actually ships.
+
+There are **two different graph endpoints** in the app, and they evolved on separate timelines:
+
+| Endpoint | Used by | Re-centering support |
+|----------|---------|----------------------|
+| `GET /api/graph/data` | `app/src/components/network/network-graph.tsx` | Implemented server-side (re-root SQL, LRU cache, cache invalidation wiring) under a `?primaryTargetId=` param — but the only caller never passes it. **Dead code as of the code this page describes.** |
+| `GET /api/graph/sigma-data` | `app/src/components/network/sigma-graph.tsx` — the live Graph tab | Implemented **and wired**. `SigmaGraph` passes `?primaryTargetId=<secondary target id>` on every fetch when a root target is set. |
+
+The naming is a known wart, called out directly in the `sigma-data` route's header comment: the query parameter is called `primaryTargetId` for consistency with the `/api/graph/data` implementation it was ported from, but per ADR-027's model, callers pass the current **secondary** target — primary/self is the fallback when no secondary is set. The parameter name describes the route's original design intent, not who's calling it today.
+
+Behavior specifics, current as of the `sigma-data` route:
+
+- **Only `kind='contact'` targets re-root.** If the resolved target is `kind='self'` or `kind='company'`, the route silently falls through to its normal top-by-PageRank listing — there is no company-centered or self-centered re-rooting today. This matches the same v1 scope limit already present in the (unwired) `/api/graph/data` implementation.
+- The re-rooted query builds a 1-hop neighborhood CTE around the contact (`source_contact_id = $1 OR target_contact_id = $1` over the indexed `edges` columns), orders by PageRank (matching how this route sizes/lays out every other node), and the existing `minPagerank` filter still applies on top.
+- Re-rooting is mutually exclusive with the niche filter — if a `primaryTargetId` resolves to a re-rootable contact, `nicheId` is ignored for that request.
+- No caching layer exists for `sigma-data` (unlike `/api/graph/data`, which has an LRU keyed on the parameter) — every re-root is a fresh query.
+
+On the client, `SigmaGraph` mirrors an incoming `rootTargetId` prop into local state and updates it optimistically on shift-click, so the re-center happens without waiting on a full state round-trip through the parent page.
+
+## Related documentation
+
+- [Snippets](/docs/research-tools/snippets) — snippets attach to whichever target is current when they're captured, and their ExoChain scope is derived from the target's kind and id.
+- [Graph API Reference](/docs/api-reference/graph) — the `/api/graph/data` endpoint's general shape (nodes, edges, filters).
+- [Database Schema](/docs/architecture/database-schema) — where `research_targets` and related tables fit among the rest of the schema.
+- [Target Panel](/docs/browser-extension/target-panel) — the extension sidebar's own (older, in-memory) notion of "current entity," which this model is gradually absorbing.

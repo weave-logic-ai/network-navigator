@@ -51,6 +51,13 @@ services:
       RESEARCH_CONNECTOR_NEWS_TECHCRUNCH: ${RESEARCH_CONNECTOR_NEWS_TECHCRUNCH:-false}
       RESEARCH_CONNECTOR_NEWS_CNBC: ${RESEARCH_CONNECTOR_NEWS_CNBC:-false}
       RESEARCH_CONNECTOR_PODCAST: ${RESEARCH_CONNECTOR_PODCAST:-false}
+      # Read directly in connector modules rather than via research-flags.ts.
+      # They were unreachable in the container until 2026-08-20; the parity
+      # test now scans all of app/src so this class of gap cannot recur.
+      RESEARCH_CONNECTOR_RSS: ${RESEARCH_CONNECTOR_RSS:-false}
+      RESEARCH_CONNECTOR_BLOG: ${RESEARCH_CONNECTOR_BLOG:-false}
+      RESEARCH_CONNECTOR_GOOGLE_NEWS: ${RESEARCH_CONNECTOR_GOOGLE_NEWS:-false}
+      RESEARCH_RECENCY_MODIFIER: ${RESEARCH_RECENCY_MODIFIER:-false}
     depends_on:
       db:
         condition: service_healthy

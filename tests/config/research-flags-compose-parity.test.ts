@@ -1,17 +1,46 @@
 // Guards against the exact failure class ADR-035 flagged: a RESEARCH_* flag
-// defined in research-flags.ts that is never forwarded through
-// docker-compose.yml (so setting it in .env silently does nothing), or a
-// name that diverges by a single character between the two files.
-import { readFileSync } from 'fs';
+// read by application code that is never forwarded through docker-compose.yml
+// (so setting it in .env silently does nothing), or a name that diverges by a
+// single character between the two.
+//
+// SCOPE NOTE (widened 2026-08-20): this originally scanned ONLY
+// research-flags.ts, and that was too narrow — it passed while FOUR flags went
+// unforwarded, because they are read directly inside connector modules rather
+// than through the central flag module: RESEARCH_CONNECTOR_RSS (rss.ts),
+// RESEARCH_CONNECTOR_BLOG (corporate-blog.ts), RESEARCH_CONNECTOR_GOOGLE_NEWS
+// (google-news.ts) and RESEARCH_RECENCY_MODIFIER (recency-modifier.ts). The
+// last of those was introduced the same day by a different change, so a
+// narrowly-scoped guard would have let a brand-new unreachable flag through on
+// day one. It now walks all of app/src.
+import { readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 
 const COMPOSE_PATH = path.join(__dirname, '../../docker-compose.yml');
-const FLAGS_PATH = path.join(__dirname, '../../app/src/lib/config/research-flags.ts');
+const APP_SRC = path.join(__dirname, '../../app/src');
 
+function walkTsFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const full = path.join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      if (entry === 'node_modules' || entry === '.next') continue;
+      walkTsFiles(full, out);
+    } else if (/\.tsx?$/.test(entry)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+// Scans ALL of app/src, not just research-flags.ts — see the SCOPE NOTE above.
 function researchEnvVarsReadByCode(): Set<string> {
-  const source = readFileSync(FLAGS_PATH, 'utf8');
-  const matches = source.matchAll(/process\.env\.(RESEARCH_[A-Z0-9_]+)/g);
-  return new Set(Array.from(matches, (m) => m[1]));
+  const found = new Set<string>();
+  for (const file of walkTsFiles(APP_SRC)) {
+    const source = readFileSync(file, 'utf8');
+    for (const m of source.matchAll(/process\.env\.(RESEARCH_[A-Z0-9_]+)/g)) {
+      found.add(m[1]);
+    }
+  }
+  return found;
 }
 
 function researchEnvVarsForwardedByCompose(): Set<string> {

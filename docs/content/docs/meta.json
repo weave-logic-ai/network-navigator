@@ -9,6 +9,8 @@
     "architecture/...",
     "claude-agent/...",
     "browser-extension/...",
+    "---Research Tools---",
+    "research-tools/...",
     "---Scoring & Models---",
     "scoring/...",
     "---Integrations---",

@@ -1,0 +1,13 @@
+{
+  "title": "Research Tools",
+  "pages": [
+    "index",
+    "architecture",
+    "targets",
+    "snippets",
+    "sources",
+    "lenses",
+    "provenance",
+    "parser-telemetry"
+  ]
+}

@@ -155,7 +155,18 @@ Banner wiring:
   overrides live on their own edge types.~~ **Not implemented
   (2026-08-19)**: `clearFieldOverride()` writes no `causal_node` of any
   kind. Clearing an override leaves no audit trail. See the update note at
-  the top of this file.
+  the top of this file.~~
+  **IMPLEMENTED 2026-08-20 — and the 2026-08-19 note above understated the
+  problem.** Investigation found that *neither* `setFieldOverride()` nor
+  `clearFieldOverride()` wrote a `causal_node`, so there was no existing
+  audit path to mirror. Both now do:
+  `operation='user_override'` on set and `operation='user_override_cleared'`
+  on clear, written via `createCausalNode()` and keyed on
+  (entityKind, entityId) so the trail is queryable per contact or company.
+  `'contact'` and `'company'` were added to `CausalEntityType`, which
+  previously had no member for the entities overrides actually apply to.
+  Clearing when nothing was active is a deliberate no-op — there is nothing
+  to audit. Pinned by `tests/targets/field-override-audit.test.ts`.
   (`05-source-expansion.md` §13.4, lines 386-388)
 
 ### Neutral
