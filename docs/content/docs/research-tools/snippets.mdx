@@ -1,0 +1,95 @@
+---
+title: Snippets
+description: Capturing text, image, and link evidence from any permitted page, and how it's stored as causal-graph evidence scoped to a research target.
+---
+
+A **snippet** is a piece of evidence you capture from a page — a text selection, an image, or a link — and attach to whichever [research target](/docs/research-tools/targets) is currently active. Unlike a note, a snippet carries provenance: where it came from, when, and (for image and text captures) a tamper-evident hash chain proving it hasn't been altered since capture.
+
+<Callout type="warn">
+Snippets are gated behind `RESEARCH_FLAGS.snippets` (env var `RESEARCH_SNIPPETS`), off by default. `POST /api/extension/snippet` returns a 404 when the flag is off, and the main app's `/snippets` page 404s too — both treat the feature as absent rather than disabled.
+</Callout>
+
+## Storage model — evidence, not a new table
+
+Snippets are **not** a dedicated table. Per ADR-027 and the sprint plan's explicit decision, a snippet is one `causal_nodes` row:
+
+```
+entity_type = 'snippet'
+operation   = 'captured'
+inputs      = { sourceUrl, pageType, selectionMode, capturedAt }
+output      = { content: { kind, ... }, tags, note, meta }
+```
+
+Two `causal_edges` connect it into the graph: `evidence_for` links the snippet to a `causal_nodes` row for the target it was captured against (lazily created — `entity_type='target'`, so every target gets a node the first time a snippet lands on it), and `mentions` links it to any contact the user confirmed as referenced in the text.
+
+Two sidecar tables in `data/db/init/034-snippets-schema.sql` hold what can't fit in a JSONB column:
+
+| Table | Holds | Notes |
+|-------|-------|-------|
+| `snippet_blobs` | Image bytes | Deduped by `(tenant_id, sha256)` — capturing the same image twice is one row, referenced by both snippets. |
+| `snippet_tags` | The tag taxonomy | 22 seeded slugs across 5 hierarchies (`role-history/`, `achievement/`, `filing/`, `news/`, `provenance/`), user-extensible per tenant. |
+
+Tag *application* (which tags a given snippet carries) is denormalized into `causal_nodes.output.tags` as a plain JSON array, not a join table — a GIN index on `(output -> 'tags')` keeps "find snippets tagged `filing/*`" fast without the join overhead.
+
+## The three kinds
+
+`app/src/lib/snippets/service.ts` and `service-link.ts` implement three save paths, all reachable through `POST /api/extension/snippet` with `kind` as the discriminator (`kind` omitted is treated as `'text'` for backward compatibility with early builds):
+
+### Text
+
+Inline in `output.content.text`. Before it's written, `detectAndScrubPii()` (`app/src/lib/snippets/pii-scrubber.ts`) runs a regex pass for emails, phone numbers, SSN-shaped strings, and credit-card-shaped strings (with a Luhn check to cut false positives), replacing any hit with a bracketed placeholder like `[email]`. This is stricter than the original sprint plan called for — the plan's §10 said explicitly *"do not modify the text... mark it so downstream features can honor the flag"* — but the shipped code redacts inline and sets `output.meta.piiScrubbed` alongside `piiHits`. There's no way to recover the original text from the stored snippet if the scrubber fires a false positive.
+
+The client also runs a narrow entity-mention pass — a `/\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b/g` bigram match for likely `First Last` names (`app/src/lib/snippets/mentions.ts`), deliberately not attempting real NER. Confirmed mentions become `mentions` edges; the extraction is candidate-only until the user links or dismisses each one.
+
+### Image
+
+Bytes go to `snippet_blobs`, referenced from the causal node by `content.blobId`. There's a real cap mismatch worth knowing about if you're inserting rows directly: the application layer (`MAX_IMAGE_BYTES` in `app/src/lib/snippets/blob-store.ts`, and the route's own pre-decode size check) allows images up to **5 MB**, but the `snippet_blobs.byte_length` column still carries its original migration-034 `CHECK (byte_length <= 1048576)` constraint — **1 MB**. Nothing between migration 034 and the current code widened that constraint. In practice this means any image between 1 MB and 5 MB passes app-level validation and then fails at the database `INSERT` with a check-violation, not a clean 400. The originating plan document specified a 1 MB cap throughout; the app code was updated to 5 MB without a matching schema migration.
+
+Dimensions (`width`/`height`) are captured client-side but currently have nowhere to persist — `snippet_blobs` has no width/height columns, and `upsertBlob()` accepts and then silently discards them (see the `void width; void height;` in `blob-store.ts`). They're not written into the causal node's `output.content` either in the current `saveImageSnippet` path beyond being passed straight through as request fields.
+
+The extension fetches image bytes from the **host page's own execution context** (`browser/src/content-snippet/index.ts`), not from the side panel — LinkedIn's image CDN gates on referer/credentials in a way that only works when the fetch originates from the page itself.
+
+### Link
+
+The `href` is fetched server-side through the shared source-fetching layer (`gatedFetch`, rate-limited and robots-respecting — the same one the source-expansion work uses), written to `source_records` with `source_type='link'` and deduped per tenant by a SHA-256 hash of the canonicalized URL. The snippet node references the resulting `source_records.id`. If the fetch fails (robots disallow, timeout, HTTP error), the snippet still saves — `sourceRecordId` comes back `null` with a warning, and the user can retry later by saving the same href again.
+
+## Tags
+
+Suggestions are URL-aware and already implemented (the sprint's acceptance checklist marks this "Deferred to Phase 6 polish," but `app/src/lib/snippets/tag-suggest.ts` is live code, exercised from the side panel): a `web.archive.org` source defaults to `provenance/wayback`; an `*.sec.gov` URL is pattern-matched for `10-K` / `10-Q` / `8-K` / `13F` / `DEF 14A` / court-docket language and mapped to the matching `filing/*` slug. Only slugs that already exist in the tenant's taxonomy are suggested.
+
+User-added tags are accepted only if they namespace under a seeded root, are 2–40 characters, and match `^[a-z0-9][a-z0-9-/]*$`; unknown slugs sent by a stale extension build are silently dropped from the save (with a warning in the response) rather than rejected outright.
+
+## Per-target ExoChain scoping
+
+Every snippet save appends an entry to the ExoChain (`exo_chain_entries`, the append-only hash-linked log from the ECC sprint), and the chain boundary is **per-target, kind-qualified** (ADR-029):
+
+```
+chain_id = 'snippet:' + target.kind + ':' + target.id
+```
+
+So `snippet:contact:a8f2-…`, `snippet:company:de91-…`, and (rarely) `snippet:self:<owner_id>` are each independently verifiable chains — "has anyone tampered with Acme's snippet evidence" is one bounded chain-verification call, not a fan-out over every snippet in the tenant. `snippetChainId()` (`app/src/lib/snippets/chain.ts`) computes this at write time; it isn't precomputed or stored on the target row.
+
+The chain append is **best-effort and non-fatal** — if it fails, the snippet row (the actual source of truth) is still saved, and a warning is returned rather than the whole request failing. Two things worth knowing if you're auditing this ADR against the code: the `chain_id` column had to be widened from `UUID` to `TEXT` in a later migration (`038-exo-chain-text-chain-id.sql`) before namespaced strings like `snippet:contact:<uuid>` could be stored at all — an early version of the ADR claimed no migration was needed, which was wrong even when written. And the `GET /api/ecc/exo-chain/verify/:chainId` endpoint the plan describes as forthcoming does not exist anywhere in the app.
+
+## Permission model and snip mode
+
+The actual extension implementation diverges from the sprint plan's original design in one significant way: **there is no on-page floating widget, marquee selection, or context-menu injection.** The snippet capture UI lives entirely in the extension's side panel (`browser/src/sidepanel/`), with three tabs — Text, Image, Link — and a lightweight content script (`browser/src/content-snippet/index.ts`) whose only jobs are tracking the page's current text selection and fetching image bytes on request. There's no per-page overlay to minimize or expand.
+
+### Origin permissions
+
+`browser/manifest.json` ships a fixed `host_permissions` list (LinkedIn, `web.archive.org`, `*.sec.gov`, Hacker News, and `localhost` for dev) plus `optional_host_permissions: ["<all_urls>"]`. Visiting an unlisted origin doesn't auto-request anything — the side panel surfaces an "Add this site" affordance that calls `chrome.permissions.request()`, and Chrome's native prompt handles user consent. Granted origins persist in `chrome.storage.local` with a revoke list in the side panel settings.
+
+<Callout type="warn">
+**New as of 2026-08-20**: Snip mode is opt-in and session-scoped — granting an origin permission only controls *where* the content script may run, and no longer implies the capture widget is active. The user must explicitly turn on **Snip mode** via a toggle button in the side panel or the `Ctrl+Shift+S` / `Cmd+Shift+S` hotkey (registered as a `chrome.commands` entry, relayed from the service worker since commands only fire in the background context). This replaces earlier auto-activation behavior. The toggle state is stored in `chrome.storage.session` (`browser/src/shared/snip-mode.ts`) — it survives a side-panel close/reopen within the same browser session but clears on browser restart, so every new browser session starts with snip mode off. When snip mode is off, the widget body (all three capture tabs) is hidden and a hint is shown instead.
+</Callout>
+
+## Rendering in the main app
+
+The Snippets page (`app/src/app/(app)/snippets/page.tsx`) resolves the "active" target for the view by reading `research_target_state`: it prefers `secondary_target_id` (the UI-centered focus) and falls back to `primary_target_id` (your self-target) when no secondary is set — the same primary/secondary semantics as the rest of the target model. It calls `listSnippetsForTarget()` directly as a server component rather than through a dedicated REST endpoint; the only snippet-related API route beyond the extension's save endpoint is `GET /api/snippets/blob/[id]` for fetching image bytes. Both `research_targets` and `research_target_state` are existence-probed defensively before querying, so the page degrades to an empty-state card rather than erroring on a database that predates migration 035.
+
+## Related documentation
+
+- [Research Targets](/docs/research-tools/targets) — the target model snippets attach to, and how primary/secondary is resolved.
+- [Target Panel](/docs/browser-extension/target-panel) — the extension sidebar surface snippets are captured against.
+- [Extension API Reference](/docs/api-reference/extension) — other extension-facing endpoints.
+- [Database Schema](/docs/architecture/database-schema) — where `snippet_blobs`, `snippet_tags`, and the ECC `causal_nodes` / `exo_chain_entries` tables fit.

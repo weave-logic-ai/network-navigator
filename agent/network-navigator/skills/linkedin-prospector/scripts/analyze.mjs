@@ -84,18 +84,32 @@ async function summary() {
 
 async function hubs(top) {
   printSection(`Top ${top} Network Hubs`);
-  const data = await get('/api/graph/data');
-  const nodes = Array.isArray(data) ? data : data?.nodes ?? [];
+  const res = await get('/api/graph/data');
+  // GET /api/graph/data wraps its payload as { data: { nodes, edges } }, and
+  // each node nests its attributes under `data` (id, label, data: { tier,
+  // company, title, score }) — not flat fields. Nodes don't carry a
+  // connections/degree count directly, so derive it by counting edges
+  // touching each node.
+  const payload = res?.data ?? res ?? {};
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const edges = Array.isArray(payload.edges) ? payload.edges : [];
+
+  const connectionCounts = new Map();
+  for (const edge of edges) {
+    connectionCounts.set(edge.source, (connectionCounts.get(edge.source) ?? 0) + 1);
+    connectionCounts.set(edge.target, (connectionCounts.get(edge.target) ?? 0) + 1);
+  }
+
   const sorted = nodes
-    .filter((n) => n.score !== undefined || n.compositeScore !== undefined)
-    .sort((a, b) => (b.score ?? b.compositeScore ?? 0) - (a.score ?? a.compositeScore ?? 0))
+    .filter((n) => n.data?.score !== undefined && n.data?.score !== null)
+    .sort((a, b) => (b.data?.score ?? 0) - (a.data?.score ?? 0))
     .slice(0, top);
   table(
     sorted.map((n) => [
-      n.name || n.label || n.id,
-      n.company || '-',
-      n.score?.toFixed(2) ?? n.compositeScore?.toFixed(2) ?? '-',
-      n.connections ?? n.degree ?? '-',
+      n.label || n.id,
+      n.data?.company || '-',
+      n.data?.score?.toFixed(2) ?? '-',
+      connectionCounts.get(n.id) ?? '-',
     ]),
     ['Name', 'Company', 'Score', 'Connections']
   );

@@ -104,3 +104,23 @@ export async function syncApprovedOriginsFromChrome(): Promise<string[]> {
     return getApprovedOrigins();
   }
 }
+
+/**
+ * ADR-028 clause 6 — revoke a single origin from the sidebar's "Approved
+ * sites" list. This is the single entry point callers (the sidebar's revoke
+ * button) should use instead of calling chrome.permissions.remove and
+ * writing the storage mirror separately: it calls the native permission
+ * removal first (source of truth) and only then drops the entry from the
+ * mirror via `removeApprovedOrigins`, so the two never disagree.
+ *
+ * If the native call throws, the mirror is left untouched — better to show
+ * a stale-but-accurate list than to claim a revoke happened when it didn't.
+ */
+export async function revokeOrigin(origin: string): Promise<string[]> {
+  try {
+    await chrome.permissions.remove({ origins: [origin] });
+  } catch {
+    return getApprovedOrigins();
+  }
+  return removeApprovedOrigins([origin]);
+}

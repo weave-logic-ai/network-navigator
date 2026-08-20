@@ -57,6 +57,17 @@
       </button>
     </section>
 
+    <!-- Approved sites + revoke UI (ADR-028 clause 6) -->
+    <section class="panel-section">
+      <details id="sp-approved-origins-details" class="visibility-details">
+        <summary class="visibility-summary">Approved sites</summary>
+        <div id="sp-approved-origins-body" class="visibility-body">
+          <p class="placeholder-text" id="sp-approved-origins-empty">No sites approved yet.</p>
+          <ul id="sp-approved-origins-list" class="approved-origins-list" style="display: none;"></ul>
+        </div>
+      </details>
+    </section>
+
     <!-- WS-2 Phase 2 Track D: visibility panels.
          Gated in JS on RESEARCH_FLAGS.parserTelemetry; hidden when flag is off. -->
     <section class="panel-section visibility-panels" id="sp-visibility-section" style="display: none;" data-testid="sp-visibility-section">
@@ -97,85 +108,99 @@
         <h2>Snip to target</h2>
         <span id="sp-snippet-queue-depth" class="snippet-queue-depth" style="display: none;" aria-live="polite"></span>
       </div>
-      <div class="snippet-tabs" role="tablist">
-        <button id="sp-snippet-tab-text" class="snippet-tab active" role="tab" aria-selected="true">Text</button>
-        <button id="sp-snippet-tab-image" class="snippet-tab" role="tab" aria-selected="false">Image</button>
-        <button id="sp-snippet-tab-link" class="snippet-tab" role="tab" aria-selected="false">Link</button>
-      </div>
 
-      <!-- Text tab (Phase 1) -->
-      <div id="sp-snippet-text-pane" class="snippet-pane">
-        <div id="sp-snippet-status" class="placeholder-text">Select text on the page, then click capture.</div>
-        <button id="sp-snippet-capture-btn" class="btn btn-secondary btn-full">Capture selection</button>
-      </div>
+      <!-- Snip mode opt-in (ADR-028 clause 4). Toggled here or via the
+           Ctrl+Shift+S / Cmd+Shift+S hotkey (relayed from the service
+           worker's chrome.commands listener). The widget body below stays
+           minimized until this is on for the current session. -->
+      <button id="sp-snip-mode-toggle" class="btn btn-secondary btn-full" aria-pressed="false">
+        Snip mode: Off
+      </button>
+      <p id="sp-snip-mode-hint" class="placeholder-text">
+        Turn on Snip mode (or press Ctrl+Shift+S) to capture selections, images, or links from this page.
+      </p>
 
-      <!-- Image tab (Phase 1.5) -->
-      <div id="sp-snippet-image-pane" class="snippet-pane" style="display: none;">
-        <div id="sp-snippet-image-status" class="placeholder-text">
-          Drop an image here, paste one, or right-click an image on the page and choose "Copy image address" then paste the URL below.
+      <div id="sp-snippet-widget-body" style="display: none;">
+        <div class="snippet-tabs" role="tablist">
+          <button id="sp-snippet-tab-text" class="snippet-tab active" role="tab" aria-selected="true">Text</button>
+          <button id="sp-snippet-tab-image" class="snippet-tab" role="tab" aria-selected="false">Image</button>
+          <button id="sp-snippet-tab-link" class="snippet-tab" role="tab" aria-selected="false">Link</button>
         </div>
-        <div id="sp-snippet-image-dropzone" class="snippet-dropzone" tabindex="0">
-          <span>Drop image · Paste · or type URL</span>
-        </div>
-        <input
-          id="sp-snippet-image-url-input"
-          class="snippet-image-url-input"
-          type="url"
-          placeholder="https://example.com/image.png"
-          aria-label="Image URL to capture"
-        />
-        <button id="sp-snippet-image-fetch-btn" class="btn btn-secondary btn-full">Fetch image from URL</button>
-      </div>
 
-      <!-- Link tab (Phase 1.5 — WS-3 closure) -->
-      <div id="sp-snippet-link-pane" class="snippet-pane" style="display: none;">
-        <div id="sp-snippet-link-status" class="placeholder-text">
-          Paste a URL and (optionally) the link text. We'll fetch it through the shared source-records pipeline.
+        <!-- Text tab (Phase 1) -->
+        <div id="sp-snippet-text-pane" class="snippet-pane">
+          <div id="sp-snippet-status" class="placeholder-text">Select text on the page, then click capture.</div>
+          <button id="sp-snippet-capture-btn" class="btn btn-secondary btn-full">Capture selection</button>
         </div>
-        <input
-          id="sp-snippet-link-href-input"
-          class="snippet-image-url-input"
-          type="url"
-          placeholder="https://example.com/page"
-          aria-label="Link URL to capture"
-        />
-        <input
-          id="sp-snippet-link-text-input"
-          class="snippet-image-url-input"
-          type="text"
-          placeholder="Optional link text"
-          aria-label="Optional link text"
-        />
-        <button id="sp-snippet-link-prep-btn" class="btn btn-secondary btn-full">Prepare link snippet</button>
-      </div>
 
-      <div id="sp-snippet-card" class="snippet-card" style="display: none; margin-top: 10px;">
-        <div id="sp-snippet-pii-banner" class="snippet-pii-banner" role="alert" style="display: none;"></div>
-        <div class="snippet-field">
-          <label>Preview</label>
-          <div id="sp-snippet-preview" class="snippet-preview"></div>
-          <div id="sp-snippet-image-preview-wrap" class="snippet-image-preview-wrap" style="display: none;">
-            <img id="sp-snippet-image-preview" class="snippet-image-preview" alt="Snippet preview" />
-            <div id="sp-snippet-image-meta" class="snippet-image-meta"></div>
+        <!-- Image tab (Phase 1.5) -->
+        <div id="sp-snippet-image-pane" class="snippet-pane" style="display: none;">
+          <div id="sp-snippet-image-status" class="placeholder-text">
+            Drop an image here, paste one, or right-click an image on the page and choose "Copy image address" then paste the URL below.
           </div>
+          <div id="sp-snippet-image-dropzone" class="snippet-dropzone" tabindex="0">
+            <span>Drop image · Paste · or type URL</span>
+          </div>
+          <input
+            id="sp-snippet-image-url-input"
+            class="snippet-image-url-input"
+            type="url"
+            placeholder="https://example.com/image.png"
+            aria-label="Image URL to capture"
+          />
+          <button id="sp-snippet-image-fetch-btn" class="btn btn-secondary btn-full">Fetch image from URL</button>
         </div>
-        <div class="snippet-field">
-          <label>Tags</label>
-          <div id="sp-snippet-tags" class="snippet-tags"></div>
+
+        <!-- Link tab (Phase 1.5 — WS-3 closure) -->
+        <div id="sp-snippet-link-pane" class="snippet-pane" style="display: none;">
+          <div id="sp-snippet-link-status" class="placeholder-text">
+            Paste a URL and (optionally) the link text. We'll fetch it through the shared source-records pipeline.
+          </div>
+          <input
+            id="sp-snippet-link-href-input"
+            class="snippet-image-url-input"
+            type="url"
+            placeholder="https://example.com/page"
+            aria-label="Link URL to capture"
+          />
+          <input
+            id="sp-snippet-link-text-input"
+            class="snippet-image-url-input"
+            type="text"
+            placeholder="Optional link text"
+            aria-label="Optional link text"
+          />
+          <button id="sp-snippet-link-prep-btn" class="btn btn-secondary btn-full">Prepare link snippet</button>
         </div>
-        <div class="snippet-field" id="sp-snippet-mentions-field">
-          <label>Mentions</label>
-          <div id="sp-snippet-mentions" class="snippet-mentions">No proper nouns detected.</div>
+
+        <div id="sp-snippet-card" class="snippet-card" style="display: none; margin-top: 10px;">
+          <div id="sp-snippet-pii-banner" class="snippet-pii-banner" role="alert" style="display: none;"></div>
+          <div class="snippet-field">
+            <label>Preview</label>
+            <div id="sp-snippet-preview" class="snippet-preview"></div>
+            <div id="sp-snippet-image-preview-wrap" class="snippet-image-preview-wrap" style="display: none;">
+              <img id="sp-snippet-image-preview" class="snippet-image-preview" alt="Snippet preview" />
+              <div id="sp-snippet-image-meta" class="snippet-image-meta"></div>
+            </div>
+          </div>
+          <div class="snippet-field">
+            <label>Tags</label>
+            <div id="sp-snippet-tags" class="snippet-tags"></div>
+          </div>
+          <div class="snippet-field" id="sp-snippet-mentions-field">
+            <label>Mentions</label>
+            <div id="sp-snippet-mentions" class="snippet-mentions">No proper nouns detected.</div>
+          </div>
+          <div class="snippet-field">
+            <label for="sp-snippet-note">Note</label>
+            <textarea id="sp-snippet-note" class="snippet-note" rows="2" placeholder="Optional free-text note…"></textarea>
+          </div>
+          <div class="snippet-actions">
+            <button id="sp-snippet-save-btn" class="btn btn-primary">Save snippet</button>
+            <button id="sp-snippet-cancel-btn" class="btn btn-secondary">Cancel</button>
+          </div>
+          <p id="sp-snippet-error" class="snippet-error" style="display: none;"></p>
         </div>
-        <div class="snippet-field">
-          <label for="sp-snippet-note">Note</label>
-          <textarea id="sp-snippet-note" class="snippet-note" rows="2" placeholder="Optional free-text note…"></textarea>
-        </div>
-        <div class="snippet-actions">
-          <button id="sp-snippet-save-btn" class="btn btn-primary">Save snippet</button>
-          <button id="sp-snippet-cancel-btn" class="btn btn-secondary">Cancel</button>
-        </div>
-        <p id="sp-snippet-error" class="snippet-error" style="display: none;"></p>
       </div>
     </section>
 

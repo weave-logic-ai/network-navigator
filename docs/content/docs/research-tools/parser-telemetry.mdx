@@ -1,0 +1,107 @@
+---
+title: Parser Telemetry
+description: What gets recorded per parse, the raw vs. daily-aggregate tables, the /admin/parsers page, unmatched-DOM flagging, and the regression report endpoint.
+---
+
+# Parser Telemetry
+
+Every time a captured LinkedIn page gets parsed, the server can record — per field — whether the field came out, how confident the extraction was, and which strategy produced it. That's parser telemetry: the observability layer over the [parser engine](/docs/architecture/parser-engine) that turns silent selector rot into a number you can watch.
+
+<Callout type="info">
+The whole surface is gated behind `RESEARCH_FLAGS.parserTelemetry` (env var `RESEARCH_PARSER_TELEMETRY=true`), off by default. With the flag off, every telemetry write is a no-op and `/admin/parsers` renders a banner explaining how to turn it on — it never shows stale or fabricated data.
+</Callout>
+
+## What is recorded per parse
+
+`recordFieldOutcomes` (`app/src/lib/parser/telemetry.ts`) writes one row per extracted field into `parse_field_outcomes` (schema: `data/db/init/033-parse-telemetry.sql`):
+
+| Column | Meaning |
+|--------|---------|
+| `page_type` | Which of the seven parsers ran (`PROFILE`, `COMPANY`, `SEARCH_PEOPLE`, `SEARCH_CONTENT`, `FEED`, `CONNECTIONS`, `MESSAGES`). |
+| `parser_version`, `selector_config_version` | Which parser code and which DB-resident selector config produced this outcome — the join keys for "did a specific release regress a field." |
+| `field_name` | The field, e.g. `headline`, `connectionsCount`. |
+| `value_present` | Boolean — did the field come out non-null/non-empty. |
+| `confidence` | The extractor's confidence score for the match, when the extraction path produces one. |
+| `source` | Which strategy produced the value: `selector`, `heuristic`, `content-heuristic`, `title-tag`, `url-slug`, or `fallback`. This is what lets a trend query distinguish "the primary selector still works" from "a fallback is quietly covering for a broken selector." |
+| `selector_used` | The specific selector string or fallback name that matched. |
+
+Writes are best-effort and batched into a single multi-row `INSERT`: a telemetry failure is logged and swallowed, never surfaced to the user, and never blocks the parse or the contact upsert that follows it. `selector_index` exists as a column but the current write path does not populate it — it is always `NULL`.
+
+The insert is guarded three ways before it runs at all: the flag must be on, a `captureId` must be present, and the parser must have produced at least one field. `resolveTenantId()` reads `get_current_tenant_id()` and treats a failure there as reason enough to skip the write rather than insert against an unknown tenant.
+
+## Raw table vs. daily aggregate
+
+`033-parse-telemetry.sql` creates two tables with different jobs, formalized in `docs/adr/ADR-031-parser-telemetry-retention.md`:
+
+- **`parse_field_outcomes`** — the raw, one-row-per-field-per-parse table described above. Indexed on `(page_type, field_name, created_at DESC)` for the trend queries and on `(capture_id)` for per-capture drill-down.
+- **`parse_field_outcomes_daily`** — one row per `(tenant_id, day, page_type, field_name, parser_version)`, carrying `n_samples`, `n_present`, `avg_confidence`, and a `source_breakdown` JSONB (counts per extraction strategy for that bucket). This is the table trend queries are *supposed* to read, so a multi-week query doesn't have to scan raw rows.
+
+### The rollup gap, and what changed on 2026-08-20
+
+ADR-031 originally specified a nightly rollup job populating the daily aggregate, with only the *pruning* of raw rows (drop-after-90-days) deferred to Phase 2. In practice, no such rollup job existed until yesterday. `parse_field_outcomes_daily` sat permanently empty from migration 033 onward, and `readYieldReport()` fell through to re-aggregating the full raw table on every call to `/admin/parsers` — exactly the cost the aggregate table was supposed to avoid.
+
+That gap is now closed. `app/src/lib/parser/rollup.ts` exports `runParserRollup(day?)`, exposed as `POST /api/sources/cron/parser-rollup`:
+
+- Defaults to rolling up UTC "yesterday" (`defaultRollupDay()`); pass `?day=YYYY-MM-DD` to backfill or re-run an arbitrary day.
+- Reads all raw rows for that day, groups them in memory by `(tenant, page_type, field_name, parser_version)`, and writes the result with a single multi-row `INSERT ... ON CONFLICT (tenant_id, day, page_type, field_name, parser_version) DO UPDATE SET ...` against the `uq_pfod_bucket` constraint migration 033 already shipped.
+- **Idempotent by construction**: each run recomputes the day's bucket values from raw and overwrites them outright — never `n_samples = n_samples + EXCLUDED.n_samples`. Re-running the same day twice, or backfilling a day that already has an aggregate row, converges to the same numbers rather than double-counting.
+- Route is flag-gated (`RESEARCH_FLAGS.parserTelemetry`, 404 when off), authorized via `isCronAuthorized()` (the `X-Cron-Secret` header, same convention as sibling cron routes under `/api/sources/cron/`), and validates `day` against `\d{4}-\d{2}-\d{2}` before calling into the rollup.
+
+`readYieldReport()` still queries the daily aggregate first and only falls back to a raw scan if the aggregate returns zero rows for the window — now the expected fallback path is "telemetry was just turned on and the rollup hasn't run yet" rather than "the rollup never runs."
+
+<Callout type="warn">
+No scheduler for this route — or any of its sibling `/api/sources/cron/*` routes — is registered anywhere in this repository. `parser-rollup` is invoked, is authorized, and works correctly, but nothing calls it automatically. An operator turning on `RESEARCH_PARSER_TELEMETRY` needs to also wire up an external trigger (cron, a scheduled task runner, whatever the deployment already uses for cron routes) or the daily aggregate will silently stay empty again, exactly as it did before this job existed. The Phase 2 prune cron (drop-after-90-days for raw rows) also remains unbuilt — raw rows currently accumulate without a retention sweep.
+</Callout>
+
+## The `/admin/parsers` page
+
+`app/src/app/(app)/admin/parsers/page.tsx` is a read-only client page that fetches `GET /api/parser/yield-report?windowDays=N` (N selectable from 1/7/14/30/90, default 7) and renders one card per parser page type, with one bar per field:
+
+- Bar width and color reflect yield (`nPresent / nSamples`): green at ≥ 80%, amber at ≥ 40%, red below that.
+- Each row also shows the raw fraction (`nPresent/nSamples`) and average confidence.
+- If the telemetry flag is off, the page shows a banner with the exact environment variable to set instead of an empty or misleading chart.
+
+`GET /api/parser/yield-report` (`app/src/app/api/parser/yield-report/route.ts`) is a thin wrapper around `readYieldReport()`: it clamps `windowDays` to `[1, 90]` and returns `{ flagEnabled, windowDays, rows }`.
+
+## Unmatched-DOM flagging
+
+After a parser runs, `populateUnmatchedDom()` (`app/src/lib/parser/unmatched-dom.ts`) walks the parsed document once more looking for "large unexplained blocks" — the visibility half of the telemetry story, surfacing pages where the parser is silently leaving data on the table even when every *known* field extracted fine.
+
+The walk:
+
+1. Builds the set of selector strings that actually matched during parsing (`collectMatchedSelectors` — skips fields with no value and ignores synthetic `fallback:`/`heuristic:` prefixed identifiers).
+2. Re-runs those selectors against the live DOM and marks every matched node, plus all of its ancestors, as "covered" using a `WeakSet`.
+3. Walks candidate containers (`section`, `div[aria-labelledby]`, `div[role="region"]`, `main > div`), skipping known chrome tags (`nav`, `header`, `footer`, `script`, `style`, etc.).
+4. A candidate is reported only if it is **not** covered, none of its descendants are covered, and its normalized text content is at least 80 characters long.
+5. Emits at most 20 entries (`MAX_ENTRIES`), each carrying an approximate DOM path (tag + first class + nth-of-type, capped at 6 ancestor segments), a 160-character text preview, and the fragment's serialized byte length.
+
+The walker is wrapped so a failure never fails the parse — on any exception, `result.unmatched` is simply set to `[]`.
+
+## The regression report endpoint
+
+`POST /api/parser/regression-report` (`app/src/app/api/parser/regression-report/route.ts`) is the flag-independent, DB-optional "run a parser against arbitrary HTML" endpoint. It backs both the fixture test harness and any future "report as regression" UI action referenced in the original audit plan (the sidebar affordance itself is out of scope for what's built so far — this route is the data side).
+
+Given `{ pageType, rawHtml, captureId?, url?, userNote? }`:
+
+- Validates `pageType` against the seven known page types and caps `rawHtml` at 5MB.
+- Loads the active `selector_configs` row for that page type from the DB (`version DESC`, `is_active = true`, `selector_name = 'full_config'`); if the DB is unreachable or has no active config, falls back to an empty inline config so the parser still runs on content-heuristics and the fallback registry alone.
+- Runs the real parser (`parserRegistry.get(pageType)`) against the HTML with `cheerio.load`, then calls `populateUnmatchedDom`.
+- Best-effort records the outcome via `recordFieldOutcomes` (still flag-gated — with telemetry off this call is a no-op, and the response's `telemetry.attempted` / `reason` fields reflect that honestly rather than pretending a row was written).
+- Fires a best-effort `regression_run` analytics event.
+- Returns `{ extracted, unmatched, telemetryRecorded, telemetry, captureId }` — `extracted` includes the full per-field breakdown (value, confidence, source, selector used) plus overall parse stats.
+
+Note this endpoint does **not** create rows in `parser_regression_reports` (the table migration 033 also creates, intended for user-flagged misses with a `redacted_fragment_path` / `github_issue_url` / `status` workflow) — nothing in the current codebase writes to that table. It exists in the schema; the ingestion path described in the original audit plan (fixture capture worker, GitHub issue creation) has not been built.
+
+## Flag summary
+
+| Flag | Env var | Gates |
+|------|---------|-------|
+| `RESEARCH_FLAGS.parserTelemetry` | `RESEARCH_PARSER_TELEMETRY` | `parse_field_outcomes` writes, the `/admin/parsers` page's live data, `parser-rollup` cron route (404s when off). |
+
+All `RESEARCH_FLAGS` default to `false` (`app/src/lib/config/research-flags.ts`).
+
+## See also
+
+- [Parser Engine](/docs/architecture/parser-engine) — the parsers, selector chains, and fallback registry this telemetry observes.
+- [Database Schema](/docs/architecture/database-schema) — for ADR references and the broader schema.
+- [Lenses](/docs/research-tools/lenses) — a different, unrelated Research Tools Sprint work stream.

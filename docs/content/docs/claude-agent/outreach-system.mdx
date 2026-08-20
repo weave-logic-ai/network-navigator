@@ -1,176 +1,125 @@
 ---
 title: Outreach System
-description: Template engine, outreach configuration, sequences, rate budgets, and how agent outreach connects to the app.
+description: Template-based outreach, campaigns, and pipeline tracking, run entirely through the app's REST API.
 ---
 
 # Outreach System
 
-The agent includes a template-based outreach system for generating personalized LinkedIn messages. Outreach is **generate-only** -- the agent creates message drafts but never sends them automatically. A human must always click the send button.
+Outreach in v2 is owned entirely by the app (`app/src/app/api/outreach/`, `app/src/app/(app)/outreach/`) and backed by PostgreSQL. The agent has no local template engine, YAML files, or outreach state of its own -- it can call the outreach API like any other endpoint, but the templates, campaigns, and pipeline live server-side.
 
-## Template Engine
+<Callout type="warn">
+The retired v1 architecture stored templates in a local `outreach-templates.yaml` file and pipeline state in `outreach-state.json`. Those files don't exist in v2 -- templates and campaigns are database rows managed through `POST /api/outreach/templates` and `POST /api/outreach/campaigns`.
+</Callout>
 
-Templates use merge fields that are populated from contact data:
-
-### Available Merge Fields
-
-| Field | Source |
-|-------|--------|
-| `{{firstName}}`, `{{lastName}}`, `{{name}}` | Contact name fields |
-| `{{company}}`, `{{currentRole}}`, `{{headline}}` | Profile info |
-| `{{mutualConnection}}`, `{{mutualCount}}` | Mutual connections |
-| `{{sharedInterest}}` | Shared interests/tags from scoring |
-| `{{personalNote}}` | Custom note (optional) |
-| `{{targetName}}`, `{{targetCompany}}` | For introduction requests |
-
-### Character Limits
-
-| Channel | Limit |
-|---------|-------|
-| LinkedIn connection request | 300 characters (hard limit) |
-| LinkedIn message | ~8000 characters |
-
-## Template Categories
-
-Templates are stored in `data/outreach-templates.yaml` and organized by type:
-
-### Connection Requests
-
-| Template | Persona/Tier | Use Case |
-|----------|-------------|----------|
-| `connection-request-default` | Silver | General outreach with mutual connection reference |
-| `connection-request-decision-maker` | Decision-maker | Value proposition for budget holders |
-| `connection-request-influencer` | Influencer | Thought leader engagement |
-| `connection-request-warm-mutual` | Gold | Warm introduction via mutual connection |
-| `connection-request-technical` | Technical expert | Technical common ground |
-| `connection-request-referral-source` | Referral source | Partnership exploration |
-
-### Follow-Up Messages
-
-| Template | Use Case |
-|----------|----------|
-| `followup-warm` | After connection accepted, suggest a call |
-| `followup-value-add` | Share relevant content as a conversation opener |
-| `followup-meeting-request` | Direct meeting request with specific availability |
-
-### Introduction Requests
-
-| Template | Use Case |
-|----------|----------|
-| `intro-request-mutual` | Ask a mutual connection for a warm intro |
-| `intro-request-specific-context` | Introduction with specific business context |
-
-### Re-engagement
-
-| Template | Use Case |
-|----------|----------|
-| `reengage-dormant` | Re-engage a contact you haven't spoken to in a while |
-| `reengage-news-hook` | Re-engage using recent company news |
-
-### Events
-
-| Template | Use Case |
-|----------|----------|
-| `event-invite` | Invite contacts to a webinar or roundtable |
-
-## Template Selection Rules
-
-The system automatically selects templates based on contact persona and tier:
-
-| Persona | Tier | Template Selected |
-|---------|------|-------------------|
-| decision-maker | gold | `connection-request-decision-maker` |
-| influencer | gold | `connection-request-influencer` |
-| technical-expert | any | `connection-request-technical` |
-| referral-source | any | `connection-request-referral-source` |
-| any | gold | `connection-request-warm-mutual` |
-| any | silver | `connection-request-default` |
-
-## Outreach Sequences
-
-Two built-in sequences define multi-step outreach cadences:
-
-### Default Sequence
-
-| Step | Channel | Delay | Condition |
-|------|---------|-------|-----------|
-| 1 | LinkedIn connection request | Day 0 | -- |
-| 2 | LinkedIn message | Day 2 | Connection accepted |
-| 3 | LinkedIn message | Day 7 | No response to step 2 |
-
-### High-Value Sequence
-
-| Step | Channel | Delay | Condition |
-|------|---------|-------|-----------|
-| 1 | LinkedIn connection request | Day 0 | -- |
-| 2 | LinkedIn message | Day 1 | Connection accepted |
-| 3 | Email | Day 3 | Message read |
-
-## Lifecycle States
-
-Every outreach plan moves through a state machine:
+## Templates
 
 ```
-planned -> sent -> pending_response -> responded -> engaged -> converted
-                                    \-> declined -> closed_lost
-                                                 \-> deferred -> planned
+GET  /api/outreach/templates   -- list templates
+POST /api/outreach/templates   -- create a template
 ```
 
-| State | Meaning |
-|-------|---------|
-| `planned` | Outreach drafted but not sent |
-| `sent` | Message sent by human |
-| `pending_response` | Waiting for reply |
-| `responded` | Reply received |
-| `engaged` | Active conversation ongoing |
-| `converted` | Successfully converted to meeting/deal |
-| `declined` | Contact declined or not interested |
-| `deferred` | Postponed for later follow-up |
-| `closed_lost` | Permanently closed, no further action |
+**Template fields:**
 
-State transitions require manual confirmation -- no automation.
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `name` | string | Yes | Template name |
+| `category` | string | No (default `custom`) | One of: `initial_outreach`, `follow_up`, `meeting_request`, `referral_ask`, `content_share`, `custom` |
+| `subject_template` | string | No | Subject line template (for email-style messages) |
+| `body_template` | string | Yes | Message body with merge fields |
+| `merge_variables` | string[] | No | List of merge field names used in the template |
+| `tone` | string | No (default `professional`) | Tone label |
 
-## Rate Budget
+## Campaigns
 
-LinkedIn rate limits are enforced to protect account health:
+```
+GET  /api/outreach/campaigns   -- list campaigns
+POST /api/outreach/campaigns   -- create a campaign
+```
 
-| Limit | Daily | Weekly |
-|-------|-------|--------|
-| Connection requests | 20 | -- |
-| Messages | 50 | -- |
-| New connections | -- | 100 |
-| Profile views | 80 | -- |
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `name` | string | Yes | Campaign name |
+| `description` | string | No | Campaign description |
+| `status` | string | No | `draft`, `active`, `paused`, `completed`, or `archived` (default `draft`) |
+| `target_count` | number | No | Target number of contacts |
 
-## Receptiveness Scoring
+Campaigns can contain **sequences** (`outreach_sequences`) made of ordered **steps** (`outreach_sequence_steps`), each referencing a template with a `delay_days` and an optional `condition`. Sequences and steps are managed in the database schema but do not yet have a dedicated top-level REST route in this guide's scope -- check `app/src/app/api/outreach/` for the current set of endpoints.
 
-The system predicts likelihood of positive response using a composite score:
+## Template Recommendation
 
-| Factor | Weight | Source |
-|--------|--------|--------|
-| Relationship strength | 0.30 | Layer 1 scoring |
-| Behavioral score | 0.25 | Layer 2 scoring |
-| Activity recency | 0.20 | Last activity timestamp |
-| Mutual connections | 0.15 | Mutual count |
-| Referral likelihood | 0.10 | Layer 3 scoring |
+```
+GET /api/outreach/recommend?contactId=<uuid>
+```
 
-## Connection to the App
+Looks up the contact's tier, persona, and referral persona from `contact_scores`, then recommends a template category:
 
-The agent's outreach system generates templates and tracks state locally in `data/outreach-state.json`. The app's outreach module (`app/src/app/(app)/outreach/`) provides the full web UI:
+| Condition (checked in order) | Recommended Category |
+|-------------------------------|------------------------|
+| Referral persona is `warm-introducer` | `referral_ask` |
+| Referral persona is `white-label-partner` | `custom` |
+| Tier `gold` + persona `buyer` | `initial_outreach` |
+| Tier `gold` + persona `warm-lead` | `follow_up` |
+| Tier `silver` + persona `hub` | `referral_ask` |
+| Default | `initial_outreach` |
 
-| Feature | Agent | App |
-|---------|-------|-----|
-| Template generation | YAML templates with merge fields | Claude-powered personalization |
-| State tracking | Local JSON file | PostgreSQL with full audit trail |
-| Pipeline view | CLI state queries | Kanban board UI |
-| Rate budget | Config-based limits | Dashboard with usage charts |
-| Sending | Never (generate-only) | Never (generate-only) |
+<Callout>
+Every category this matcher can return is one the templates API accepts
+(`initial_outreach`, `follow_up`, `meeting_request`, `referral_ask`,
+`content_share`, `custom`). An earlier version returned four names the
+`outreach_templates.category` CHECK constraint rejects, so those branches
+could never match a real template and silently fell back to
+`initial_outreach`, discarding the persona-specific reasoning. Fixed
+2026-08-19; the mapping above reflects the current code.
+</Callout>
 
-When both systems are running, outreach plans created by the agent can be viewed and managed in the app's outreach pipeline.
+## Pipeline (Kanban view)
 
-## Compliance
+```
+GET /api/outreach/pipeline?campaign_id=<uuid>
+```
 
-| Policy | Setting |
-|--------|---------|
-| GDPR consent basis | Legitimate interest |
-| Auto-archive | 180 days after closed |
-| Automation policy | Generate-only -- human must send |
-| LinkedIn TOS | All outreach requires manual action |
+Returns contacts grouped into Kanban-style stages, derived from the underlying `outreach_states.state` value:
+
+| Pipeline Stage | Underlying state(s) |
+|-----------------|------------------------|
+| `not_started` | `not_started`, `queued` |
+| `contacted` | `sent`, `opened` |
+| `replied` | `replied`, `accepted` |
+| `meeting_booked` | (custom state, if used) |
+| `won` | (custom state, if used) |
+| `lost` | `declined`, `bounced`, `opted_out` |
+
+The underlying `outreach_states.state` column itself is constrained to: `not_started`, `queued`, `sent`, `opened`, `replied`, `accepted`, `declined`, `bounced`, `opted_out`.
+
+## Events
+
+Every state transition and interaction can be recorded as an `outreach_events` row (`event_type`, `event_data`), scoped to an `outreach_states` row. This is the audit trail for a given contact's outreach history.
+
+```
+GET /api/outreach/events
+```
+
+## Template Performance
+
+`template_performance` tracks per-template, per-period counts (`sent_count`, `open_count`, `reply_count`, `accept_count`), used to compare template effectiveness over time.
+
+## Using It From the Agent
+
+The agent has no dedicated outreach script -- there is no `outreach.mjs`. To work with outreach data conversationally, ask `/network-intel` to call the API on your behalf, or call the endpoints directly:
+
+```
+GET /api/outreach/templates
+GET /api/outreach/pipeline
+GET /api/outreach/recommend?contactId=<uuid>
+```
+
+## What Changed From v1
+
+| Capability | v1 | v2 |
+|-------------|----|----|
+| Template storage | Local `outreach-templates.yaml` | `outreach_templates` table, via REST API |
+| Template selection | Rule table baked into the agent script | `GET /api/outreach/recommend`, server-side logic (see caveat above) |
+| Pipeline state | Local `outreach-state.json` | `outreach_states` table with a full audit trail in `outreach_events` |
+| Pipeline view | CLI queries against local JSON | Kanban board UI in the app (`/outreach`), plus `GET /api/outreach/pipeline` |
+| Rate budgeting (`rate-budget.json`) | Config-based daily/weekly limits | No v2 equivalent found -- there is no rate-limit table or endpoint in the current schema |
+| Sending | Never automated -- generate-only, human sends | Same principle holds: nothing in the API sends a message on LinkedIn on your behalf |

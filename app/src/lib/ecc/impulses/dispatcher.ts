@@ -10,6 +10,30 @@ const HANDLER_TIMEOUT_MS = 5000;
 const MAX_FAILURES_BEFORE_DISABLE = 3;
 
 /**
+ * Race a promise against a timeout, without leaking the timer.
+ *
+ * A bare `Promise.race([promise, new Promise((_, reject) => setTimeout(...))])`
+ * never clears the timeout's handle once `promise` wins the race — the timer
+ * stays scheduled for the full `ms` regardless of outcome. In a long-lived
+ * server that's an easy-to-miss resource leak (one live timer per dispatched
+ * handler); in tests it surfaces as Jest's "did not exit one second after
+ * the test run has completed" / "worker process has failed to exit
+ * gracefully" warnings, since every mocked handler resolves instantly and
+ * leaves its timeout pending for up to HANDLER_TIMEOUT_MS afterward.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId!);
+  }
+}
+
+/**
  * Dispatch an impulse to all matching handlers.
  * Each handler is executed independently with error isolation.
  */
@@ -33,17 +57,31 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
   );
 
   const handlers = handlersResult.rows.map(mapHandler);
+
+  // An impulse with no registered handler is dispatched to nobody. That is
+  // indistinguishable from success in the return value (handlersExecuted: 0),
+  // which is exactly how ECC_IMPULSES=true silently produced zero tasks for
+  // as long as impulse_handlers went unseeded. Say so out loud instead.
+  if (handlers.length === 0) {
+    console.warn(
+      `[ecc/impulses] No enabled handler registered for impulse_type ` +
+        `"${impulse.impulseType}" (tenant ${impulse.tenantId}, impulse ${impulseId}). ` +
+        `The impulse was recorded but nothing acted on it. Register a row in ` +
+        `impulse_handlers for this tenant and impulse type — see ` +
+        `data/db/init/048-seed-impulse-handlers.sql.`
+    );
+  }
+
   const results: HandlerExecutionResult[] = [];
 
   for (const handler of handlers) {
     const start = Date.now();
     try {
-      const result = await Promise.race([
+      const result = await withTimeout(
         executeHandler(handler, impulse),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Handler timeout')), HANDLER_TIMEOUT_MS)
-        ),
-      ]);
+        HANDLER_TIMEOUT_MS,
+        'Handler timeout'
+      );
 
       const durationMs = Date.now() - start;
       results.push({ handlerId: handler.id, status: 'success', result, durationMs });

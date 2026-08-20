@@ -18,7 +18,7 @@ const REAL_EDGE_TYPES = [
   "WORKS_AT",
 ];
 
-const GRAPH_NAME = "contacts";
+export const GRAPH_NAME = "contacts";
 
 /**
  * Full sync: recreate the RuVector contacts graph from the edges table.
@@ -261,4 +261,144 @@ export async function ensureEdgeIndex(): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_edges_target_type
      ON edges(target_contact_id, edge_type)`
   );
+}
+
+/**
+ * Index the RuVector node table for contact_id lookups (used by shortest-path
+ * to resolve a contact UUID to its RuVector node_id without a full graph scan).
+ */
+export async function ensureNodeContactIdIndex(): Promise<void> {
+  await query(
+    `CREATE INDEX IF NOT EXISTS idx_ruvector_nodes_graph_contact
+     ON _ruvector_nodes (graph_name, (properties->>'contact_id'))`
+  );
+}
+
+/**
+ * Look up the RuVector node_id for a contact UUID in the given graph.
+ * Returns null if the contact has no node in the graph (not yet synced,
+ * or excluded because it had no real edges).
+ */
+export async function getNodeIdForContact(
+  contactId: string,
+  graphName: string = GRAPH_NAME
+): Promise<number | null> {
+  const res = await query<{ id: number }>(
+    `SELECT id FROM _ruvector_nodes WHERE graph_name = $1 AND properties->>'contact_id' = $2 LIMIT 1`,
+    [graphName, contactId]
+  );
+  return res.rows[0]?.id ?? null;
+}
+
+/**
+ * Resolve RuVector node_ids back to contact UUIDs.
+ */
+export async function getContactIdsForNodes(
+  nodeIds: number[],
+  graphName: string = GRAPH_NAME
+): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  if (nodeIds.length === 0) return map;
+
+  const res = await query<{ id: number; contact_id: string | null }>(
+    `SELECT id, properties->>'contact_id' AS contact_id
+     FROM _ruvector_nodes WHERE graph_name = $1 AND id = ANY($2)`,
+    [graphName, nodeIds]
+  );
+  for (const row of res.rows) {
+    if (row.contact_id) map.set(row.id, row.contact_id);
+  }
+  return map;
+}
+
+/**
+ * Fetch RuVector edge records (source/target/type/properties) by edge id.
+ */
+export async function getEdgesByIds(
+  edgeIds: number[],
+  graphName: string = GRAPH_NAME
+): Promise<
+  Array<{
+    id: number;
+    source: number;
+    target: number;
+    edgeType: string;
+    properties: Record<string, unknown>;
+  }>
+> {
+  if (edgeIds.length === 0) return [];
+
+  const res = await query<{
+    id: number;
+    source: number;
+    target: number;
+    edge_type: string;
+    properties: Record<string, unknown>;
+  }>(
+    `SELECT id, source, target, edge_type, properties
+     FROM _ruvector_edges WHERE graph_name = $1 AND id = ANY($2)`,
+    [graphName, edgeIds]
+  );
+  return res.rows.map((row) => ({
+    id: row.id,
+    source: row.source,
+    target: row.target,
+    edgeType: row.edge_type,
+    properties: row.properties,
+  }));
+}
+
+export interface RuVectorPathResult {
+  nodes: number[];
+  edges: number[];
+  length: number;
+  cost: number;
+}
+
+/**
+ * Run ruvector_shortest_path between two RuVector node_ids.
+ * Returns null when the primitive reports no path within maxHops
+ * (a legitimate negative result over the curated real-edge graph),
+ * and throws for any other failure (missing graph, connection error, etc.)
+ * so the caller can distinguish "no path" from "couldn't ask RuVector".
+ */
+export async function computeRuVectorShortestPath(
+  sourceNodeId: number,
+  targetNodeId: number,
+  maxHops: number,
+  graphName: string = GRAPH_NAME
+): Promise<RuVectorPathResult | null> {
+  try {
+    const res = await query<{ ruvector_shortest_path: RuVectorPathResult }>(
+      `SELECT ruvector_shortest_path($1, $2, $3, $4)`,
+      [graphName, sourceNodeId, targetNodeId, maxHops]
+    );
+    return res.rows[0].ruvector_shortest_path;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("No path found")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Run ruvector_pagerank_personalized over an ad-hoc edge list (0-based integer
+ * node indices, matching the format ruvector_spectral_cluster already uses in
+ * communities.ts). Does not depend on a synced named graph.
+ */
+export async function computeRuVectorPersonalizedPageRank(
+  edges: number[][],
+  sourceIndex: number,
+  alpha: number = 0.85,
+  epsilon: number = 0.000001
+): Promise<Array<{ node: number; rank: number }>> {
+  const res = await query<{
+    ruvector_pagerank_personalized: Array<{ node: number; rank: number }>;
+  }>(
+    `SELECT ruvector_pagerank_personalized($1::jsonb, $2, $3, $4)`,
+    [JSON.stringify({ edges }), sourceIndex, alpha, epsilon]
+  );
+  return res.rows[0].ruvector_pagerank_personalized;
 }

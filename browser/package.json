@@ -6,11 +6,13 @@
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\""
   },
   "devDependencies": {
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0",
-    "@types/chrome": "^0.0.287"
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^24.13.3"
   }
 }

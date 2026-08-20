@@ -1,6 +1,25 @@
 # ADR-029: ExoChain snippet chain_id scope — per target, kind-qualified
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: Three corrections verified against code and
+> migrations.
+> 1. The Neutral section's claim "no schema migration is needed" for the
+>    TEXT `chain_id` was wrong even at the time it was written:
+>    `data/db/init/026-ecc-exo-chain.sql` declared `chain_id` as `UUID`, and
+>    `data/db/init/038-exo-chain-text-chain-id.sql` was in fact required to
+>    widen it to `TEXT` (`ALTER TABLE exo_chain_entries ALTER COLUMN
+>    chain_id TYPE TEXT USING chain_id::TEXT`) before this ADR's namespaced
+>    string form (`snippet:contact:<uuid>`, `source:<tenant_id>`, etc.)
+>    could be stored at all.
+> 2. `GET /api/ecc/exo-chain/verify/:chainId`, named in the Neutral section
+>    as forthcoming, is unbuilt — no `app/src/app/api/ecc/exo-chain/`
+>    directory exists anywhere in the app. The only chain-adjacent route is
+>    `app/src/app/api/enrichment/chain/[chainId]/route.ts`.
+> 3. The per-tenant `source:<tenant_id>` chain scheme this ADR treats as an
+>    existing, out-of-scope sibling ("Source-fetch events use `chain_id =
+>    'source:<tenant_id>'`") is unbuilt — that chain_id form does not occur
+>    anywhere in `app/src/lib`.
 
 ## Context
 
@@ -50,8 +69,11 @@ Examples (`10-decisions.md` Q3, lines 59-65):
 
 Non-snippet chains are out of scope for this ADR:
 
-- Source-fetch events use `chain_id = 'source:<tenant_id>'` per
-  `06-evidence-and-provenance.md` §5.1 (one chain per tenant, not per target).
+- ~~Source-fetch events use `chain_id = 'source:<tenant_id>'` per
+  `06-evidence-and-provenance.md` §5.1 (one chain per tenant, not per
+  target).~~ **Not implemented (2026-08-19)**: this chain_id form does not
+  occur anywhere in `app/src/lib`. See the update note at the top of this
+  file.
 - Scoring and enrichment chains remain as the existing ECC adapters define
   them.
 
@@ -91,11 +113,17 @@ Non-snippet chains are out of scope for this ADR:
 
 ### Neutral
 
-- `exo_chain_entries.chain_id` remains a TEXT column; no schema migration is
-  needed to support the new format.
-- The existing `GET /api/enrichment/chain/:chainId` endpoint works unchanged.
+- ~~`exo_chain_entries.chain_id` remains a TEXT column; no schema migration
+  is needed to support the new format.~~ **Correction 2026-08-19**: the
+  column started as `UUID` (`026-ecc-exo-chain.sql`) and migration
+  `038-exo-chain-text-chain-id.sql` was required to widen it to `TEXT`
+  before this ADR's format could be stored. See the update note at the top
+  of this file.
+- ~~The existing `GET /api/enrichment/chain/:chainId` endpoint works unchanged.
   A new `GET /api/ecc/exo-chain/verify/:chainId` (`06-evidence-and-provenance.md`
-  §5.3) will accept any chain_id — snippet chains included.
+  §5.3) will accept any chain_id — snippet chains included.~~ **Not
+  implemented (2026-08-19)**: no `verify/:chainId` endpoint exists. See the
+  update note at the top of this file.
 
 ## Alternatives considered
 

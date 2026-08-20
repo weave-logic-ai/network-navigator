@@ -13,7 +13,8 @@
 // `<origin>:<canonical_url>`), rate-limiter / robots gating (both inherited
 // from `gatedFetch`), paywall graceful degradation (writes a minimal
 // source_records row with `behind_paywall: true` in metadata), and per-item
-// multiplier derivation from article view-count metadata when present.
+// multiplier derivation from article view-count metadata (when present)
+// composed with the ADR-030 recency modifier (see `../recency-modifier.ts`).
 //
 // Interface contract lives in `../../types.ts` (SourceConnector /
 // ConnectorContext / ConnectorResult). This file does not touch the DB
@@ -34,6 +35,7 @@ import type {
   SourceType,
 } from '../../types';
 import { isNewsSiteEnabled } from '@/lib/config/research-flags';
+import { applyRecencyModifier, RECENCY_PRESETS } from '../recency-modifier';
 
 export type NewsOrigin = 'wsj' | 'bloomberg' | 'reuters' | 'techcrunch' | 'cnbc';
 
@@ -245,7 +247,16 @@ export async function runNewsConnector(
       }
 
       const parsed = adapter.parseArticle($article, articleUrl);
-      const perItemMultiplier = deriveMultiplier(parsed.viewCount ?? null);
+      // ADR-030 per-item multiplier: engagement (viewCount, when the site
+      // exposes it) composed with the recency modifier (article age). No
+      // citation-count signal exists (unbuilt repo-wide); manual override is
+      // deliberately excluded — it's handled entirely by ADR-032's
+      // source_field_overrides at display time, not by this formula.
+      const perItemMultiplier = applyRecencyModifier(
+        deriveMultiplier(parsed.viewCount ?? null),
+        parsed.publishedAt,
+        RECENCY_PRESETS.news
+      );
 
       const metadata: Record<string, unknown> = {
         origin: adapter.origin,

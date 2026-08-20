@@ -1,0 +1,36 @@
+{
+  "_comment": "Honest snapshot of this repo's ACTUAL MCP governance posture, written for `harness mcp-scan` (metaharness/dist/mcp-scan.js). Every flag below is evidence-based, not aspirational — see _evidence. Do not 'fix' the flags to make the scan pass; fix the actual governance (root .mcp.json / .claude/settings.json) and let this file follow.",
+  "defaultDeny": false,
+  "allowShell": true,
+  "allowNetwork": true,
+  "allowFileWrite": true,
+  "requireApprovalForDangerous": false,
+  "auditLog": false,
+  "toolTimeoutMs": 0,
+  "maxToolCallsPerTurn": 0,
+  "_evidence": {
+    "servers": "Root .mcp.json registers 3 MCP servers: claude-flow (autoStart:false, MCP_GROUP_SECURITY/BROWSER/NEURAL/AGENTIC_FLOW all 'true', CLAUDE_FLOW_MAX_AGENTS:15), ruv-swarm (optional), flow-nexus (optional, requiresAuth).",
+    "defaultDeny": "false — .claude/settings.json permissions.allow includes 'mcp__claude-flow__:*', a blanket grant to every claude-flow tool. Nothing in the repo scopes this to a default-deny + explicit-allow model.",
+    "allowShell": "true — claude-flow exposes terminal_create/terminal_execute and sandbox tools (via the flow-nexus server, MCP_GROUP_BROWSER/AGENTIC_FLOW groups) that run arbitrary commands/code; the blanket 'mcp__claude-flow__:*' allow covers them.",
+    "allowNetwork": "true — http_fetch, browser_act/browser_session_*, github_*, and the flow-nexus/ruv-swarm cloud-sync tools all reach the network; none are host/scope-restricted in .claude/settings.json.",
+    "allowFileWrite": "true — storage_upload/storage_delete, sandbox_upload, and browser download/session tools write to disk or cloud storage; no allowFileWrite=false gate exists.",
+    "requireApprovalForDangerous": "false — no harness-level dangerous-tool approval gate is declared anywhere in this repo. Claude Code's own generic permission-prompt UI is a host feature, not a harness policy this file can take credit for.",
+    "auditLog": "false — .claude/settings.json has PreToolUse/PostToolUse hooks for Bash and Write/Edit (hook-handler.cjs), but no dedicated MCP tool-call audit log. That is a different, narrower mechanism than what this policy field means.",
+    "toolTimeoutMs": "0 (unset) — root .mcp.json declares no per-server or per-tool timeout.",
+    "maxToolCallsPerTurn": "0 (unset) — CLAUDE_FLOW_MAX_AGENTS=15 in .mcp.json's env caps concurrent AGENTS, which is a different metric from tool calls per turn; no equivalent field exists in this repo's config."
+  },
+  "_secretGuard": ".claude/settings.json permissions.deny already blocks Read(./.env) and Read(./.env.*) — this one control IS in place and should show as satisfied, not flagged, when the scanner checks settings.permissions.deny.",
+  "_accepted": {
+    "decision": "ACCEPTED 2026-08-19 by the repo owner. The permissive posture below is a DELIBERATE, reviewed choice, not an unreviewed gap. The blanket `mcp__claude-flow__:*` grant in .claude/settings.json stays as-is; this is a single-maintainer local development repo where the agent tooling needs shell, network and file-write to do its job.",
+    "whatThisMeans": "The 8 findings this file causes `harness mcp-scan` to report (2 high, 5 medium, 1 low) are EXPECTED OUTPUT, not a regression and not a to-do list. Do not 'fix' them by flipping flags here — the flags describe reality. They would only change if the underlying grant in .claude/settings.json changed.",
+    "residualRiskKnowinglyHeld": [
+      "allowShell — mcp__claude-flow__:* covers terminal_create/terminal_execute and sandbox execution, so tools can run arbitrary commands.",
+      "allowNetwork — http_fetch, browser_act/browser_session_*, github_*, and the flow-nexus/ruv-swarm cloud tools reach the network unscoped. flow-nexus is the broadest surface of the three registered servers.",
+      "allowFileWrite — storage_upload/storage_delete/sandbox_upload write to disk and cloud storage.",
+      "no approval gate, no audit log, no tool timeout, no per-turn call budget."
+    ],
+    "controlThatISInPlace": ".claude/settings.json permissions.deny blocks Read(./.env) and Read(./.env.*), so secrets are not reachable by MCP tools. This is a real, verified control and the reason the scanner's secret-guard check passes.",
+    "knownScannerBlindSpot": "IMPORTANT — the scan UNDER-reports. metaharness's wildcard-permission check exact-string-matches `mcp__*` / `mcp__*__*`, so the actual `mcp__claude-flow__:*` rule does NOT trip its wildcard-tool-perm finding despite being an effective blanket grant. The true posture is therefore broader than even the 8 findings show. Anyone re-evaluating this decision should start from that fact.",
+    "revisitIf": "This acceptance is scoped to local single-maintainer development. Revisit before: exposing this repo's MCP surface to CI, to a shared/multi-user environment, or to any untrusted input path; or if MCP tool calls ever need to be auditable."
+  }
+}

@@ -22,6 +22,7 @@
 
 import { gatedFetch, writeSourceRecord } from '../service';
 import { query } from '../../db/client';
+import { applyRecencyModifier, RECENCY_PRESETS } from './recency-modifier';
 import type {
   SourceConnector,
   EdgarInput,
@@ -340,16 +341,29 @@ async function writeFieldValue(
   );
   const categoryDefault = res.rows[0]?.category_default ?? 1.4;
 
+  // ADR-030 recency modifier: a filing's extracted fields (risk factors,
+  // directors/officers) get less trustworthy relative to baseline the older
+  // the filing is. No engagement or citation signal exists for EDGAR filings
+  // (SEC documents don't carry view counts, and citation count is unbuilt
+  // repo-wide — see recency-modifier.ts), so recency is the only per-item
+  // signal EDGAR can compute; it replaces the previous hardcoded 1.0.
+  const perItemMultiplier = applyRecencyModifier(
+    1.0,
+    referencedDate,
+    RECENCY_PRESETS.edgar
+  );
+
   await query(
     `INSERT INTO source_field_values
        (tenant_id, source_record_id, subject_kind, subject_id, field_name,
         field_value, referenced_date, category_default_snapshot,
         per_item_multiplier, extracted_by)
-     VALUES ($1, $2, 'company', $3, $4, $5::jsonb, $6, $7, 1.0, 'connector-rule')
+     VALUES ($1, $2, 'company', $3, $4, $5::jsonb, $6, $7, $8, 'connector-rule')
      ON CONFLICT (source_record_id, subject_kind, subject_id, field_name) DO UPDATE
        SET field_value = EXCLUDED.field_value,
            referenced_date = EXCLUDED.referenced_date,
-           category_default_snapshot = EXCLUDED.category_default_snapshot`,
+           category_default_snapshot = EXCLUDED.category_default_snapshot,
+           per_item_multiplier = EXCLUDED.per_item_multiplier`,
     [
       tenantId,
       sourceRecordId,
@@ -358,6 +372,7 @@ async function writeFieldValue(
       JSON.stringify({ text: value }),
       referencedDate,
       categoryDefault,
+      perItemMultiplier,
     ]
   );
 }

@@ -1,6 +1,27 @@
 # ADR-027: Research target model — one self per owner, primary/secondary split, primary immutable for v1
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: The graph re-rooting mechanism named below
+> (`?rootTargetId=<secondary>`) was never built under that name, and what
+> *was* built for it is unwired. The actual implementation is
+> `?primaryTargetId=<uuid>` on `GET /api/graph/data`
+> (`app/src/app/api/graph/data/route.ts:3-19`, WS-4 Phase 1 Track B — the
+> route's own header comment notes the name mismatch against the sprint
+> planning doc). It is fully implemented server-side: re-root SQL against
+> indexed columns, an LRU cache keyed on it, and cache-invalidation wiring
+> from the targets-state and lens-activation endpoints. But it is dead
+> code — the only caller of `/api/graph/data` anywhere in the app is
+> `app/src/components/network/network-graph.tsx:128`, which fetches
+> `/api/graph/data?limit=300` and never passes `primaryTargetId`. No UI
+> currently drives secondary-target re-centering through this endpoint.
+> Worth noting: there is a second, entirely separate graph endpoint,
+> `GET /api/graph/sigma-data` (`app/src/app/api/graph/sigma-data/route.ts`),
+> called by `app/src/components/network/sigma-graph.tsx:125`. It accepts
+> `limit`, `nicheId`, `edgeTypes`, `minPagerank`, and
+> `includeProvenanceEdges` — no target-id parameter of any kind — so this
+> second, actively-used graph view has no re-rooting capability at all,
+> built or unbuilt. See the annotated Consequences bullet below.
 
 ## Context
 
@@ -62,9 +83,12 @@ optional secondary that auto-centers the UI. Concretely:
   app reorients around that person/company, self becomes the comparison.
 - Migration is a single insert per `owner_profiles` row plus a state backfill —
   no branching read paths in existing code.
-- Scoring / ECC / graph endpoints take an optional `?rootTargetId=<secondary>`;
+- ~~Scoring / ECC / graph endpoints take an optional `?rootTargetId=<secondary>`;
   primary is inferred from the session user. Endpoints that already work stay
-  working without the parameter. (`04-targets-and-graph.md` §3, §9)
+  working without the parameter.~~ **Correction 2026-08-19**: only
+  `/api/graph/data` implements this, under the name `?primaryTargetId=`, and
+  no caller passes it — see the update note at the top of this file.
+  (`04-targets-and-graph.md` §3, §9)
 
 ### Negative
 

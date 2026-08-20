@@ -19,6 +19,7 @@ import { gatedFetch, writeSourceRecord, SourceFetchError } from '../service';
 import { query } from '../../db/client';
 import { canonicalizeUrl, hostOf } from '../url-normalize';
 import { parseXml, normalizeRssItems, type XmlNode } from './rss';
+import { applyRecencyModifier, RECENCY_PRESETS } from './recency-modifier';
 import type {
   SourceConnector,
   CorporateBlogInput,
@@ -274,6 +275,15 @@ export const corporateBlogConnector: SourceConnector<CorporateBlogInput> = {
       }
       // Blog source_id shape per `05-source-expansion.md` §12: `<domain>:<path>`.
       const sourceId = `${host}:${pathPart}`;
+      // ADR-030 per-item multiplier: corporate blogs expose no engagement
+      // count (no view/share data in RSS or the sitemap fallback) and
+      // citation count is unbuilt repo-wide, so recency (post age) is the
+      // only signal available here — same rationale as podcast.ts.
+      const perItemMultiplier = applyRecencyModifier(
+        1.0,
+        item.pubDate,
+        RECENCY_PRESETS.blog
+      );
       const metadata = {
         blog: {
           feedUrl,
@@ -282,6 +292,7 @@ export const corporateBlogConnector: SourceConnector<CorporateBlogInput> = {
           guid: item.guid,
           description: item.description,
           pubDate: item.pubDate?.toISOString() ?? null,
+          perItemMultiplier,
         },
       };
 

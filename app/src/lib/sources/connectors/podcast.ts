@@ -22,6 +22,7 @@
 import * as cheerio from 'cheerio';
 import { gatedFetch, writeSourceRecord, SourceFetchError } from '../service';
 import { canonicalizeUrl } from '../url-normalize';
+import { applyRecencyModifier, RECENCY_PRESETS } from './recency-modifier';
 import type {
   SourceConnector,
   ConnectorContext,
@@ -270,6 +271,17 @@ export const podcastConnector: SourceConnector<PodcastInput> = {
         ? transcriptFormatToMime(transcriptActualFormat)
         : 'text/plain';
 
+      // ADR-030 per-item multiplier: podcasts expose no engagement count
+      // (RSS carries no listen/download numbers) and citation count is
+      // unbuilt repo-wide, so recency (episode age) is the only signal
+      // available — matches ADR-030's own "podcast has no native engagement
+      // count" consequence note.
+      const perItemMultiplier = applyRecencyModifier(
+        1.0,
+        ep.pubDate,
+        RECENCY_PRESETS.podcast
+      );
+
       const metadata: Record<string, unknown> = {
         title: ep.title,
         pubDate: ep.pubDate,
@@ -280,6 +292,7 @@ export const podcastConnector: SourceConnector<PodcastInput> = {
         transcriptFormat: transcriptActualFormat ?? null,
         feedUrl: feedCanonical,
         channelTitle: parsed.channelTitle,
+        perItemMultiplier,
         fallback: transcriptBody
           ? 'transcript'
           : ep.summary

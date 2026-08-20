@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # app/package.json declares "engines": { "node": ">=24 <25" } as the single
+  # source of truth for the version; app/Dockerfile is pinned to node:24 in
+  # all three stages to match (previously node:20, which was EOL and drifted
+  # from CI — see task #10). browser/, docs/, and scripts/ have no engines
+  # field, so this Active LTS pin applies to them too until they declare one.
+  NODE_VERSION: '24'
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: app
+            dir: app
+          - name: browser
+            dir: browser
+          - name: docs
+            dir: docs
+          - name: scripts
+            dir: scripts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Each component has its own lockfile (or none, in the case of
+      # scripts/). Cache node_modules manually keyed on that lockfile so a
+      # missing lockfile doesn't break actions/setup-node's built-in cache
+      # (which errors if cache-dependency-path resolves to zero files).
+      - name: Cache node_modules
+        if: hashFiles(format('{0}/package-lock.json', matrix.dir)) != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.dir }}/node_modules
+          key: ${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ matrix.name }}-${{ hashFiles(format('{0}/package-lock.json', matrix.dir)) }}
+          restore-keys: |
+            ${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ matrix.name }}-
+
+      # scripts/ currently ships no package-lock.json (no dependencies yet).
+      # Fall back to `npm install` there so the job doesn't break; every
+      # other component has a real lockfile and gets a reproducible `npm ci`.
+      - name: Install dependencies
+        working-directory: ${{ matrix.dir }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      # --if-present covers scripts not yet defined in a given component.
+      # Another agent is adding test/typecheck scripts to browser/, docs/,
+      # and possibly scripts/ concurrently with this workflow being written,
+      # so the final set of available scripts per component isn't known here.
+      - name: Lint
+        working-directory: ${{ matrix.dir }}
+        run: npm run lint --if-present
+
+      - name: Typecheck
+        working-directory: ${{ matrix.dir }}
+        run: npm run typecheck --if-present
+
+      - name: Build
+        working-directory: ${{ matrix.dir }}
+        run: npm run build --if-present
+
+      # TODO: a separate agent is fixing a test that currently dirties the
+      # working tree (tests/parser/__yield__/yield-baseline.json). Once that
+      # lands, add a `git diff --exit-code` cleanliness gate here to catch
+      # tests that write unstaged changes.
+      - name: Test
+        working-directory: ${{ matrix.dir }}
+        run: npm run test --if-present

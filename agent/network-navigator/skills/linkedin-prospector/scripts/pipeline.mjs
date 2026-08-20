@@ -9,7 +9,7 @@
 //   node pipeline.mjs --export
 //   node pipeline.mjs --health
 
-import { get, post } from './api-client.mjs';
+import { get, post, getRaw } from './api-client.mjs';
 
 // ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -110,9 +110,9 @@ async function computeGraph() {
 }
 
 async function exportData() {
-  const data = await get('/api/admin/export');
-  // Write raw JSON to stdout for piping
-  process.stdout.write(JSON.stringify(data, null, 2));
+  // /api/admin/export returns text/csv, not JSON — read it as raw text.
+  const csv = await getRaw('/api/admin/export');
+  process.stdout.write(csv);
 }
 
 async function health() {
@@ -159,7 +159,7 @@ Usage:
   node pipeline.mjs --rescore-all             Rescore all contacts (polls until done)
   node pipeline.mjs --enrich [contactId]      Enrich a contact
   node pipeline.mjs --compute-graph           Recompute network graph
-  node pipeline.mjs --export                  Export all data as JSON to stdout
+  node pipeline.mjs --export                  Export contacts as CSV to stdout
   node pipeline.mjs --health                  Check API and extension health
 `);
 }

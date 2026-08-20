@@ -5,10 +5,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { enrichContact } from '@/lib/enrichment/waterfall';
 import { enrichContactWithChain } from '@/lib/ecc/exo-chain/enrichment-adapter';
+import { extractCrossRefsFromEnrichmentResults } from '@/lib/ecc/cross-refs/enrichment-adapter';
 import { ECC_FLAGS } from '@/lib/ecc/types';
 import { getContactById, updateContact } from '@/lib/db/queries/contacts';
 import { FIELD_TO_COLUMN, FIELD_LABELS, isEffectivelyEmpty } from '@/lib/enrichment/field-map';
 import { triggerAutoScore } from '@/lib/scoring/auto-score';
+import { getDefaultTenantId } from '@/lib/targets/service';
 
 interface EnrichmentDelta {
   field: string;
@@ -175,6 +177,23 @@ export async function POST(request: NextRequest) {
           await updateContact(id, updates);
           // Trigger auto-scoring after enrichment auto-apply
           triggerAutoScore(id);
+        }
+
+        // Extract cross-refs (co_worker / shared_company) from the raw
+        // enrichment results — independent of whether `updates` above
+        // actually wrote anything to this contact's own row, since the
+        // relationship signal comes from what the provider returned, not
+        // from what we chose to overwrite. Fire-and-forget, matching
+        // triggerAutoScore, so a cross-ref failure never fails enrichment.
+        // ECC_FLAGS.crossRefs is checked here too (redundant with the
+        // adapter's own check) purely to skip the tenant-resolution DB
+        // round-trip entirely when the flag is off.
+        if (ECC_FLAGS.crossRefs) {
+          getDefaultTenantId()
+            .then((tenantId) => extractCrossRefsFromEnrichmentResults(id, results, tenantId))
+            .catch((err) => {
+              console.error(`[cross-refs] Failed to extract cross-refs for contact ${id}:`, err);
+            });
         }
 
         allResults.push({

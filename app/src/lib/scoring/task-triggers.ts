@@ -3,6 +3,16 @@
 // NOTE: When ECC_IMPULSES=true, task generation is handled by the impulse system
 // (see lib/ecc/impulses/handlers/task-generator.ts). This file remains as the
 // fallback path when the impulse system is disabled.
+//
+// The handoff to the impulse system is wired in `scoring/pipeline.ts`'s
+// `scoreContact()`: it calls `emitScoringImpulses` (ecc/impulses/scoring-adapter.ts)
+// immediately before calling this function, so the impulse scoring-adapter emits
+// tier_changed/persona_assigned/score_computed impulses and the task-generator
+// handler creates the same tasks from those impulses. That call site is the ONLY
+// thing standing between "ECC_IMPULSES=true" and "task generation is silently
+// disabled" — see the `impulsesEmitterInvoked` guard below, which existed to
+// close exactly that gap once already (`emitScoringImpulses` had zero production
+// callers despite this early-return assuming it did).
 
 import { query } from '@/lib/db/client';
 import type { CompositeScore } from './types';
@@ -12,16 +22,38 @@ const ECC_IMPULSES_ENABLED = process.env.ECC_IMPULSES === 'true';
 /**
  * Check score transitions and generate tasks when thresholds are crossed.
  * Deduplicates by (task_type, contact_id, source='auto-score', status='pending').
+ *
+ * @param impulsesEmitterInvoked - Set by the caller to confirm the ECC impulse
+ * emitter (`emitScoringImpulses`) was actually invoked for this score change
+ * before calling this function. `scoring/pipeline.ts`'s `scoreContact()` always
+ * passes `true` here, since it always calls the emitter immediately before this
+ * function (the emitter itself no-ops when ECC_IMPULSES is off). Defaults to
+ * `false` so any other/future call site that skips the emitter — the exact
+ * misconfiguration that shipped once already — is caught below instead of
+ * silently doing nothing.
  */
 export async function checkAndGenerateTasks(
   contactId: string,
   oldScore: CompositeScore | null,
-  newScore: CompositeScore
+  newScore: CompositeScore,
+  impulsesEmitterInvoked: boolean = false
 ): Promise<void> {
   // When ECC impulse system is active, task generation is handled by impulse handlers.
   // The impulse scoring-adapter emits tier_changed/persona_assigned impulses,
   // and the task-generator handler creates the same tasks.
   if (ECC_IMPULSES_ENABLED) {
+    if (!impulsesEmitterInvoked) {
+      // Misconfiguration guard: ECC_IMPULSES is on, but whoever called us did
+      // not go through the wired path in scoring/pipeline.ts that dispatches
+      // emitScoringImpulses first. Nothing is generating tasks for this score
+      // change — log loudly instead of failing silently.
+      console.error(
+        `[scoring] ECC_IMPULSES is enabled but no impulse emitter ran for contact ${contactId}. ` +
+          'Automatic task generation is disabled for this score change and nothing replaced it. ' +
+          "Ensure this path goes through scoring/pipeline.ts's scoreContact(), which dispatches " +
+          'emitScoringImpulses before calling checkAndGenerateTasks.'
+      );
+    }
     return;
   }
 

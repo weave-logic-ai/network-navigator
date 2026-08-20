@@ -24,9 +24,16 @@ import {
   Check,
   ArrowRight,
   Pencil,
+  Plus,
 } from "lucide-react";
 import { DimensionRadar } from "@/components/contacts/dimension-radar";
 import { SourceConflictBanner } from "@/components/targets/source-conflict-banner";
+import { DCTEGauge } from "@/components/contacts/dcte-gauge";
+import { RSTEGauge } from "@/components/contacts/rste-gauge";
+import { EMOTGauge } from "@/components/contacts/emot-gauge";
+import { SCENGauge } from "@/components/contacts/scen-gauge";
+import { DTSEPanel } from "@/components/contacts/dtse-panel";
+import { NetworkTab } from "@/components/contacts/network-tab";
 
 interface ContactDetail {
   id: string;
@@ -80,6 +87,98 @@ interface IcpBreakdown {
   nicheName: string | null;
   overallFit: number;
   criteria: IcpCriterionResult[];
+}
+
+interface DCTEScore {
+  overall: number;
+  segments: {
+    identity: number;
+    contact: number;
+    context: number;
+    enrichment: number;
+    scoring: number;
+    network: number;
+  };
+  missingFields: string[];
+  suggestion: string;
+}
+
+interface DTSEStatus {
+  activeGoals: Array<{ id: string; title: string; progress: number }>;
+  pendingTasks: Array<{
+    id: string;
+    title: string;
+    taskType: string;
+    priority: number;
+  }>;
+  completedTasks: number;
+  beliefs: {
+    likelyBuyer: boolean;
+    warmLead: boolean;
+    hubConnector: boolean;
+    referralSource: boolean;
+  };
+  nextBestAction: string;
+}
+
+interface RSTEScore {
+  overall: number;
+  status: "strong" | "warm" | "cooling" | "dormant" | "new" | "unknown";
+  trend: "improving" | "stable" | "declining";
+}
+
+interface EMOTScore {
+  temperature: number;
+  label: "hot" | "warm" | "lukewarm" | "cold" | "unknown";
+}
+
+interface SCENScore {
+  confidence: number;
+  grade: "A" | "B" | "C" | "D" | "F";
+  gaps: string[];
+  recommendation: string;
+}
+
+interface AllGauges {
+  dcte: DCTEScore;
+  dtse: DTSEStatus;
+  rste: RSTEScore;
+  emot: EMOTScore;
+  scen: SCENScore;
+}
+
+interface ContactGoal {
+  id: string;
+  title: string;
+  description: string | null;
+  goalType: string;
+  status: string;
+  progress: number;
+  targetValue: number;
+  currentValue: number;
+  createdAt: string;
+}
+
+interface ContactTask {
+  id: string;
+  title: string;
+  description: string | null;
+  taskType: string;
+  status: string;
+  priority: number;
+  goalId: string | null;
+  url: string | null;
+  createdAt: string;
+}
+
+interface GoalsAndTasks {
+  goals: ContactGoal[];
+  tasks: ContactTask[];
+  summary: {
+    activeGoals: number;
+    pendingTasks: number;
+    completedTasks: number;
+  };
 }
 
 const DIMENSION_LABELS: Record<string, string> = {
@@ -149,7 +248,11 @@ export default function ContactDetailPage() {
   const [contact, setContact] = useState<ContactDetail | null>(null);
   const [scores, setScores] = useState<ScoreBreakdown | null>(null);
   const [icpBreakdown, setIcpBreakdown] = useState<IcpBreakdown | null>(null);
+  const [gauges, setGauges] = useState<AllGauges | null>(null);
+  const [goalsAndTasks, setGoalsAndTasks] = useState<GoalsAndTasks | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tagInput, setTagInput] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
   const [enriching, setEnriching] = useState<string | null>(null);
   const [enrichResult, setEnrichResult] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -213,11 +316,13 @@ export default function ContactDetailPage() {
 
   const loadContact = useCallback(async () => {
     try {
-      const [contactRes, scoresRes, providersRes, icpRes] = await Promise.all([
+      const [contactRes, scoresRes, providersRes, icpRes, gaugesRes, goalsRes] = await Promise.all([
         fetch(`/api/contacts/${contactId}`),
         fetch(`/api/contacts/${contactId}/scores`),
         fetch("/api/enrichment/providers"),
         fetch(`/api/contacts/${contactId}/icp-breakdown`),
+        fetch(`/api/contacts/${contactId}/gauges`),
+        fetch(`/api/contacts/${contactId}/goals`),
       ]);
 
       if (contactRes.ok) {
@@ -238,6 +343,16 @@ export default function ContactDetailPage() {
       if (icpRes.ok) {
         const json = await icpRes.json();
         setIcpBreakdown(json.data);
+      }
+
+      if (gaugesRes.ok) {
+        const json = await gaugesRes.json();
+        setGauges(json.data);
+      }
+
+      if (goalsRes.ok) {
+        const json = await goalsRes.json();
+        setGoalsAndTasks(json.data);
       }
     } catch {
       // Error state handled by null checks
@@ -456,6 +571,52 @@ export default function ContactDetailPage() {
         ),
       };
     });
+  }
+
+  async function addTag() {
+    const trimmed = tagInput.trim();
+    if (!trimmed || !contact) return;
+    if (contact.tags?.includes(trimmed)) {
+      setTagInput("");
+      return;
+    }
+    const newTags = [...(contact.tags || []), trimmed];
+    setSavingTags(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: newTags }),
+      });
+      if (res.ok) {
+        setContact((prev) => (prev ? { ...prev, tags: newTags } : prev));
+        setTagInput("");
+      }
+    } catch {
+      // Silently ignore — tag list stays unchanged on failure
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  async function removeTag(tag: string) {
+    if (!contact) return;
+    const newTags = (contact.tags || []).filter((t) => t !== tag);
+    setSavingTags(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: newTags }),
+      });
+      if (res.ok) {
+        setContact((prev) => (prev ? { ...prev, tags: newTags } : prev));
+      }
+    } catch {
+      // Silently ignore — tag list stays unchanged on failure
+    } finally {
+      setSavingTags(false);
+    }
   }
 
   if (loading) {
@@ -887,36 +1048,125 @@ export default function ContactDetailPage() {
                     No bio available
                   </p>
                 )}
-                {contact.tags && contact.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-3">
-                    {contact.tags.map((tag) => (
-                      <Badge key={tag} variant="secondary" className="text-xs">
-                        {tag}
-                      </Badge>
-                    ))}
+                <div className="flex flex-wrap items-center gap-1.5 mt-3">
+                  {contact.tags?.map((tag) => (
+                    <Badge
+                      key={tag}
+                      variant="secondary"
+                      className="text-xs gap-1 pr-1"
+                    >
+                      {tag}
+                      <button
+                        type="button"
+                        className="hover:text-destructive disabled:opacity-50"
+                        onClick={() => removeTag(tag)}
+                        disabled={savingTags}
+                        aria-label={`Remove tag ${tag}`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </Badge>
+                  ))}
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addTag();
+                        }
+                      }}
+                      placeholder="Add tag"
+                      disabled={savingTags}
+                      className="h-6 w-20 rounded border bg-background px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      onClick={addTag}
+                      disabled={savingTags || !tagInput.trim()}
+                    >
+                      <Plus className="h-3 w-3" />
+                    </Button>
                   </div>
-                )}
+                </div>
               </CardContent>
             </Card>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 mt-4">
+            {gauges?.dtse && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Strategy & Tasks</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <DTSEPanel {...gauges.dtse} />
+                </CardContent>
+              </Card>
+            )}
+
+            {goalsAndTasks &&
+              (goalsAndTasks.goals.length > 0 || goalsAndTasks.tasks.length > 0) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm flex items-center justify-between">
+                      <span>Goals & Tasks</span>
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {goalsAndTasks.summary.pendingTasks} pending
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {goalsAndTasks.goals.length > 0 && (
+                      <div className="space-y-2">
+                        {goalsAndTasks.goals.map((g) => (
+                          <div key={g.id} className="text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium truncate">{g.title}</span>
+                              <span className="text-muted-foreground ml-2 flex-shrink-0">
+                                {Math.round(g.progress * 100)}%
+                              </span>
+                            </div>
+                            <Progress value={g.progress * 100} className="h-1 mt-1" />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {goalsAndTasks.tasks.length > 0 && (
+                      <div className="space-y-1.5">
+                        {goalsAndTasks.tasks.map((t) => (
+                          <div
+                            key={t.id}
+                            className="flex items-center justify-between text-xs gap-2"
+                          >
+                            <span className="truncate">{t.title}</span>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                {t.taskType}
+                              </Badge>
+                              <Badge
+                                variant={t.status === "completed" ? "secondary" : "outline"}
+                                className="text-[10px] px-1.5 py-0"
+                              >
+                                {t.status}
+                              </Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
           </div>
         </TabsContent>
 
         <TabsContent value="network" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">Network Position</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                {contact.degree === 1
-                  ? "1st degree connection"
-                  : `${contact.degree}${ordinalSuffix(contact.degree)} degree`}
-                {contact.connectionsCount
-                  ? ` with ${contact.connectionsCount.toLocaleString()} connections`
-                  : ""}
-              </p>
-            </CardContent>
-          </Card>
+          <NetworkTab contactId={contactId} />
         </TabsContent>
 
         <TabsContent value="scores" className="mt-4">
@@ -968,6 +1218,20 @@ export default function ContactDetailPage() {
                   </CardContent>
                 </Card>
               </div>
+              {gauges && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">ECC Gauges</CardTitle>
+                  </CardHeader>
+                  <CardContent className="grid gap-4 sm:grid-cols-2">
+                    <DCTEGauge {...gauges.dcte} />
+                    <RSTEGauge {...gauges.rste} />
+                    <EMOTGauge {...gauges.emot} />
+                    <SCENGauge {...gauges.scen} />
+                  </CardContent>
+                </Card>
+              )}
+
               {scores.dimensions.length > 0 && (
                 <Card>
                   <CardHeader>

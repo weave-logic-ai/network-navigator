@@ -5,51 +5,28 @@ description: Full reference for the /linkedin-prospector and /network-intel slas
 
 # Commands Reference
 
-The Claude Agent provides two slash commands that wrap the five-phase workflow. Both commands use natural language intent routing -- you describe what you want and the agent maps your request to the appropriate scripts.
+The Claude Agent provides two slash commands. Both use natural language intent routing -- you describe what you want and the agent maps your request to the appropriate REST API calls (via `configure.mjs`, `pipeline.mjs`, or `analyze.mjs`, or direct API calls when more convenient).
 
 ## /linkedin-prospector
 
-The Pull agent. Handles configuration, searching, enrichment, and database management (Phases 0 and 1).
+Configuration and management. Handles ICP/niche/offering setup and validation.
 
 ### Intent Routing Table
 
 | What to Say | Intent | What Happens |
-|-------------|--------|--------------|
-| `set up my ICP config` | configure | Starts 8-step conversational ICP configuration |
-| `validate config` | validate | Checks config file validity |
-| `find me 20 [niche] contacts` | search | Searches LinkedIn 1st-degree connections by niche |
-| `search for [role/industry/keyword]` | search | Targeted LinkedIn search with custom keywords |
-| `enrich unenriched contacts` | enrich | Visits profiles to pull detailed data |
-| `how many contacts do I have?` | stats | Shows database statistics |
-| `export my contacts as CSV` | export | Exports contacts in CSV or JSON format |
-| `rebuild and score everything` | pipeline | Delegates to `pipeline.mjs --rebuild` |
-| `reparse cached pages` | reparse | Re-extracts data from cached HTML |
-| `log me into LinkedIn` | login | Launches browser for manual LinkedIn login |
-| `search for "natural language"` | db-search | Queries contacts with vector-enhanced search |
-| `vectorize my contacts` | vectorize | Builds the RVF vector store |
+|-------------|--------|----------------|
+| `set up my ICP config` | configure | Conversational ICP/niche/offering setup, then `POST /api/icps`, `/api/niches`, `/api/offerings` |
+| `configure my ICP` | configure | Same as above |
+| `validate config` | validate | `GET /api/icps`, `/api/niches`, `/api/offerings`; reports counts and warnings |
+| `list all profiles` | list | Full listing of configured ICPs, niches, offerings |
 
 ### How the Agent Works
 
-1. **Checks the local DB first** -- Runs `db.mjs stats` and `db.mjs search` to see if matching contacts already exist.
-2. **Searches only when needed** -- If the DB lacks enough contacts, runs `search.mjs` with the appropriate niche or keywords.
-3. **Enriches profiles** -- Visits each un-enriched profile to extract headline, about, current role/company, and connection count.
-4. **Caches everything** -- All LinkedIn pages are cached as raw HTML in `data/cache/` for offline re-extraction.
+1. **Asks about your business** -- Services, target buyer roles, industries, buying signals, company size, and search niches.
+2. **Calls the API directly** -- Every configuration change is a REST call; there is no local config file to edit.
+3. **Points you at the extension for capture** -- The agent cannot browse LinkedIn itself, so it directs you to the browser extension for profile capture.
 
-### Search Syntax
-
-By niche (using keywords from `icp-config.json`):
-```
-/linkedin-prospector find me 20 ecommerce contacts
-/linkedin-prospector search for SaaS founders
-```
-
-By custom keywords:
-```
-/linkedin-prospector search for "machine learning engineer" contacts
-/linkedin-prospector find CIOs at healthcare companies who mention Epic
-```
-
-### Example Conversations
+### Example Conversation
 
 **Setting up configuration:**
 ```
@@ -62,112 +39,60 @@ Agent: What industries are your ideal customers in?
 User: fintech, healthtech, SaaS startups
 Agent: What keywords signal they need your services?
 User: SOC 2, compliance, security audit, cyber insurance
-Agent: Config written. 2 profiles, 3 niches. Validation passed.
-       Run `/linkedin-prospector find me startup-cto contacts` to start.
-```
-
-**Searching and enriching:**
-```
-User: /linkedin-prospector find me 15 health-it-leaders contacts
-Agent: Checked DB -- 2 existing contacts. Searching LinkedIn...
-       Found 16 new profiles. Total: 18 health IT contacts.
-       Would you like me to enrich them?
-
-User: /linkedin-prospector enrich unenriched contacts
-Agent: Enriching 16 profiles... Done. 16/16 enriched.
+Agent: Created 1 ICP profile, 3 niches, 1 offering. Validation passed.
+       Use the browser extension to start capturing LinkedIn profiles.
 ```
 
 ---
 
 ## /network-intel
 
-The Analyze/Report agent. Handles scoring, analysis, expansion, and reporting (Phases 2-4).
+Scoring, analysis, and reporting. Handles everything that runs against already-captured contacts.
 
 ### Intent Routing Table
 
 | What to Say | Intent | What Happens |
-|-------------|--------|--------------|
-| `rebuild and rescore everything` | bootstrap | Full graph build + all 3 scoring layers |
-| `rescore everything` | score | Rescore without rebuilding graph |
-| `who are my best hubs?` | hubs | Top contacts by network influence |
-| `find my top prospects` | prospects | Top contacts by ICP fit |
-| `who are my best referral partners?` | referrals | Referral partner analysis |
-| `what should I focus on next?` | recommend | Strategic recommendations |
-| `give me an overview` | summary | Network summary with distributions |
-| `show me super-connectors` | behavioral | Behavioral analysis with persona filter |
-| `content visibility strategy` | visibility | Content strategy recommendations |
-| `which companies have the best network value?` | employers | Company ranking by ENV score |
-| `show me clusters` | clusters | Industry/niche cluster mapping |
-| `show me contacts at [Company]` | company | Company deep-dive |
-| `find contacts similar to [URL]` | similar | k-NN vector similarity search |
-| `who talks about [topic]?` | semantic | Semantic free-text search |
-| `deep scan [URL]` | deep-scan | Discover a contact's 2nd-degree connections |
-| `expand network through referral partners` | expand | Batch deep-scan by criteria |
-| `any new connections since last time?` | delta | Change detection vs. last snapshot |
-| `generate a report` | report | Interactive HTML dashboard |
-| `export my contacts` | export | JSON/CSV export |
-| `start dashboard` | dashboard | Launch the local Next.js dashboard app |
-| `stop dashboard` | dashboard-stop | Stop the running dashboard |
-| `vectorize my contacts` | vectorize | Build the RVF vector store |
-
-### Dashboard Management
-
-The agent can start, stop, and query a local Next.js dashboard at port 3100:
-
-```
-/network-intel start dashboard
-/network-intel is dashboard running?
-/network-intel stop dashboard
-```
-
-The dashboard exposes REST APIs for querying data:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /api/dashboard` | KPIs, top contacts, suggested actions |
-| `GET /api/contacts?tier=gold&sort=goldScore` | Query contacts with filters |
-| `GET /api/contacts/[slug]/similar` | Find similar contacts |
-| `GET /api/search?q=keyword` | Search contacts |
-| `GET /api/graph` | Network graph data for visualization |
-| `POST /api/actions/run` | Trigger scripts via the dashboard |
+|-------------|--------|----------------|
+| `rescore everything` | rescore | `POST /api/scoring/rescore-all`, polls `GET /api/scoring/status` until done |
+| `show me my network summary` / `give me an overview` | summary | `analyze.mjs --mode summary` (`GET /api/dashboard`) |
+| `who are my best hubs?` | hubs | `analyze.mjs --mode hubs` (`GET /api/graph/data`) |
+| `find my top prospects` | prospects | `analyze.mjs --mode prospects` |
+| `who are my best referral partners?` | referrals | `analyze.mjs --mode referrals` |
+| `show network clusters` | clusters | `analyze.mjs --mode clusters` (`GET /api/graph/communities`) |
+| `search for "AI startup"` | search | `analyze.mjs --mode search` (`GET /api/contacts/hybrid-search`) |
+| `what should I focus on next?` | recommend | `analyze.mjs --mode recommend` (`GET /api/actions/next`) |
+| `show contacts at Acme Corp` | company | `analyze.mjs --mode company` |
+| `check system health` | health | `pipeline.mjs --health` (`GET /api/health`, `GET /api/extension/health-internal`) |
+| `enrich contact [id]` | enrich | `pipeline.mjs --enrich [id]` (`POST /api/enrichment/enrich`) |
+| `recompute the graph` | compute-graph | `pipeline.mjs --compute-graph` (`POST /api/graph/compute`) |
+| `export my data` | export | `pipeline.mjs --export` (`GET /api/admin/export`, CSV) |
 
 ### Example Conversations
 
 **Strategic recommendations:**
 ```
 User: /network-intel what should I focus on next?
-Agent: IMMEDIATE PURSUIT (Gold Buyers):
-       1. Jane Smith (goldScore: 0.72) - VP Engineering @ TechCorp
-
-       HUB ACTIVATION:
-       1. Maria Garcia (networkHub: 0.81) - Managing Partner @ ConsultCo
-          Clusters: saas, ecommerce | Gold buyers reachable: ~4
-
-       REFERRAL PARTNERSHIPS:
-       1. Sam Taylor (ref: 0.71) - Agency Founder
-          Persona: white-label-partner | Action: Propose arrangement
+Agent: Highest-value next action:
+       Enrich contact "Jane Smith" (VP Engineering @ TechCorp) --
+       currently unenriched and matched to your AI Consulting ICP.
 ```
 
 **Referral analysis:**
 ```
 User: /network-intel who can bring me work?
-Agent: TOP 10 REFERRAL PARTNERS:
-       1. Maria Garcia (referral: 0.71, gold-referral)
+Agent: TOP REFERRAL PARTNERS:
+       1. Maria Garcia (referral score: 0.71, gold-referral)
           Persona: white-label-partner
-          Why: Agency role; Serves target industries; 500+ connections
-
-       Referral Tier Breakdown:
-         gold-referral     8
-         silver-referral  23
-         bronze-referral  34
 ```
 
-**Semantic search:**
+**Hybrid/semantic search:**
 ```
-User: /network-intel who talks about AI transformation?
-Agent: SEMANTIC SEARCH: "AI transformation"
-       1. [gold] Maria Garcia (relevance: 0.723)
-          Chief AI Officer | Driving enterprise AI adoption
-       2. [silver] Chris Lee (relevance: 0.691)
-          VP Digital Transformation | ML Strategy
+User: /network-intel search for "cloud infrastructure"
+Agent: Combined keyword + vector search results:
+       1. [gold] Maria Garcia -- Chief AI Officer, driving enterprise cloud adoption
+       2. [silver] Chris Lee -- VP Digital Transformation, cloud migration lead
 ```
+
+<Callout type="info">
+The dashboard at `http://localhost:3750` provides the full web UI -- contacts table, scoring visualization, graph view, and outreach pipeline. The agent's `/network-intel` command is a conversational, read-mostly complement to it, not a replacement.
+</Callout>

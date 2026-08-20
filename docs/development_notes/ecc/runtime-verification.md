@@ -101,10 +101,12 @@ Expected after one scoring + one enrichment cycle:
 ## Step 7 — Verify BLAKE3 chain integrity
 
 ```bash
-curl -s "http://localhost:3750/api/enrichment/chain/<CHAIN_ID>" | jq '.verified'
+curl -s "http://localhost:3750/api/enrichment/chain/<CHAIN_ID>?verify=true" | jq '.data.verification'
 ```
 
-Where `<CHAIN_ID>` is from the `chain_id` column of `exo_chain_entries` — this endpoint runs `verifyChainHashes` which must return `true`. If it returns `false`, a row was tampered with.
+Where `<CHAIN_ID>` is from the `chain_id` column of `exo_chain_entries`. The `verify=true` query param is required — without it the route only returns the raw entries, not the verification result. The handler (`app/src/app/api/enrichment/chain/[chainId]/route.ts`) calls `verifyChain()` in `app/src/lib/ecc/exo-chain/service.ts`, which runs `verifyChainHashes` and returns `{ valid, brokenAt?, totalEntries }` — check `.data.verification.valid === true`. If `valid` is `false`, `brokenAt` gives the sequence number of the first tampered entry.
+
+Despite the URL living under `/api/enrichment/`, this route is chain-agnostic — `getChain`/`verifyChain` key purely off `chain_id` with no assumption it came from the enrichment waterfall. It is the correct endpoint for the snippet and source chains in Steps 9–10 below too.
 
 ## Step 8 — Test provenance retrieval
 
@@ -115,15 +117,50 @@ curl -s "http://localhost:3750/api/contacts/$CONTACT_ID/relationships" | jq
 
 Both should return structured provenance. If they return empty arrays with flags on, the adapter path didn't execute — check app logs.
 
+## Step 9 — Verify the snippet chain
+
+Added for the research-tools sprint (`.planning/research-tools-sprint/06-evidence-and-provenance.md` §5). Every snippet saved to a target appends to an ExoChain keyed by that target, so the chain proves no snippet was silently inserted or altered after capture.
+
+**Chain ID convention as actually shipped** — this differs from the sprint doc's shorthand `snippet:<target_id>`. Per ADR-029 (`docs/adr/ADR-029-exochain-snippet-chain-scope.md`) the chain is kind-qualified:
+
+```
+chain_id = 'snippet:' + targetKind + ':' + targetId   // e.g. snippet:contact:a8f2-…
+```
+
+Implemented in `app/src/lib/snippets/chain.ts` (`snippetChainId()` / `parseSnippetChainId()`), with the actual `appendChainEntry` calls in `app/src/lib/snippets/service.ts` and `app/src/lib/snippets/service-link.ts`. Re-attributing a snippet to a different target does not migrate chain entries — it's a separate `snippet_edited` event appended to the *original* target's chain.
+
+```bash
+# Find a target that has snippets, then build its chain_id:
+TARGET_ROW=$(docker exec ctox-db psql -U ctox -d ctox -At -F'|' \
+  -c "SELECT chain_id FROM exo_chain_entries WHERE chain_id LIKE 'snippet:%' LIMIT 1")
+echo "Using chain: $TARGET_ROW"
+
+curl -s "http://localhost:3750/api/enrichment/chain/${TARGET_ROW}?verify=true" | jq '.data.verification'
+```
+
+Expect `{ valid: true, totalEntries: N }`. Entries use operation `snippet_captured` (and `snippet_edited`/`snippet_deleted` where applicable per §3.1 of the evidence-and-provenance doc).
+
+## Step 10 — Verify the source chain (gap — not yet implemented)
+
+The evidence-and-provenance doc (§5.1) also specifies a **source chain per tenant**, `chain_id = 'source:<tenant_id>'`, appended to on every source-record connector fetch (EDGAR, Wayback, RSS/news, etc.).
+
+**This does not exist in code yet.** A repo-wide search for `appendChainEntry` turns up exactly two callers — `app/src/lib/snippets/service.ts` and `app/src/lib/snippets/service-link.ts` (the snippet chain from Step 9) plus the enrichment waterfall's own internal calls in `app/src/lib/ecc/exo-chain/enrichment-adapter.ts`. None of the connectors under `app/src/lib/sources/connectors/` (`edgar.ts`, `wayback.ts`, `rss.ts`, the per-outlet news connectors, etc.) write to `exo_chain_entries` or reference a `source:` chain_id anywhere. There is nothing to verify here today — `exo_chain_entries` will never contain a `chain_id LIKE 'source:%'` row until this is built. Track it as an open item against the evidence-and-provenance spec rather than something this runbook can currently exercise.
+
+## Note — `/api/ecc/exo-chain/verify/:chainId` does not exist
+
+The evidence-and-provenance doc (§5.3) describes a dedicated lightweight verify endpoint, `GET /api/ecc/exo-chain/verify/:chainId`. As of this writing there is no `app/src/app/api/ecc/` directory at all — the endpoint was never built. Do not script against it. The working verification path for **any** chain_id (enrichment, snippet, or a future source chain) is the existing `GET /api/enrichment/chain/:chainId?verify=true` route used in Step 7 and Step 9 above.
+
 ## Migration of pre-existing ExoChain rows
 
 ExoChain originally used SHA-256; it now uses BLAKE3. Any rows written to `exo_chain_entries` before the hash swap will fail `verifyChainHashes`. If your DB volume pre-dates 2026-04-17, either:
 - Truncate `exo_chain_entries` (evidence is auxiliary — safe to drop): `TRUNCATE exo_chain_entries;`
 - Or keep old rows marked as legacy; add a `hash_algo` column in a future migration.
 
-## Expected P0 issue to watch for
+## P0 issue previously flagged here — now fixed (verify before trusting this section further)
 
-From the stub audit: `app/src/lib/ecc/causal-graph/scoring-adapter.ts:7` hardcodes `DEFAULT_TENANT_ID = 'default'`. When multi-tenant mode eventually lands, this will misattribute causal rows. Track as P0 in stub-inventory.md — benign today because the app runs single-tenant.
+This section used to say `app/src/lib/ecc/causal-graph/scoring-adapter.ts:7` hardcoded `DEFAULT_TENANT_ID = 'default'`, breaking multi-tenant isolation. That's stale — as of the WS-4 Phase 1 Track B polish, that literal is gone. `scoring-adapter.ts:7` today is an import line; the file now resolves the tenant through a shared `resolveTenantId()` helper (caller override → the target row's `tenant_id` → `getDefaultTenantId()` fallback for single-tenant mode). The same fix was applied in parallel to the sibling adapters: `app/src/lib/ecc/impulses/scoring-adapter.ts`, `app/src/lib/ecc/cognitive-tick/claude-adapter.ts`, and `app/src/lib/ecc/exo-chain/enrichment-adapter.ts` (which additionally falls back to the literal `'default'` only if `getDefaultTenantId()` itself throws, so a DB outage doesn't hard-fail enrichment's audit trail).
+
+The underlying pattern isn't fully eradicated, though — two API routes still hardcode the same `const DEFAULT_TENANT_ID = 'default';` literal and were not part of the original P0: `app/src/app/api/claude/session/route.ts:8` and `app/src/app/api/scoring/trace/[contactId]/route.ts:5`. Neither takes a `targetId` today, so there's no target row to resolve a real tenant from — worth a follow-up if/when multi-tenant mode lands, but out of scope for this runbook to fix.
 
 ## Rollback
 

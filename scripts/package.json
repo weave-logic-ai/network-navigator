@@ -2,5 +2,13 @@
   "name": "network-navigator-scripts",
   "private": true,
   "type": "module",
-  "description": "Repository-level scripts (run from project root via `node scripts/<name>.ts`). Node's native TS strip-only mode handles execution; no install step required."
+  "description": "Repository-level scripts (run from project root via `node scripts/<name>.ts`). Node's native TS strip-only mode handles execution; no install step required to RUN the scripts. `npm install` is only needed for `npm run typecheck`, same as any other component in this repo.",
+  "scripts": {
+    "test": "node --test \"*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^24.13.3"
+  }
 }

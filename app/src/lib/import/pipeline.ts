@@ -20,6 +20,7 @@ import { importSkills } from './skills-importer';
 import { importCompanyFollows } from './company-follows-importer';
 import { generateEmbeddings } from './embedding-generator';
 import { seedTaxonomyIfEmpty } from '../taxonomy/seed';
+import { computeNaturalICP } from '../scoring/natural-icp';
 
 // File type detection from filename
 function detectFileType(filename: string): ImportFileType | null {
@@ -210,6 +211,28 @@ export async function runImportPipeline(
   } catch {
     allErrors.push({ message: 'Taxonomy seed failed (non-critical)' });
   }
+
+  // Post-import: recompute the Natural ICP (docs/plans/icp-alignment-engine.md
+  // specifies it "runs automatically during import"). This is a network-wide
+  // aggregation over ALL contacts/companies (not just this batch) and over
+  // whatever owner profile currently exists in `owner_profiles` -- it is not
+  // scoped to this import, so it only needs to run once, here, after every
+  // file in this import has been committed, rather than per file or per
+  // contact. It uses its own pooled connection via `query()` (see
+  // ../scoring/natural-icp.ts) rather than the transaction-scoped `client`
+  // used above, and every statement on `client` in this pipeline commits
+  // immediately (no explicit BEGIN/COMMIT is used), so the rows it reads are
+  // already visible.
+  //
+  // Fire-and-forget: intentionally NOT awaited. Natural ICP computation is
+  // pure derived state (recomputed from scratch on every import and on every
+  // profile-page load, see app/src/app/api/profile/natural-icp/route.ts), so
+  // there is nothing to roll back and nothing the rest of the import needs
+  // from it. It must never make an otherwise-successful import slower or
+  // fail, so its result is not folded into `allErrors` or `finalStatus`.
+  computeNaturalICP().catch(() => {
+    // Swallowed intentionally -- see comment above.
+  });
 
   // Complete session
   const finalStatus = allErrors.length > 0 && newRecords === 0 ? 'failed' : 'completed';

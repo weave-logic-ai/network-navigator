@@ -21,6 +21,7 @@ import { checkAndGenerateTasks } from './task-triggers';
 import { resolveTaxonomyChain } from '../taxonomy/service';
 import { RESEARCH_FLAGS } from '../config/research-flags';
 import { getActiveLensIcps } from '../targets/lens-service';
+import { emitScoringImpulses } from '../ecc/impulses/scoring-adapter';
 
 /**
  * Resolve the list of ICP profiles to score against.
@@ -176,8 +177,20 @@ export async function scoreContact(
   // Store score
   await scoringQueries.upsertContactScore(contactId, score);
 
-  // Generate tasks based on score transitions (fire-and-forget)
-  checkAndGenerateTasks(contactId, oldScore, score).catch((err) => {
+  // ECC impulse handoff (fire-and-forget). `emitScoringImpulses` self-guards
+  // on ECC_FLAGS.impulses, so this call is a no-op when the flag is off. When
+  // the flag is on, this is what actually drives the task-generator impulse
+  // handler that replaces the legacy trigger below — this call site is the
+  // production wiring that task-triggers.ts's early-return assumes exists.
+  emitScoringImpulses(contactId, oldScore, score, undefined, targetId).catch((err) => {
+    console.error(`[scoring] Impulse emission failed for ${contactId}:`, err);
+  });
+
+  // Generate tasks based on score transitions (fire-and-forget). Self-guards:
+  // no-ops when ECC_IMPULSES is on (impulses were just dispatched above; see
+  // task-triggers.ts's misconfiguration guard for what happens if that ever
+  // stops being true).
+  checkAndGenerateTasks(contactId, oldScore, score, true).catch((err) => {
     console.error(`[scoring] Task trigger failed for ${contactId}:`, err);
   });
 

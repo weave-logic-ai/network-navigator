@@ -1,0 +1,173 @@
+---
+title: Source Connectors
+description: How NetworkNav ingests Wayback, SEC EDGAR, RSS, news, blog, and podcast content, and how source trust weighting actually works today.
+---
+
+Research targets are joined against evidence from six external source types beyond LinkedIn captures: Wayback Machine snapshots, SEC EDGAR filings, RSS/Atom feeds (press releases and blogs), targeted news scrapers, corporate blogs, and podcast transcripts. Every ingested document lands in one table, `source_records`, so the rest of the app can reason about "evidence" without caring which connector produced it.
+
+All of this sits behind feature flags that default to `false`. See [Feature flags](#feature-flags) below before expecting any of it to run.
+
+## The `source_records` model
+
+```sql
+CREATE TABLE source_records (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     UUID NOT NULL REFERENCES tenants(id),
+  source_type   TEXT NOT NULL,        -- 'wayback' | 'edgar' | 'rss' | 'news' | 'blog' | 'podcast'
+  source_id     TEXT NOT NULL,        -- stable external id, shape varies by source_type
+  canonical_url TEXT NOT NULL,
+  title         TEXT,
+  published_at  TIMESTAMPTZ,
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  content_hash  BYTEA NOT NULL,       -- SHA-256 of the fetched body
+  content_bytes INTEGER NOT NULL,
+  content       BYTEA,
+  content_mime  TEXT,
+  metadata      JSONB NOT NULL DEFAULT '{}',
+  status        TEXT NOT NULL DEFAULT 'fetched',  -- pending | fetched | stored_partial | failed | stale
+  CONSTRAINT uq_source_records_dedup UNIQUE (tenant_id, source_type, source_id)
+);
+```
+
+(`data/db/init/036-sources-schema.sql`.) Every connector funnels through the shared `writeSourceRecord()` helper (`app/src/lib/sources/service.ts`), which hashes the body, forms the dedup key, and does an `INSERT ... ON CONFLICT DO UPDATE` — re-running a connector for content it already has is safe and cheap. Content is capped at 5 MB per row (Postgres TOAST handles the rest); connectors that would exceed that store only a canonical excerpt and set `status = 'stored_partial'`.
+
+Three companion tables round out the model:
+
+- **`source_record_entities`** — connector-extracted links from a `source_records` row to a `contacts` or `companies` row, with a `role` (`subject`, `mentioned`, `issuer`, `author`) and a `confidence` (0–1). Populated automatically for high-confidence matches (EDGAR filer CIK, Wayback URL slug); lower-confidence mentions are left for the user to confirm via the snippet widget.
+- **`source_feeds`** — subscribed RSS/Atom feed configuration (`feed_url`, `feed_kind`, ETag/Last-Modified caching for polite polling).
+- **`source_ingestion_jobs`** — queued/running async fetch jobs.
+- **`source_subscriptions`** (`data/db/init/042-source-subscriptions.sql`) — a lighter-weight table, added after the original `source_feeds` design, that pins an RSS feed, a Google News query, or a company blog to a tenant. The corporate-blog and Google News connectors check both `source_subscriptions` and `source_feeds` to avoid double-tracking the same feed — the two tables coexist rather than one superseding the other.
+
+Every fetch goes through `gatedFetch()` (`app/src/lib/sources/service.ts`), which runs a private-IP/SSRF check, a `robots.txt` check (skippable only for APIs explicitly documented as fair-use, like SEC's `data.sec.gov`), and a per-host token-bucket rate limiter before making the request.
+
+## Connectors
+
+### Wayback Machine (`connectors/wayback.ts`)
+
+Resolves a URL (optionally with a `timestamp` hint) against the CDX API (`web.archive.org/cdx/search/cdx`), fetches the nearest snapshot's HTML, and writes a `source_records` row with `source_id = '<14-digit-timestamp>:<normalized-url>'`.
+
+If the archived URL is a LinkedIn profile or company page (`/in/*`, `/company/*`), the connector also pipes the HTML into `storePageCache()` so the ordinary parser pipeline treats the historical snapshot as a capture — this is the "was this person still listed as AI Director in 2024?" path. That auto-reparse can be skipped per-call via `skipLinkedInReparse`.
+
+### SEC EDGAR (`connectors/edgar.ts`)
+
+Given a CIK, fetches `data.sec.gov/submissions/CIK<10-digit>.json`, picks up to `limit` (default 3) 10-K filings, and for each one extracts the Item 1A (Risk Factors) and Item 10 (Directors/Officers) sections — best effort, falling back to the raw body capped at 5 MB. Companies carry a nullable `cik` column (added in `035-targets-schema.sql`) for connector lookup. SEC's `data.sec.gov` is fetched without a robots check (documented fair-use exemption) but still rate-limited.
+
+This is the one connector that writes `source_field_values` rows — see [Trust weighting](#trust-weighting-what-actually-happens) below.
+
+### RSS / Atom (`connectors/rss.ts`)
+
+Handles both feed shapes with a small self-contained XML parser (no new dependency). For each item it forms `source_id = '<feed_url>::<guid-or-link>'` and writes a `source_records` row. Serves both press releases and general RSS-sourced content; `feed_kind` on `source_feeds` distinguishes them.
+
+### Corporate blog (`connectors/corporate-blog.ts`)
+
+Given a company domain, probes standard feed paths (`/feed`, `/rss`, `/rss.xml`, `/blog/feed`, `/atom.xml`, …) and falls back to parsing `/sitemap.xml` for recently-modified `/blog/`, `/news/`, `/press/` URLs if no feed is found. Reuses the RSS parser internally. Checks both `source_subscriptions` and `source_feeds` before adding a new tracked feed.
+
+### Google News (`connectors/google-news.ts`)
+
+Builds a `news.google.com/rss/search` query for a target name and runs it through the RSS parser, writing rows with `source_type = 'news'` and `metadata.origin = 'google-news'` so later reconciliation can tell curated-search hits apart from raw feed items or targeted-scraper hits.
+
+### Targeted news scrapers (`connectors/news/{wsj,bloomberg,reuters,techcrunch,cnbc}.ts`)
+
+Five thin per-site adapters plug into a shared shell, `runNewsConnector()` (`connectors/news/shared.ts`), which handles canonicalization, dedup, rate-limit/robots gating, and paywall degradation (writes a minimal row with `metadata.behind_paywall = true` rather than failing). Each adapter supplies `buildSearchUrl`, `parseSearchLinks`, `parseArticle`, and `detectPaywall`. WSJ and similar paywalled sites discover article URLs via a Google News `site:` query rather than first-party search, since first-party search redirects unauthenticated requests to a login wall.
+
+Each per-site sub-flag gates independently — see [Feature flags](#feature-flags).
+
+### Podcast (`connectors/podcast.ts`)
+
+Given a podcast RSS feed, resolves a transcript per episode in priority order: the Podcast Namespace `<podcast:transcript>` element, then `<itunes:summary>`, then `<description>` as a last resort. User-uploaded transcript files arrive via `POST /api/sources/podcast/transcript` and are stored in `source_field_values` keyed to the matching episode record — the one other write path into that table besides EDGAR, though it's a raw upload, not a trust-weighted extraction.
+
+## Cron routes
+
+Each connector has a corresponding cron endpoint under `app/src/app/api/sources/cron/`, all protected by a shared-secret header (`X-Cron-Secret`, checked against `CRON_SECRET`, timing-safe comparison — see `app/src/lib/sources/cron-auth.ts`) and gated on `RESEARCH_FLAGS.sources` plus the relevant per-connector flag:
+
+| Route | What it does |
+|---|---|
+| `cron/wayback-seed` | Fetches a Wayback snapshot for every `research_target` with a resolvable URL. |
+| `cron/edgar-backfill` | Pulls up to 3 recent 10-K filings for every company with a non-null `cik`. |
+| `cron/rss-poll` | Polls every enabled RSS subscription for the default tenant. |
+| `cron/blog-discovery` | Runs blog discovery for every company domain not yet marked `blog_discovered`. |
+| `cron/google-news-refresh` | Runs the Google News connector for every `source_subscriptions` row of `kind='google_news'`. |
+| `cron/news-sweep` | Runs each enabled per-site news connector against every research target. |
+| `cron/podcast-refresh` | Polls every subscribed podcast feed (`source_feeds` with `source_type='podcast'`). |
+| `cron/parser-rollup` | Not a source connector — nightly rollup of `parse_field_outcomes` into `parse_field_outcomes_daily` (ADR-031). Listed here because it lives alongside the other source cron routes. |
+
+All routes are idempotent: `writeSourceRecord()`'s dedup key means re-invoking a cron job re-processes the same content without creating duplicate rows.
+
+## Trust weighting — what actually happens
+
+ADR-030 (`docs/adr/ADR-030-source-trust-composite-weight.md`) describes source-trust resolution as a composite weight:
+
+```
+final_weight = source_category_default × per_item_multiplier
+```
+
+where `per_item_multiplier` is meant to combine four signals: engagement score, citation count, a recency modifier, and manual override. The schema and code implement a narrower slice of that than the ADR's prose suggests, and it's worth being precise about the gap, because it changes what you can rely on today.
+
+### `final_weight` is computed at write time, not read time
+
+`source_field_values.final_weight` is a Postgres generated column:
+
+```sql
+final_weight REAL GENERATED ALWAYS AS
+  (category_default_snapshot * per_item_multiplier) STORED
+```
+
+(`data/db/init/036-sources-schema.sql`.) `GENERATED ... STORED` columns can only reference other columns on the *same row* — they cannot join to `source_type_weights`. So the ingestion path snapshots the category default into `category_default_snapshot` on each row at insert/update time, and the generated column multiplies the two local values. If a tenant admin retunes a category's `category_default` in `source_type_weights` later, **no existing `source_field_values` row changes** until it is re-ingested — there is no backfill job today (the schema comment for `category_default_snapshot` says as much: "a backfill job is a future item"). Callers that want a live, always-current value have to join `source_type_weights` at read time themselves.
+
+### Only the EDGAR connector writes `source_field_values`
+
+The composite formula only means anything for fields that actually land in `source_field_values` — that's the table `final_weight` lives on, and the table the conflict-resolution projection reads. As of this writing:
+
+- **`edgar.ts`** looks up `category_default` per tenant, computes a recency-based `per_item_multiplier` (see below), and writes one `source_field_values` row per extracted section (Item 1A, Item 10) via `writeFieldValue()`. This is the one connector where the composite weight is real and queryable.
+- **Every other connector** (`wayback`, `rss`, `google-news`, `corporate-blog`, the five news scrapers) computes a `per_item_multiplier` and writes it into `source_records.metadata` — but nothing reads that field back out. It's recorded for observability, not consumed by any conflict-resolution logic.
+- **`corporate-blog.ts` and `podcast.ts`** don't write `source_field_values` at all (the podcast route's transcript-upload path is the one exception, and it's a raw store, not a weighted extraction).
+
+Practically: trust weighting is real for SEC filing content today, and cosmetic — a number computed and stored but never consulted — for every other source type.
+
+### What `per_item_multiplier` actually derives from, per connector
+
+| Connector | Multiplier signal | Writes `source_field_values`? |
+|---|---|---|
+| `edgar.ts` | Recency modifier only (`RECENCY_PRESETS.edgar`, replacing a previously-hardcoded `1.0`) | Yes |
+| `wayback.ts` | Snapshot age-decay (`ageDecayMultiplier()`) — no engagement/citation signal exists for an archived static page | No — `metadata` only |
+| `rss.ts` | Cross-feed republication count (≥ 2 feeds in 30 days → `1.2`), composed with the recency modifier | No — `metadata` only |
+| `news/*.ts` (wsj, bloomberg, reuters, techcrunch, cnbc) | JSON-LD `viewCount` heuristic (`deriveMultiplier()`: ≥ 1000 views → `1.2`, else `1.0`), composed with recency | No — `metadata` only |
+| `google-news.ts`, `corporate-blog.ts`, `podcast.ts` | Not computed / not written | No |
+
+None of these implement **citation count** — there's no data source for it anywhere in the schema. `source_record_entities` records "this source mentions entity X," not "source A is cited by source B," so citation count would need a new table. **Manual override** is also not a multiplier component: user overrides bypass the composite formula entirely at display time (see the conflict-banner mechanism in [Provenance](/docs/research-tools/provenance)), rather than nudging `per_item_multiplier`.
+
+### The recency modifier (`connectors/recency-modifier.ts`)
+
+The one genuinely general signal, added after the four-signal ADR was written: every connector already carries a publish/capture date, so `recencyModifier()` applies an exponential decay (per-source-type half-life and floor, in `RECENCY_PRESETS`) that only ever demotes a multiplier (ceiling `1.0`), never promotes it. This is distinct from `referenced_date` temporal resolution, which answers "when did this fact become true"; the recency modifier answers "how stale is this specific extraction, all else equal."
+
+It's gated behind `RESEARCH_RECENCY_MODIFIER=true` (default off) via `isRecencyModifierEnabled()` — a process-level env flag standing in for the tenant-configurable setting the ADR describes, since no per-tenant settings row exists for it yet. When the flag is off, `applyRecencyModifier()` is a no-op (`base * 1.0`), preserving whatever behavior existed before the modifier was added.
+
+Default seeded category weights (`source_type_weights`, applied per tenant):
+
+| `source_type` | `category_default` |
+|---|---|
+| `edgar` | 1.40 |
+| `press_release` | 1.20 |
+| `news` | 1.10 |
+| `linkedin` | 1.00 (baseline) |
+| `blog` | 0.90 |
+| `podcast` | 0.80 |
+| `wayback` | 0.70 |
+
+## Feature flags
+
+Everything above is off by default. `RESEARCH_FLAGS` (`app/src/lib/config/research-flags.ts`) reads a flat set of env vars, all defaulting to `false`:
+
+| Flag | Gates |
+|---|---|
+| `RESEARCH_SOURCES` | The whole `source_records` surface — connectors, cron routes. |
+| `RESEARCH_CONNECTOR_RSS` / `..._BLOG` / `..._GOOGLE_NEWS` / `..._PODCAST` | Per-connector master switches, checked in addition to `RESEARCH_SOURCES`. |
+| `RESEARCH_CONNECTOR_NEWS` | Master switch for the five targeted news scrapers. |
+| `RESEARCH_CONNECTOR_NEWS_WSJ` / `_BLOOMBERG` / `_REUTERS` / `_TECHCRUNCH` / `_CNBC` | Per-site sub-flags, checked via `isNewsSiteEnabled()` in addition to `RESEARCH_CONNECTOR_NEWS`. |
+| `RESEARCH_RECENCY_MODIFIER` | The recency-modifier signal described above. |
+
+There is no flag for the EDGAR connector specifically beyond `RESEARCH_SOURCES` — it isn't sub-gated the way RSS, blog, Google News, and podcast are.
+
+<Callout type="warn">
+Setting an env var doesn't automatically reach the container. `docker-compose.yml` only forwards `RESEARCH_TARGETS`, `RESEARCH_SNIPPETS`, `RESEARCH_PARSER_TELEMETRY`, `RESEARCH_SOURCES`, `RESEARCH_CONNECTOR_NEWS` (plus its five per-site sub-flags), and `RESEARCH_CONNECTOR_PODCAST`. `RESEARCH_CONNECTOR_RSS`, `RESEARCH_CONNECTOR_BLOG`, `RESEARCH_CONNECTOR_GOOGLE_NEWS`, and `RESEARCH_RECENCY_MODIFIER` are **not** forwarded — setting them in `.env` has no effect until `docker-compose.yml` is updated to pass them through, so the RSS, corporate-blog, Google News, and recency-modifier code paths are unreachable via the documented local-dev flow even with the flag set.
+</Callout>

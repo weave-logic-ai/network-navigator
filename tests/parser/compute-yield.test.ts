@@ -1,10 +1,17 @@
-// One-shot harness: dump per-parser field yield against the fixture corpus
-// to stdout so the baseline report can be authored from real numbers. This
-// test always passes; failure would mean the fixture loader is broken.
+// Regression harness: computes per-parser field yield against the fixture
+// corpus and compares it against the committed baseline at
+// tests/parser/__yield__/yield-baseline.json. A mismatch means parser yield
+// behavior actually changed (better or worse) and the baseline needs review.
 //
 // Run with: npm test -- --testPathPattern=compute-yield
-// The yield JSON is also written to tests/parser/__yield__/yield-baseline.json
-// for the admin page + follow-up diffs.
+//
+// To intentionally update the committed baseline after a verified yield
+// change, run:
+//   UPDATE_YIELD_BASELINE=1 npm test -- --testPathPattern=compute-yield
+// That writes the new numbers to tests/parser/__yield__/yield-baseline.json;
+// review the diff and commit it deliberately. Without the env var, the test
+// only reads the baseline — it never touches the file — so `npm test` never
+// dirties the working tree.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -48,8 +55,20 @@ function buildConfig(pt: LinkedInPageType): SelectorConfig {
   };
 }
 
+interface YieldBaselineFile {
+  rows: Array<{
+    pageType: string;
+    field: string;
+    yield: number;
+    nSamples: number;
+    nPresent: number;
+    avgConfidence: number;
+    fallbackShareOfHits: number;
+  }>;
+}
+
 describe('parser yield baseline', () => {
-  it('produces a per-parser, per-field yield report', () => {
+  it('matches the committed yield baseline (set UPDATE_YIELD_BASELINE=1 to refresh it)', () => {
     interface Row {
       pageType: string;
       field: string;
@@ -155,9 +174,17 @@ describe('parser yield baseline', () => {
     }));
     out.sort((a, b) => (a.pageType + a.field).localeCompare(b.pageType + b.field));
 
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-    const outPath = path.join(OUTPUT_DIR, 'yield-baseline.json');
-    fs.writeFileSync(outPath, `${JSON.stringify({ generatedAt: new Date().toISOString(), rows: out }, null, 2)}\n`);
     expect(out.length).toBeGreaterThan(10);
+
+    const baselinePath = path.join(OUTPUT_DIR, 'yield-baseline.json');
+
+    if (process.env.UPDATE_YIELD_BASELINE === '1') {
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+      fs.writeFileSync(baselinePath, `${JSON.stringify({ rows: out }, null, 2)}\n`);
+      return;
+    }
+
+    const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')) as YieldBaselineFile;
+    expect(out).toEqual(baseline.rows);
   });
 });
