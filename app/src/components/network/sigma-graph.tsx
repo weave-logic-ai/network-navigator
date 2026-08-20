@@ -66,6 +66,20 @@ interface SigmaGraphProps {
    * query dims non-matches — see the node-reducer effect below.
    */
   highlightedCluster?: string | null;
+  /**
+   * ADR-027 graph re-rooting. A `research_targets.id` (of `kind='contact'`)
+   * to center the graph on, in place of the default top-by-PageRank
+   * listing. Per the ADR, this is normally the current *secondary* target
+   * — passed straight through to `/api/graph/sigma-data?primaryTargetId=`,
+   * which keeps that wire name for consistency with the (unwired)
+   * `/api/graph/data` implementation it was ported from. Mirrors the
+   * `showProvenanceEdges`/`onShowProvenanceEdgesChange` controlled-prop
+   * pattern above: parent supplies the initial/external value, this
+   * component mirrors it locally and reports back optimistically when
+   * shift-click sets a new secondary, so the parent doesn't need to poll.
+   */
+  rootTargetId?: string | null;
+  onRootTargetIdChange?: (next: string) => void;
 }
 
 const EDGE_TYPE_OPTIONS = [
@@ -85,12 +99,21 @@ export function SigmaGraph({
   showProvenanceEdges = false,
   onShowProvenanceEdgesChange,
   highlightedCluster = null,
+  rootTargetId = null,
+  onRootTargetIdChange,
 }: SigmaGraphProps) {
   // Local copy of the toggle: mirrors the parent's value when controlled,
   // otherwise acts as uncontrolled state. Either way, flipping it triggers
   // a refetch (see loadData dep array below) with cache-bust via
   // includeProvenanceEdges=true — matching the Phase 4 §6 behavior.
   const [provenanceOn, setProvenanceOn] = useState<boolean>(showProvenanceEdges);
+  // Local mirror of `rootTargetId` — same controlled-prop pattern as
+  // `provenanceOn` above. The shift-click handler updates this optimistically
+  // (see clickNode below) so the graph re-centers without waiting on a
+  // round trip through the parent.
+  const [activeRootTargetId, setActiveRootTargetId] = useState<string | null>(
+    rootTargetId
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sigmaRef = useRef<any>(null);
@@ -121,6 +144,7 @@ export function SigmaGraph({
       if (nicheId) params.set("nicheId", nicheId);
       if (edgeTypes.length > 0) params.set("edgeTypes", edgeTypes.join(","));
       if (provenanceOn) params.set("includeProvenanceEdges", "true");
+      if (activeRootTargetId) params.set("primaryTargetId", activeRootTargetId);
 
       const res = await fetch(`/api/graph/sigma-data?${params}`);
       if (!res.ok) throw new Error("Failed to load graph data");
@@ -131,7 +155,7 @@ export function SigmaGraph({
     } finally {
       setLoading(false);
     }
-  }, [limit, nicheId, edgeTypes, provenanceOn]);
+  }, [limit, nicheId, edgeTypes, provenanceOn, activeRootTargetId]);
 
   const handleProvenanceToggle = useCallback(() => {
     setProvenanceOn((prev) => {
@@ -145,6 +169,13 @@ export function SigmaGraph({
   useEffect(() => {
     setProvenanceOn(showProvenanceEdges);
   }, [showProvenanceEdges]);
+
+  // Same sync for the re-root target — e.g. the parent resolved the current
+  // secondary target after this component's initial mount, or the user
+  // cleared the secondary via the header breadcrumb.
+  useEffect(() => {
+    setActiveRootTargetId(rootTargetId);
+  }, [rootTargetId]);
 
   useEffect(() => {
     loadData();
@@ -250,7 +281,17 @@ export function SigmaGraph({
             // failure — we still flash the node so the user sees the
             // interaction landed client-side, and the breadcrumb will
             // refresh on next state poll.
-            void setSecondaryTargetViaShiftClick(node);
+            //
+            // ADR-027: setting the secondary re-centers the graph, so once
+            // the target row exists we re-root on it optimistically (no
+            // need to wait for a state poll) and let the parent know so its
+            // own copy of "current secondary" stays in sync.
+            void setSecondaryTargetViaShiftClick(node).then((result) => {
+              if (result.ok && result.secondaryTargetId) {
+                setActiveRootTargetId(result.secondaryTargetId);
+                onRootTargetIdChange?.(result.secondaryTargetId);
+              }
+            });
 
             // Amber highlight pulse — the node reducer reads this Set to
             // override the node's color for a short window.
@@ -303,7 +344,7 @@ export function SigmaGraph({
       sigmaRef.current = null;
       graphRef.current = null;
     };
-  }, [data, onNodeClick]);
+  }, [data, onNodeClick, onRootTargetIdChange]);
 
   // Search + shift-click flash + cluster highlight: the single node reducer
   // combines all three signals so the amber flash survives even when a

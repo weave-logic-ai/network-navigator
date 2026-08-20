@@ -20,6 +20,8 @@ import {
   getSnippetQueueDepth,
   SNIPPET_QUEUE_KEY,
 } from '../shared/snippet-queue';
+import { addApprovedOrigins, revokeOrigin } from '../shared/approved-origins';
+import { getSnipModeActive, setSnipModeActive } from '../shared/snip-mode';
 
 // ============================================================
 // DOM References
@@ -762,10 +764,13 @@ chrome.storage.onChanged.addListener((changes) => {
     updateConnectionStatus(changes.connectionState.newValue);
   }
   // WS-3 Phase 6 §7 — approvedOrigins is rewritten by the service worker on
-  // chrome.permissions.onRemoved / onAdded. Re-render the grant CTA so the
-  // UI reflects the new state without a sidebar reload.
+  // chrome.permissions.onRemoved / onAdded (and by this panel's own
+  // grant/revoke handlers). Re-render the grant CTA and the revoke list
+  // (ADR-028 clause 6) so the UI reflects the new state without a reload —
+  // including a revoke made through chrome://extensions instead of here.
   if (changes.approvedOrigins) {
     void updateAddHostButton();
+    void renderApprovedOrigins();
   }
   if (changes.pendingTasks) {
     // Re-resolve target lock when the task list changes — a new task may now match the current URL
@@ -825,6 +830,10 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo) => {
 async function init(): Promise<void> {
   await updateStatus();
   await updatePageInfo();
+  // ADR-028 clauses 4 & 6 — restore this session's snip-mode toggle state
+  // and render the current approved-origins/revoke list.
+  await loadSnipModeState();
+  await renderApprovedOrigins();
 
   // Load tasks from storage
   chrome.storage.local.get('pendingTasks', (result) => {
@@ -955,6 +964,13 @@ const snippetSaveBtn = document.getElementById('sp-snippet-save-btn');
 const snippetCancelBtn = document.getElementById('sp-snippet-cancel-btn');
 const snippetErrorEl = document.getElementById('sp-snippet-error');
 const addHostBtn = document.getElementById('sp-add-host-btn');
+// ADR-028 clause 4 — Snip mode opt-in toggle + the widget body it gates
+const snipModeToggleBtn = document.getElementById('sp-snip-mode-toggle');
+const snipModeHint = document.getElementById('sp-snip-mode-hint');
+const snippetWidgetBody = document.getElementById('sp-snippet-widget-body');
+// ADR-028 clause 6 — approved-origins revoke UI
+const approvedOriginsList = document.getElementById('sp-approved-origins-list');
+const approvedOriginsEmpty = document.getElementById('sp-approved-origins-empty');
 // Phase 1.5 — image tab DOM
 const snippetTabText = document.getElementById('sp-snippet-tab-text');
 const snippetTabImage = document.getElementById('sp-snippet-tab-image');
@@ -989,6 +1005,11 @@ const snippetQueueDepthEl = document.getElementById('sp-snippet-queue-depth');
 let availableTags: SidebarTagRow[] = [];
 let currentSnippet: SidebarSnippetPayload | null = null;
 let snippetEnabled = false;
+// ADR-028 clause 4 — Snip mode is off by default every session; capturing is
+// a deliberate act, not an ambient one. Backed by chrome.storage.session so
+// it survives a side-panel close/reopen within the browser session but is
+// gone on browser restart (matching the ADR's "opt-in per session" wording).
+let snipModeActive = false;
 
 function extractPersonBigrams(text: string): string[] {
   if (!text) return [];
@@ -1326,22 +1347,129 @@ if (addHostBtn) {
       const granted = await chrome.permissions.request({ origins: [origin] });
       if (granted) {
         // Mirror the grant in local storage for UI state (source of truth
-        // remains chrome.permissions per ADR-028).
-        const stored = await new Promise<{ approvedOrigins?: string[] }>((r) =>
-          chrome.storage.local.get('approvedOrigins', (v) => r(v)),
-        );
-        const next = new Set(stored.approvedOrigins ?? []);
-        next.add(origin);
-        await chrome.storage.local.set({ approvedOrigins: Array.from(next) });
+        // remains chrome.permissions per ADR-028). Route through
+        // approved-origins.ts rather than writing the storage key directly
+        // so canonicalization/dedup stays single-sourced with the revoke
+        // path and the service worker's onAdded/onRemoved listeners.
+        await addApprovedOrigins([origin]);
         // Re-inject so snipping works immediately without a reload.
         await injectSnippetContentScript(tab.id);
         await updateAddHostButton();
+        await renderApprovedOrigins();
       }
     } catch (err) {
       logger.warn('Add-host request failed:', (err as Error).message);
     }
   });
 }
+
+// ============================================================
+// Approved-origins revoke UI (ADR-028 clause 6)
+// ============================================================
+//
+// Lists every origin in the `approvedOrigins` mirror with a "Revoke" button.
+// The actual revoke — chrome.permissions.remove followed by the mirror
+// update — lives in shared/approved-origins.ts's `revokeOrigin` so it's
+// covered by that module's fake-chrome test suite and stays single-sourced
+// with the grant path and the service worker's onAdded/onRemoved listeners.
+
+async function getApprovedOriginsForDisplay(): Promise<string[]> {
+  const stored = await new Promise<{ approvedOrigins?: string[] }>((r) =>
+    chrome.storage.local.get('approvedOrigins', (v) => r(v)),
+  );
+  return [...(stored.approvedOrigins ?? [])].sort();
+}
+
+async function handleRevokeClick(origin: string): Promise<void> {
+  await revokeOrigin(origin);
+  await renderApprovedOrigins();
+  await updateAddHostButton();
+}
+
+async function renderApprovedOrigins(): Promise<void> {
+  if (!approvedOriginsList || !approvedOriginsEmpty) return;
+  const origins = await getApprovedOriginsForDisplay();
+  if (origins.length === 0) {
+    approvedOriginsList.style.display = 'none';
+    approvedOriginsList.innerHTML = '';
+    approvedOriginsEmpty.style.display = '';
+    return;
+  }
+  approvedOriginsEmpty.style.display = 'none';
+  approvedOriginsList.style.display = '';
+  approvedOriginsList.innerHTML = '';
+  for (const origin of origins) {
+    const li = document.createElement('li');
+    li.className = 'approved-origin-row';
+    const label = document.createElement('span');
+    label.className = 'approved-origin-label';
+    label.textContent = origin.replace(/\/\*$/, '');
+    const revokeBtn = document.createElement('button');
+    revokeBtn.className = 'btn-icon';
+    revokeBtn.title = `Revoke access to ${origin}`;
+    revokeBtn.setAttribute('aria-label', `Revoke access to ${origin}`);
+    revokeBtn.textContent = 'Revoke';
+    revokeBtn.addEventListener('click', () => {
+      void handleRevokeClick(origin);
+    });
+    li.appendChild(label);
+    li.appendChild(revokeBtn);
+    approvedOriginsList.appendChild(li);
+  }
+}
+
+// ============================================================
+// Snip mode opt-in (ADR-028 clause 4)
+// ============================================================
+//
+// The permission grant (Add-host / optional_host_permissions) only controls
+// *where* the content script is allowed to run. Snip mode is a separate,
+// session-scoped decision about *whether the capture widget is active right
+// now* — granting an origin must not, by itself, turn on capture. This
+// mirrors the popup-toggle-or-hotkey shape the ADR specifies in §7.3.
+
+function renderSnipModeToggle(): void {
+  if (snipModeToggleBtn) {
+    snipModeToggleBtn.textContent = snipModeActive ? 'Snip mode: On' : 'Snip mode: Off';
+    snipModeToggleBtn.setAttribute('aria-pressed', String(snipModeActive));
+    snipModeToggleBtn.classList.toggle('active', snipModeActive);
+  }
+  if (snipModeHint) snipModeHint.style.display = snipModeActive ? 'none' : '';
+  if (snippetWidgetBody) snippetWidgetBody.style.display = snipModeActive ? '' : 'none';
+}
+
+async function setSnipMode(active: boolean): Promise<void> {
+  snipModeActive = active;
+  try {
+    await setSnipModeActive(active);
+  } catch (err) {
+    // storage.session should always be available given the "storage"
+    // permission, but don't let a failure here block the UI toggle.
+    logger.warn('Failed to persist snip-mode state:', (err as Error).message);
+  }
+  if (!active) resetSnippetCard();
+  renderSnipModeToggle();
+}
+
+async function loadSnipModeState(): Promise<void> {
+  snipModeActive = await getSnipModeActive();
+  renderSnipModeToggle();
+}
+
+if (snipModeToggleBtn) {
+  snipModeToggleBtn.addEventListener('click', () => {
+    void setSnipMode(!snipModeActive);
+  });
+}
+
+// Ctrl+Shift+S / Cmd+Shift+S — registered as a chrome.commands entry in
+// manifest.json and relayed here by the service worker, since commands only
+// fire in the background context.
+chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
+  if (message.type === 'TOGGLE_SNIP_MODE') {
+    void setSnipMode(!snipModeActive);
+  }
+});
 
 function resetSnippetCard(): void {
   currentSnippet = null;
@@ -1454,6 +1582,9 @@ if (snippetTabLink) snippetTabLink.addEventListener('click', () => activateSnipp
 if (snippetCaptureBtn) {
   snippetCaptureBtn.addEventListener('click', async () => {
     if (!snippetEnabled) return;
+    // ADR-028 clause 4 — belt-and-braces guard alongside the hidden widget
+    // body; a stale DOM reference shouldn't be able to fire a capture.
+    if (!snipModeActive) return;
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
     if (!tab?.url || !tab.id) return;
@@ -1599,6 +1730,10 @@ async function presentImagePayload(payload: {
 }
 
 async function ingestImageFile(file: File): Promise<void> {
+  // ADR-028 clause 4 — the widget body is hidden while snip mode is off, but
+  // paste/drop are global listeners that don't check inline child styles, so
+  // guard explicitly here rather than relying on visibility alone.
+  if (!snipModeActive) return;
   if (!ALLOWED_IMAGE_MIMES.has(file.type)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = `Unsupported type "${file.type || 'unknown'}". Use PNG, JPEG, or WebP.`;
@@ -1629,6 +1764,8 @@ async function ingestImageFile(file: File): Promise<void> {
 }
 
 async function ingestImageFromUrl(imageUrl: string): Promise<void> {
+  // ADR-028 clause 4 — see ingestImageFile.
+  if (!snipModeActive) return;
   if (!/^https?:\/\//.test(imageUrl)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = 'URL must start with http:// or https://';
@@ -1710,6 +1847,10 @@ if (snippetDropzone) {
 // Clipboard paste binding — listen anywhere in the sidepanel when image
 // tab is active; the paste handler filters to the image pane.
 document.addEventListener('paste', async (e) => {
+  // ADR-028 clause 4 — this is a document-wide listener, not gated by the
+  // widget body's visibility check below (which only inspects the tab
+  // pane's own inline style, not its hidden ancestor).
+  if (!snipModeActive) return;
   if (!snippetImagePane || snippetImagePane.style.display === 'none') return;
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -1741,6 +1882,8 @@ if (snippetImageFetchBtn && snippetImageUrlInput) {
 if (snippetLinkPrepBtn) {
   snippetLinkPrepBtn.addEventListener('click', async () => {
     if (!snippetEnabled) return;
+    // ADR-028 clause 4 — see the capture-selection handler above.
+    if (!snipModeActive) return;
     const href = snippetLinkHrefInput?.value.trim() ?? '';
     if (!/^https?:\/\//i.test(href)) {
       if (snippetLinkStatus)

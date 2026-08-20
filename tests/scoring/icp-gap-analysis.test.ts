@@ -269,6 +269,121 @@ describe('scoring/icp-gap-analysis', () => {
     expect(result.gaps.missingRoles).toEqual([]);
   });
 
+  it('flags companySizeMismatch when desired and natural size ranges share no overlap', async () => {
+    const { query } = await import('@/lib/db/client');
+    const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+    (computeNaturalICP as jest.Mock).mockResolvedValue({
+      ...baseNaturalIcp,
+      companySizeRanges: ['1-10', '11-50'],
+    });
+    (query as jest.MockedFunction<typeof query>).mockImplementation((sql: string) => {
+      if (sql.includes('FROM owner_profiles')) {
+        return resultOf([
+          { metadata: { desiredIcpConfig: { nicheId: null, icpId: 'icp-1' } } },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      if (sql.includes('FROM icp_profiles WHERE id')) {
+        return resultOf([
+          {
+            id: 'icp-1',
+            name: 'Target ICP',
+            niche_id: null,
+            criteria: {
+              roles: [],
+              industries: [],
+              signals: [],
+              nicheKeywords: [],
+              companySizeRanges: ['201-500', '501-1000'],
+            },
+          },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      return resultOf([]) as unknown as ReturnType<typeof query>;
+    });
+
+    const svc = await import('@/lib/scoring/icp-gap-analysis');
+    const result = await svc.runGapAnalysis();
+
+    expect(result.gaps.companySizeMismatch).toBe(true);
+  });
+
+  it('does not flag companySizeMismatch when a range is shared', async () => {
+    const { query } = await import('@/lib/db/client');
+    const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+    (computeNaturalICP as jest.Mock).mockResolvedValue({
+      ...baseNaturalIcp,
+      companySizeRanges: ['11-50', '51-200'],
+    });
+    (query as jest.MockedFunction<typeof query>).mockImplementation((sql: string) => {
+      if (sql.includes('FROM owner_profiles')) {
+        return resultOf([
+          { metadata: { desiredIcpConfig: { nicheId: null, icpId: 'icp-1' } } },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      if (sql.includes('FROM icp_profiles WHERE id')) {
+        return resultOf([
+          {
+            id: 'icp-1',
+            name: 'Target ICP',
+            niche_id: null,
+            criteria: {
+              roles: [],
+              industries: [],
+              signals: [],
+              nicheKeywords: [],
+              companySizeRanges: ['51-200', '201-500'],
+            },
+          },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      return resultOf([]) as unknown as ReturnType<typeof query>;
+    });
+
+    const svc = await import('@/lib/scoring/icp-gap-analysis');
+    const result = await svc.runGapAnalysis();
+
+    expect(result.gaps.companySizeMismatch).toBe(false);
+  });
+
+  it('does not flag companySizeMismatch when either side has no size data (nothing to compare)', async () => {
+    const { query } = await import('@/lib/db/client');
+    const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+    // Natural ICP has no company-size data at all (fresh install, nothing enriched yet).
+    (computeNaturalICP as jest.Mock).mockResolvedValue({
+      ...baseNaturalIcp,
+      companySizeRanges: [],
+    });
+    (query as jest.MockedFunction<typeof query>).mockImplementation((sql: string) => {
+      if (sql.includes('FROM owner_profiles')) {
+        return resultOf([
+          { metadata: { desiredIcpConfig: { nicheId: null, icpId: 'icp-1' } } },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      if (sql.includes('FROM icp_profiles WHERE id')) {
+        return resultOf([
+          {
+            id: 'icp-1',
+            name: 'Target ICP',
+            niche_id: null,
+            criteria: {
+              roles: [],
+              industries: [],
+              signals: [],
+              nicheKeywords: [],
+              companySizeRanges: ['201-500'],
+            },
+          },
+        ]) as unknown as ReturnType<typeof query>;
+      }
+      return resultOf([]) as unknown as ReturnType<typeof query>;
+    });
+
+    const svc = await import('@/lib/scoring/icp-gap-analysis');
+    const result = await svc.runGapAnalysis();
+
+    expect(result.gaps.companySizeMismatch).toBe(false);
+  });
+
   it('attaches a taskTemplate to every generated suggestion', async () => {
     const { query } = await import('@/lib/db/client');
     const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');

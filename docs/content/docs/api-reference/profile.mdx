@@ -283,7 +283,19 @@ role-heavy desired ICP will score lower even at full alignment). `gaps` — the
 desired-ICP attributes not found in the profile text. `strengths` — the ones that
 were found, plus `nicheContactCount` (current contacts in the desired niche);
 `strengths.sharedRoles` is always `[]` today (only *missing* roles are computed, not
-matched ones) and `gaps.companySizeMismatch` is always `false` (not yet implemented).
+matched ones).
+
+`gaps.companySizeMismatch` compares the desired ICP's `criteria.companySizeRanges`
+(a controlled vocabulary of buckets like `"10-50"`, `"51-200"` — the same field used
+by the ICP-fit scorer and the ICP builder) against the Natural ICP's own
+`companySizeRanges` (the network's most common `companies.size_range` values, exact
+match, no fuzzy aliasing). It is `true` only when **both** sides name at least one
+size range and none of them overlap — a desired ICP or a network with no size data
+never counts as a mismatch, since there's nothing to compare. In practice
+`companies.size_range` is not populated by the LinkedIn CSV import itself (the export
+carries no company-headcount data); it's filled in by enrichment or manual entry, so
+this field commonly stays `false` on installs that haven't enriched company size yet
+— that's an honest "no data" result, not a stub.
 `suggestions` — sorted by impact (high → low) then effort (quick → significant); each
 entry includes a `taskTemplate` shaped for direct use with the
 [Tasks API](/docs/api-reference/goals-tasks).

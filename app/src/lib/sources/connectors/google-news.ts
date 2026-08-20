@@ -16,6 +16,7 @@ import { gatedFetch, writeSourceRecord } from '../service';
 import { query } from '../../db/client';
 import { canonicalizeUrl } from '../url-normalize';
 import { parseXml, normalizeRssItems, type RssItem } from './rss';
+import { applyRecencyModifier, RECENCY_PRESETS } from './recency-modifier';
 import type {
   SourceConnector,
   GoogleNewsInput,
@@ -114,6 +115,16 @@ export const googleNewsConnector: SourceConnector<GoogleNewsInput> = {
       }
 
       const sourceId = `${queryUrl}::${item.guid ?? canonicalLink}`;
+      // ADR-030 per-item multiplier: this feed is Google's redirect/aggregator
+      // XML, not the article itself, so no viewCount JSON-LD is available
+      // (unlike `news/shared.ts`'s direct-fetch connectors) and citation
+      // count is unbuilt repo-wide. Recency (item age) is the only signal
+      // available here.
+      const perItemMultiplier = applyRecencyModifier(
+        1.0,
+        item.pubDate,
+        RECENCY_PRESETS.news
+      );
       const metadata = {
         news: {
           origin: 'google-news',
@@ -123,6 +134,7 @@ export const googleNewsConnector: SourceConnector<GoogleNewsInput> = {
           description: item.description,
           authorName: item.authorName,
           pubDate: item.pubDate?.toISOString() ?? null,
+          perItemMultiplier,
         },
       };
 

@@ -83,7 +83,8 @@ the trend query output.
 - ~~**Cheap long-term trends**. The aggregate table is ~60x smaller than raw
   per field, so 2-year trend queries stay fast with an index on
   `(page_type, field_name, day)`.~~ **Not realized (2026-08-19)**: the
-  aggregate is never populated (no roll-up job exists), so every trend
+  aggregate was never populated (no roll-up job existed until 2026-08-20,
+  see the Decision note above), so every trend
   query falls through to a full raw-table scan. See the update note at the
   top of this file.
 - **Debuggability preserved**. 90 days of raw rows let engineers inspect
@@ -91,7 +92,19 @@ the trend query output.
   rarely reach further back.
 - ~~**Simple migration story**. Aggregate is a nightly roll-up; if the cron
   fails, the next run backfills from raw (within the 90-day window).~~
-  **Not built (2026-08-19)**: there is no nightly roll-up cron at all yet.
+  ~~**Not built (2026-08-19)**: there is no nightly roll-up cron at all yet.~~
+  **BUILT 2026-08-20.** `app/src/lib/parser/rollup.ts` (`runParserRollup`)
+  aggregates raw outcomes into `parse_field_outcomes_daily`, exposed as
+  `POST /api/sources/cron/parser-rollup` following the existing cron-route
+  convention (flag-gated on `RESEARCH_FLAGS.parserTelemetry`, cron-authorized,
+  optional `?day=YYYY-MM-DD` for backfill). Idempotent by construction: each
+  run recomputes the day's full aggregate from raw and upserts via
+  `ON CONFLICT ... DO UPDATE SET` against `uq_pfod_bucket` — absolute
+  overwrite, never `+=`, so a re-run is a no-op rather than a double-count.
+  No migration was needed; migration 033 already shipped the exact unique
+  constraint an upsert requires. NOTE: no scheduler is registered in-repo for
+  this or any sibling cron route — they are assumed to be triggered
+  externally. The Phase 2 *prune* cron remains deliberately unbuilt.
   See the update note at the top of this file.
 
 ### Negative

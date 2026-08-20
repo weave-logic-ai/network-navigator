@@ -136,3 +136,164 @@ describe('/api/graph/sigma-data cluster id', () => {
     expect(alice.attributes.clusterId).toBe('cluster-a');
   });
 });
+
+// ADR-027 graph re-rooting — `?primaryTargetId=<research_targets.id>` ports
+// the neighborhood-CTE re-root SQL from `/api/graph/data/route.ts` (the
+// unwired implementation) onto this route, which is the one the live Graph
+// tab actually calls. See the route's file-header comment for why the wire
+// param keeps the `primaryTargetId` name even though the caller is
+// conceptually passing the current *secondary* target.
+describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
+  function targetRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 't1',
+      tenant_id: 'tenant-1',
+      kind: 'contact',
+      owner_id: null,
+      contact_id: 'c1',
+      company_id: null,
+      label: 'Alice',
+      pinned: false,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      last_used_at: '2026-01-01T00:00:00Z',
+      ...overrides,
+    };
+  }
+
+  function setupMockQueryWithTarget(row: Record<string, unknown> | null) {
+    const mockQuery = jest.requireMock('@/lib/db/client').query as jest.Mock;
+    mockQuery.mockReset();
+    mockQuery.mockImplementation((sql: unknown) => {
+      const text = String(sql);
+      if (text.includes('FROM research_targets WHERE id')) {
+        return mockRows(row ? [row] : []);
+      }
+      if (text.includes('cluster_memberships')) {
+        // Both the re-rooted and default nodes queries join
+        // cluster_memberships, so this one mock covers either shape.
+        return mockRows(NODE_ROWS);
+      }
+      if (text.includes('FROM edges')) {
+        return mockRows([]);
+      }
+      if (text.includes('FROM contacts WHERE is_archived')) {
+        return mockRows([{ cnt: String(NODE_ROWS.length) }]);
+      }
+      if (text.includes('FROM clusters')) {
+        return mockRows([{ cnt: '1' }]);
+      }
+      return mockRows([]);
+    });
+    return mockQuery;
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it('re-roots on a contact target: neighborhood CTE, keyed on the resolved contact id', async () => {
+    const mockQuery = setupMockQueryWithTarget(targetRow());
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=t1',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    expect(res.status).toBe(200);
+
+    const nodesCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('WITH neighborhood')
+    );
+    expect(nodesCall).toBeDefined();
+    expect(String(nodesCall![0])).toMatch(/INNER JOIN neighborhood/);
+    expect(String(nodesCall![0])).toMatch(
+      /source_contact_id = \$1 OR target_contact_id = \$1/
+    );
+    // rootContactId (resolved from the target's contact_id), minPagerank, limit
+    expect(nodesCall![1]).toEqual(['c1', 0, 10]);
+  });
+
+  it('falls through to the default top-PageRank listing for kind="self"', async () => {
+    const mockQuery = setupMockQueryWithTarget(
+      targetRow({ kind: 'self', contact_id: null, owner_id: 'owner-1' })
+    );
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=t1',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    expect(res.status).toBe(200);
+
+    const neighborhoodCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('WITH neighborhood')
+    );
+    expect(neighborhoodCall).toBeUndefined();
+  });
+
+  it('falls through to the default listing for kind="company"', async () => {
+    const mockQuery = setupMockQueryWithTarget(
+      targetRow({ kind: 'company', contact_id: null, company_id: 'co-1' })
+    );
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=t1',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    expect(res.status).toBe(200);
+
+    const neighborhoodCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('WITH neighborhood')
+    );
+    expect(neighborhoodCall).toBeUndefined();
+  });
+
+  it('falls through to the default listing when the target id does not resolve', async () => {
+    const mockQuery = setupMockQueryWithTarget(null);
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=missing',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    expect(res.status).toBe(200);
+
+    const neighborhoodCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('WITH neighborhood')
+    );
+    expect(neighborhoodCall).toBeUndefined();
+  });
+
+  it('re-rooting still attaches the dominant cluster id to the returned nodes', async () => {
+    setupMockQueryWithTarget(targetRow());
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=t1',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    const json = await res.json();
+    const alice = json.data.nodes.find((n: { key: string }) => n.key === 'c1');
+    expect(alice.attributes.clusterId).toBe('cluster-a');
+  });
+
+  it('re-rooting takes precedence over nicheId when both are passed', async () => {
+    const mockQuery = setupMockQueryWithTarget(targetRow());
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const req = new Request(
+      'http://x/api/graph/sigma-data?limit=10&primaryTargetId=t1&nicheId=niche-1',
+      { method: 'GET' }
+    );
+    const res = await GET(req as unknown as import('next/server').NextRequest);
+    expect(res.status).toBe(200);
+
+    const nodesCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('cluster_memberships')
+    );
+    expect(nodesCall).toBeDefined();
+    expect(String(nodesCall![0])).toMatch(/WITH neighborhood/);
+    expect(String(nodesCall![0])).not.toMatch(/niche_memberships/);
+  });
+});

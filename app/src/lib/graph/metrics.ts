@@ -18,8 +18,11 @@ export async function computeAllMetrics(): Promise<GraphMetrics[]> {
     return await computeAllMetricsRuVector();
   } catch (error) {
     console.warn(
-      "[metrics] RuVector computation failed, falling back to Node.js:",
-      error instanceof Error ? error.message : error
+      `[graph/metrics] RuVector computation failed; falling back to the Node.js ` +
+        `implementation (in-memory PageRank + 50-sample betweenness approximation ` +
+        `instead of RuVector's in-DB native computation). Results are still stored ` +
+        `in graph_metrics, but which engine served this run is only visible here: ` +
+        (error instanceof Error ? error.message : String(error))
     );
     return await computeAllMetricsNodeJS();
   }

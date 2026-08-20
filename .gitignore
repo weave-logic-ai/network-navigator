@@ -29,6 +29,10 @@ data/config/extension-settings.json
 .env.*.local
 **/.env
 **/.env.*
+# `**/.env.*` above also swallows .env.example, which carries no secrets and
+# is meant to be committed as the reference for RESEARCH_* flags. Negate it.
+!.env.example
+!**/.env.example
 
 # === Build artifacts ===
 node_modules/

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,6 +22,35 @@ export default function NetworkPage() {
   const [clusterSidebarOpen, setClusterSidebarOpen] = useState(false);
   const [highlightedCluster, setHighlightedCluster] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("graph");
+  // ADR-027 graph re-rooting: the current secondary target id (if any),
+  // read from `/api/targets/state` on mount so the Graph tab opens already
+  // centered on whatever the user was last looking at (e.g. via the header
+  // breadcrumb / target picker). Shift-clicking a node in SigmaGraph updates
+  // this optimistically via `onRootTargetIdChange` — see sigma-graph.tsx for
+  // why the graph itself owns that write (existing shift-click flow, not a
+  // parallel one).
+  const [rootTargetId, setRootTargetId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/targets/state");
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          data: { secondaryTargetId: string | null } | null;
+        };
+        if (!cancelled && json.data?.secondaryTargetId) {
+          setRootTargetId(json.data.secondaryTargetId);
+        }
+      } catch {
+        // Silent — graph just falls back to the default top-PageRank view.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleCompute = useCallback(async () => {
     setComputing(true);
@@ -86,6 +115,8 @@ export default function NetworkPage() {
               key={refreshKey}
               limit={SIGMA_GRAPH_NODE_LIMIT}
               highlightedCluster={highlightedCluster}
+              rootTargetId={rootTargetId}
+              onRootTargetIdChange={setRootTargetId}
             />
           </div>
         </TabsContent>

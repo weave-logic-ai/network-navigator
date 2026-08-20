@@ -863,6 +863,46 @@ body {
   color: #374151;
   margin: 2px 0 4px;
 }
+/* ADR-028 clause 6 — approved-origins revoke list */
+.approved-origins-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+}
+.approved-origin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dotted #f3f4f6;
+}
+.approved-origin-label {
+  color: #374151;
+  word-break: break-all;
+}
+.approved-origin-row .btn-icon {
+  font-size: 11px;
+  font-weight: 600;
+  color: #dc2626;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.approved-origin-row .btn-icon:hover {
+  color: #b91c1c;
+  text-decoration: underline;
+}
+
+/* ADR-028 clause 4 — snip-mode toggle */
+#sp-snip-mode-toggle.active {
+  background: #059669;
+  color: #fff;
+}
+#sp-snip-mode-toggle.active:hover {
+  background: #047857;
+}
+
 .unmatched-flag-btn {
   font-size: 11px;
   padding: 2px 8px;

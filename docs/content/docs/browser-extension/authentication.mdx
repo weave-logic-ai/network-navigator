@@ -52,7 +52,7 @@ Replace `ext_your-secret-token-value-here` with any string you choose. The `disp
 If using Docker, run the command via `docker exec`:
 
 ```bash
-docker exec ctox-db psql -U netnav -d netnav -c "
+docker exec ctox-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
   INSERT INTO extension_tokens (
     extension_id, token_hash, display_prefix, created_at
   ) VALUES (
@@ -137,7 +137,7 @@ To re-register, clear the extension's stored data by removing it from `chrome://
 Check whether a token is active in the database:
 
 ```bash
-docker exec ctox-db psql -U netnav -d netnav -c "
+docker exec ctox-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
   SELECT extension_id, display_prefix, is_revoked, last_used_at
   FROM extension_tokens;
 "

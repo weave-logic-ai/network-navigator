@@ -13,8 +13,11 @@ export async function detectCommunities(): Promise<CommunityResult[]> {
     return await detectCommunitiesSpectral();
   } catch (error) {
     console.warn(
-      "[communities] Spectral clustering failed, falling back to company grouping:",
-      error instanceof Error ? error.message : error
+      `[graph/communities] RuVector spectral clustering failed; falling back to ` +
+        `attribute-based grouping (company/industry name, not real topology — see ` +
+        `docs/plans/graph-architecture.md "What's Broken"). Which engine produced ` +
+        `the current clusters is only visible here: ` +
+        (error instanceof Error ? error.message : String(error))
     );
     return await detectCommunitiesCompany();
   }
@@ -43,7 +46,10 @@ async function detectCommunitiesSpectral(): Promise<CommunityResult[]> {
   );
 
   if (edgesRes.rows.length < 10) {
-    console.log("[communities] Too few real edges for spectral clustering");
+    console.warn(
+      `[graph/communities] Only ${edgesRes.rows.length} real edges found — too few for ` +
+        `spectral clustering; falling back to attribute-based grouping instead.`
+    );
     return await detectCommunitiesCompany();
   }
 
@@ -78,7 +84,10 @@ async function detectCommunitiesSpectral(): Promise<CommunityResult[]> {
   const assignments = clusterRes.rows[0]?.ruvector_spectral_cluster || [];
 
   if (assignments.length === 0) {
-    console.log("[communities] Spectral clustering returned empty assignments");
+    console.warn(
+      `[graph/communities] ruvector_spectral_cluster returned no assignments; ` +
+        `falling back to attribute-based grouping instead.`
+    );
     return await detectCommunitiesCompany();
   }
 

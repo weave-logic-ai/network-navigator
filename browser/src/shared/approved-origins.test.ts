@@ -15,6 +15,7 @@ import {
   addApprovedOrigins,
   removeApprovedOrigins,
   syncApprovedOriginsFromChrome,
+  revokeOrigin,
 } from './approved-origins.ts';
 
 interface FakeChrome {
@@ -26,9 +27,11 @@ interface FakeChrome {
   };
   permissions: {
     getAll: () => Promise<{ origins?: string[] }>;
+    remove: (perms: { origins?: string[] }) => Promise<boolean>;
   };
   __store: Record<string, unknown>;
   __setCalls: number;
+  __removeCalls: Array<{ origins?: string[] }>;
 }
 
 function makeFakeChrome(initial: Record<string, unknown> = {}): FakeChrome {
@@ -36,6 +39,7 @@ function makeFakeChrome(initial: Record<string, unknown> = {}): FakeChrome {
   const fake: FakeChrome = {
     __store: store,
     __setCalls: 0,
+    __removeCalls: [],
     storage: {
       local: {
         get(key, cb) {
@@ -50,6 +54,10 @@ function makeFakeChrome(initial: Record<string, unknown> = {}): FakeChrome {
     permissions: {
       async getAll() {
         return { origins: [] };
+      },
+      async remove(perms) {
+        fake.__removeCalls.push(perms);
+        return true;
       },
     },
   };
@@ -196,4 +204,52 @@ test('syncApprovedOriginsFromChrome handles an undefined origins array', async (
   fake.permissions.getAll = async () => ({});
   const result = await syncApprovedOriginsFromChrome();
   assert.deepEqual(result, []);
+});
+
+// ADR-028 clause 6 — revoke UI (sidebar "Revoke" button routes through this
+// single entry point rather than calling chrome.permissions.remove and
+// writing chrome.storage.local.approvedOrigins separately).
+
+test('revokeOrigin calls chrome.permissions.remove with the given origin', async () => {
+  fake.__store.approvedOrigins = ['https://revoke-me.com/*'];
+  await revokeOrigin('https://revoke-me.com/*');
+  assert.equal(fake.__removeCalls.length, 1);
+  assert.deepEqual(fake.__removeCalls[0], { origins: ['https://revoke-me.com/*'] });
+});
+
+test('revokeOrigin drops the origin from the mirror after a successful native remove', async () => {
+  fake.__store.approvedOrigins = ['https://keep.com/*', 'https://revoke-me.com/*'];
+  const result = await revokeOrigin('https://revoke-me.com/*');
+  assert.deepEqual(result, ['https://keep.com/*']);
+  assert.deepEqual(fake.__store.approvedOrigins, ['https://keep.com/*']);
+});
+
+test('revokeOrigin canonicalizes the origin when updating the mirror', async () => {
+  // The native permissions.remove call uses whatever pattern the caller
+  // passed (mirroring permissions.request's contract); the mirror update
+  // still canonicalizes via removeApprovedOrigins so a wildcard-scheme
+  // origin still matches an https-form mirror entry.
+  fake.__store.approvedOrigins = ['https://legacy.com/*'];
+  const result = await revokeOrigin('*://legacy.com/*');
+  assert.deepEqual(result, []);
+});
+
+test('revokeOrigin leaves the mirror untouched when chrome.permissions.remove throws', async () => {
+  fake.__store.approvedOrigins = ['https://survives.com/*'];
+  fake.permissions.remove = async () => {
+    throw new Error('permissions API unavailable');
+  };
+  const result = await revokeOrigin('https://survives.com/*');
+  assert.deepEqual(result, ['https://survives.com/*']);
+  assert.equal(fake.__setCalls, 0, 'a failed native revoke must not touch the mirror');
+});
+
+test('revokeOrigin is a no-op on the mirror when the origin was never approved', async () => {
+  fake.__store.approvedOrigins = ['https://keep.com/*'];
+  const result = await revokeOrigin('https://not-there.com/*');
+  assert.deepEqual(result, ['https://keep.com/*']);
+  assert.equal(fake.__setCalls, 0);
+  // The native call still fires — a permission could exist natively without
+  // ever having been mirrored (e.g. granted before this feature shipped).
+  assert.equal(fake.__removeCalls.length, 1);
 });

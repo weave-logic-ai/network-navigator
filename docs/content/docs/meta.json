@@ -14,6 +14,8 @@
     "---Integrations---",
     "integrations/...",
     "---API Reference---",
-    "api-reference/..."
+    "api-reference/...",
+    "---Operations---",
+    "operations/..."
   ]
 }

@@ -616,6 +616,24 @@ chrome.permissions.onAdded.addListener(async (perms) => {
 });
 
 // ============================================================
+// Commands (ADR-028 clause 4 — Snip mode opt-in hotkey)
+// ============================================================
+//
+// `chrome.commands` only fires in the extension's background context, so the
+// side panel can't register the hotkey itself. Relay it as a runtime message;
+// the side panel (if open) flips its own session-scoped snip-mode state. If
+// no side panel is open there is nothing to toggle, so the "receiving end
+// does not exist" rejection is expected and swallowed.
+chrome.commands.onCommand.addListener((command) => {
+  if (command !== 'toggle-snip-mode') return;
+  chrome.runtime
+    .sendMessage({ type: 'TOGGLE_SNIP_MODE' } satisfies ExtensionMessage)
+    .catch(() => {
+      // No side panel listening — ignore.
+    });
+});
+
+// ============================================================
 // WebSocket Event Handlers
 // ============================================================
 

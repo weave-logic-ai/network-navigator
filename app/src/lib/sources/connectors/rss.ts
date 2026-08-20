@@ -13,7 +13,8 @@
 //      and write a source_records row with source_type='rss'.
 //   4. Compute per_item_multiplier: 1.0 default; bump to 1.2 when the item's
 //      canonicalized link has been seen in ≥ 2 other feeds in the last 30
-//      days (cross-feed republication signal per ADR-030).
+//      days (cross-feed republication signal per ADR-030), composed with the
+//      recency modifier (item age; see `./recency-modifier.ts`).
 //
 // Gated on `RESEARCH_FLAGS.sources` AND the per-connector
 // `RESEARCH_CONNECTOR_RSS === 'true'` env flag.
@@ -21,6 +22,7 @@
 import { gatedFetch, writeSourceRecord } from '../service';
 import { query } from '../../db/client';
 import { canonicalizeUrl } from '../url-normalize';
+import { applyRecencyModifier, RECENCY_PRESETS } from './recency-modifier';
 import type {
   SourceConnector,
   RssInput,
@@ -327,10 +329,13 @@ export const rssConnector: SourceConnector<RssInput> = {
         continue;
       }
       const sourceId = `${feedUrl}::${item.guid ?? canonicalLink}`;
-      const perItemMultiplier = await computeRepublicationMultiplier(
-        ctx.tenantId,
-        canonicalLink,
-        feedUrl
+      // ADR-030 per-item multiplier: cross-feed republication (engagement
+      // proxy) composed with the recency modifier (item age). No citation
+      // count (unbuilt) or manual override (handled by ADR-032, not here).
+      const perItemMultiplier = applyRecencyModifier(
+        await computeRepublicationMultiplier(ctx.tenantId, canonicalLink, feedUrl),
+        item.pubDate,
+        RECENCY_PRESETS.rss
       );
 
       const metadata = {

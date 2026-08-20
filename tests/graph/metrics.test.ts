@@ -1,5 +1,94 @@
 // Tests for graph metrics computation
 
+jest.mock('@/lib/db/queries/graph', () => ({
+  getAllEdges: jest.fn(),
+  getDegreeCounts: jest.fn(),
+  upsertGraphMetrics: jest.fn(),
+  listGraphMetrics: jest.fn(),
+}));
+
+jest.mock('@/lib/graph/ruvector-sync', () => ({
+  syncContactsGraph: jest.fn(),
+  computeRuVectorPageRank: jest.fn(),
+  computeRuVectorCentrality: jest.fn(),
+  ensureEdgeIndex: jest.fn(),
+}));
+
+import * as graphQueries from '@/lib/db/queries/graph';
+import * as ruvectorSync from '@/lib/graph/ruvector-sync';
+import { computeAllMetrics } from '@/lib/graph/metrics';
+
+const mockEnsureEdgeIndex = ruvectorSync.ensureEdgeIndex as jest.MockedFunction<
+  typeof ruvectorSync.ensureEdgeIndex
+>;
+const mockSyncContactsGraph = ruvectorSync.syncContactsGraph as jest.MockedFunction<
+  typeof ruvectorSync.syncContactsGraph
+>;
+const mockListGraphMetrics = graphQueries.listGraphMetrics as jest.MockedFunction<
+  typeof graphQueries.listGraphMetrics
+>;
+const mockGetAllEdges = graphQueries.getAllEdges as jest.MockedFunction<
+  typeof graphQueries.getAllEdges
+>;
+const mockGetDegreeCounts = graphQueries.getDegreeCounts as jest.MockedFunction<
+  typeof graphQueries.getDegreeCounts
+>;
+
+describe('computeAllMetrics (RuVector-first with Node.js fallback)', () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('uses the RuVector result without falling back when the sync succeeds', async () => {
+    mockEnsureEdgeIndex.mockResolvedValueOnce(undefined);
+    mockSyncContactsGraph.mockResolvedValueOnce(new Map());
+    mockListGraphMetrics.mockResolvedValueOnce({
+      data: [
+        {
+          contactId: 'c1',
+          pagerank: 0.5,
+          betweennessCentrality: 0.1,
+          closenessCentrality: null,
+          degreeCentrality: 2,
+          eigenvectorCentrality: null,
+          clusteringCoefficient: null,
+          computedAt: new Date().toISOString(),
+        },
+      ],
+      total: 1,
+    } as Awaited<ReturnType<typeof graphQueries.listGraphMetrics>>);
+
+    const result = await computeAllMetrics();
+
+    expect(result).toHaveLength(1);
+    expect(mockGetAllEdges).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to Node.js computation and logs which engine served the request when RuVector sync fails', async () => {
+    mockEnsureEdgeIndex.mockResolvedValueOnce(undefined);
+    mockSyncContactsGraph.mockRejectedValueOnce(new Error('graph engine unavailable'));
+    mockGetDegreeCounts.mockResolvedValueOnce(new Map());
+    // computeAllMetricsNodeJS calls getAllEdges from both computePageRank and
+    // computeBetweenness — stub every call, not just the first.
+    mockGetAllEdges.mockResolvedValue([]);
+
+    const result = await computeAllMetrics();
+
+    expect(result).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('[graph/metrics]');
+    expect(warnSpy.mock.calls[0][0]).toContain('falling back to the Node.js');
+  });
+});
+
 describe('Graph Metrics', () => {
   describe('PageRank computation', () => {
     it('should initialize equal ranks', () => {

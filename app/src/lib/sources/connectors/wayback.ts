@@ -13,9 +13,13 @@
 //      the high-value "director departed" path per §4 of 05-source-expansion.md.
 //
 // `per_item_multiplier` decays with snapshot age — newer snapshots are more
-// trustworthy per the composite-weight model (ADR-030). The source_field_values
-// write happens only for the LinkedIn-auto-reparse path (since we don't parse
-// arbitrary HTML at fetch time).
+// trustworthy per the composite-weight model (ADR-030). This IS the ADR-030
+// "recency modifier" signal (see `./recency-modifier.ts` for the general
+// version other connectors use); Wayback has no engagement or citation data
+// to compose it with, so recency alone is correct and complete here — an
+// archived static page copy carries no view/share counts. The
+// source_field_values write happens only for the LinkedIn-auto-reparse path
+// (since we don't parse arbitrary HTML at fetch time).
 
 import crypto from 'crypto';
 import { gatedFetch, writeSourceRecord, SourceFetchError } from '../service';

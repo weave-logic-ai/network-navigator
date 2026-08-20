@@ -89,6 +89,23 @@ Banner wiring:
   `source.mismatch` impulse type exists. See the update note at the top of
   this file.
   (`06-evidence-and-provenance.md` §10, lines 230-232)
+  **AMENDED 2026-08-20 — the impulse is withdrawn, not deferred.** Investigation
+  during implementation established that an impulse cannot work here, for a
+  reason more fundamental than "no handler is registered":
+  field-conflicts are computed **on demand inside the GET handler**
+  (`detectFieldConflictsForEntity`, called synchronously). There is no
+  ingestion-time moment at which a newly-computed projection "disagrees" —
+  the banner's own fetch *is* the computation. An impulse emitted at that
+  point would fire after the response carrying the conflict had already been
+  sent, so it could never arrive before the data the banner needs.
+  Adding the type anyway would either sit unregistered and log a dispatcher
+  warning on every conflict detection (see `048-seed-impulse-handlers.sql`
+  and the zero-handler warning in `ecc/impulses/dispatcher.ts`), or be bound
+  to a handler type — task_generator / notification / webhook — none of which
+  means "tell an open browser tab to re-render", producing tasks or outbound
+  HTTP nobody asked for purely to justify the type's existence.
+  **The REST fetch-on-mount is therefore the accepted trigger mechanism**, and
+  is architecturally correct for this codebase rather than a stopgap.
 - ~~Render: a target-page component consumes the impulse and shows the
   banner inline with the affected field. Dismissing the banner without
   clearing the override is allowed — the banner re-appears when another
@@ -107,7 +124,9 @@ Banner wiring:
   surfacing the conflict keeps the user in the loop.
 - **Single UX for both conflict families**. User-override-vs-source and
   source-vs-source both raise banners; dev cost is one component, not two
-  flows. (`06-evidence-and-provenance.md` §10, `source.mismatch`)
+  flows. (`06-evidence-and-provenance.md` §10 — note that section's
+  `source.mismatch` impulse was withdrawn on 2026-08-20; see the Decision
+  section. The single-component benefit stands regardless of trigger.)
 - **Override ergonomics preserved**. The one-click "Clear override" path is
   the shortest possible revert — no deep settings page, no form.
 - **Composable with ADR-030's composite weighting**. Whichever source the

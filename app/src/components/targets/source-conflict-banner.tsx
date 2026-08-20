@@ -15,6 +15,18 @@
 // The banner is a client component; it fetches once and caches on mount.
 // Parent pages pass the `targetId` (research_targets.id) and a list of
 // field names to surface.
+//
+// Dismissal persistence (ADR-032 gap-2 fix): dismissing a banner POSTs to
+// `/api/targets/[id]/banner-state` with a fingerprint of the current
+// candidate-value set (see `fingerprintOf` below — must stay in sync with
+// `conflictFingerprint()` in `lib/targets/banner-state-service.ts`, which
+// this client component cannot import directly since that module pulls in
+// the `pg` pool). A dismissal only suppresses the banner while the stored
+// fingerprint still matches the live conflict; once a new source changes
+// the candidate set, the banner reappears even though the dismissal row is
+// still there — this is what makes the ADR's fatigue mitigation ("banners
+// re-appear on a new source arrival, not on every page load") deliberate
+// rather than an accident of a per-page-load in-memory `useState`.
 
 "use client";
 
@@ -72,6 +84,20 @@ export interface SourceConflictBannerProps {
 
 const DEFAULT_FIELDS = ["title", "company", "location", "headline"];
 
+/**
+ * Order-independent fingerprint of a conflict's candidate values. Must stay
+ * in sync with `conflictFingerprint()` in
+ * `lib/targets/banner-state-service.ts` — duplicated here (rather than
+ * imported) because that module pulls in the `pg` connection pool via
+ * `lib/db/client`, which cannot be bundled into a client component.
+ */
+function fingerprintOf(candidates: DisagreementCandidate[]): string {
+  return candidates
+    .map((c) => c.value)
+    .sort()
+    .join(" ");
+}
+
 function summarizeConflict(
   fieldName: string,
   result: DisagreementResult,
@@ -101,7 +127,10 @@ export function SourceConflictBanner({
   const [loading, setLoading] = useState<boolean>(true);
   const [conflicts, setConflicts] = useState<ConflictsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  // fieldName -> fingerprint the user last dismissed. Loaded from
+  // `/banner-state` on mount so dismissal survives a refresh; a field is
+  // only treated as dismissed while its live fingerprint still matches.
+  const [dismissed, setDismissed] = useState<Record<string, string>>({});
   const [modal, setModal] = useState<DisagreementResult | null>(null);
 
   const fieldKey = useMemo(() => fields.join(","), [fields]);
@@ -110,16 +139,33 @@ export function SourceConflictBanner({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/targets/${encodeURIComponent(targetId)}/field-conflicts?fields=${encodeURIComponent(fieldKey)}`,
-        { cache: "no-store" }
-      );
-      if (res.status === 404) {
+      const [conflictsRes, dismissalsRes] = await Promise.all([
+        fetch(
+          `/api/targets/${encodeURIComponent(targetId)}/field-conflicts?fields=${encodeURIComponent(fieldKey)}`,
+          { cache: "no-store" }
+        ),
+        fetch(`/api/targets/${encodeURIComponent(targetId)}/banner-state`, {
+          cache: "no-store",
+        }),
+      ]);
+      if (conflictsRes.status === 404) {
         setConflicts(null);
         return;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setConflicts((await res.json()) as ConflictsResponse);
+      if (!conflictsRes.ok) throw new Error(`HTTP ${conflictsRes.status}`);
+      setConflicts((await conflictsRes.json()) as ConflictsResponse);
+
+      if (dismissalsRes.ok) {
+        const body = (await dismissalsRes.json()) as {
+          dismissals: { fieldName: string; conflictFingerprint: string }[];
+        };
+        const next: Record<string, string> = {};
+        for (const d of body.dismissals) next[d.fieldName] = d.conflictFingerprint;
+        setDismissed(next);
+      }
+      // A non-ok banner-state fetch (e.g. flag off, transient error) just
+      // means no persisted dismissals are known this load — banners show,
+      // which is the safe default (never silently hide a conflict).
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -134,9 +180,30 @@ export function SourceConflictBanner({
   const conflictingFields = useMemo(() => {
     if (!conflicts) return [] as DisagreementResult[];
     return Object.values(conflicts.conflicts).filter(
-      (r) => r.hasConflict && !dismissed.has(r.fieldName)
+      (r) =>
+        r.hasConflict &&
+        dismissed[r.fieldName] !== fingerprintOf(r.candidates)
     );
   }, [conflicts, dismissed]);
+
+  const dismissField = useCallback(
+    (c: DisagreementResult) => {
+      const fingerprint = fingerprintOf(c.candidates);
+      // Optimistic local update so the banner disappears immediately.
+      setDismissed((prev) => ({ ...prev, [c.fieldName]: fingerprint }));
+      fetch(`/api/targets/${encodeURIComponent(targetId)}/banner-state`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fieldName: c.fieldName, fingerprint }),
+      }).catch(() => {
+        // Best-effort: if persistence fails, the banner still hides for
+        // this session (the optimistic update above already applied) but
+        // will reappear on next reload. That degrades to the pre-fix
+        // behavior rather than losing the user's dismiss action outright.
+      });
+    },
+    [targetId]
+  );
 
   if (loading) return null;
   if (error) return null;
@@ -165,13 +232,7 @@ export function SourceConflictBanner({
           </Button>
           <button
             aria-label="Dismiss"
-            onClick={() =>
-              setDismissed((prev) => {
-                const next = new Set(prev);
-                next.add(c.fieldName);
-                return next;
-              })
-            }
+            onClick={() => dismissField(c)}
             className="text-yellow-700 hover:text-yellow-900"
           >
             <X className="h-4 w-4" />

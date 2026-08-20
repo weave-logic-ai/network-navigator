@@ -180,6 +180,7 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
   const desiredIndustries = (criteria.industries as string[]) || [];
   const desiredSignals = (criteria.signals as string[]) || [];
   const desiredKeywords = (criteria.nicheKeywords as string[]) || [];
+  const desiredCompanySizeRanges = (criteria.companySizeRanges as string[]) || [];
 
   // Load niche name
   let nicheName = "";
@@ -228,6 +229,28 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
   const sharedSignals = desiredSignals.filter((s) =>
     fuzzyIncludes(s, naturalIcp.signals)
   );
+
+  // Company size mismatch: `companySizeRanges` is a controlled vocabulary of
+  // range buckets (e.g. "10-50", "51-200" — see taxonomy/seed.ts and
+  // icp-fit.ts, which do this exact same `.includes()` comparison at the
+  // per-contact level), not free text, so an exact match is correct here —
+  // no fuzzy/alias matching like industries or signals need.
+  //
+  // Only flagged true when BOTH sides express an opinion: the desired ICP
+  // names size ranges AND the Natural ICP was able to compute at least one
+  // from the network (naturalIcp.companySizeRanges, aggregated in
+  // natural-icp.ts from companies.size_range on contacts' current
+  // companies). That column is not populated by the LinkedIn CSV import
+  // itself (which carries no company-headcount data) — it's filled in by
+  // enrichment or manual entry — so on an install with no size-enriched
+  // companies this stays false, same as before, but for an honest "no data
+  // yet" reason rather than being permanently hardcoded.
+  const companySizeMismatch =
+    desiredCompanySizeRanges.length > 0 &&
+    naturalIcp.companySizeRanges.length > 0 &&
+    !desiredCompanySizeRanges.some((r) =>
+      naturalIcp.companySizeRanges.includes(r)
+    );
 
   // Alignment score: 0-100, matching the UI's "{score}%" display and the
   // shadcn <Progress> component's [0, 100] value range.
@@ -331,7 +354,7 @@ export async function runGapAnalysis(): Promise<GapAnalysisResult> {
       missingRoles,
       missingSignals,
       missingNicheKeywords,
-      companySizeMismatch: false,
+      companySizeMismatch,
     },
     strengths: {
       sharedIndustries,
