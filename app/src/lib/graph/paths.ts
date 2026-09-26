@@ -1,5 +1,5 @@
 // Path finding - warm introduction paths via edge traversal
-// RuVector native (real-edge graph) with a Node.js BFS (all-edge graph) fallback.
+// RuVector native with a Node.js BFS over real relationship edges as fallback.
 
 import * as graphQueries from '../db/queries/graph';
 import {
@@ -18,12 +18,10 @@ import { PathResult } from './types';
  *
  * Tries RuVector's native `ruvector_shortest_path` first, which runs over the
  * curated "contacts" graph (real relationship edges only — see
- * ruvector-sync.ts). Falls back to a Node.js BFS over the full `edges` table
- * (which includes synthetic mutual-proximity edges) when RuVector can't
- * answer — e.g. the graph hasn't been synced yet, or the DB call fails.
- * That means a fallback result can differ from the RuVector result: it
- * searches a noisier, larger edge set. The fallback is always logged so
- * it's possible to tell which engine actually served a given call.
+ * ruvector-sync.ts). Falls back to a Node.js BFS over non-synthetic contact
+ * edges when RuVector can't answer — e.g. the graph hasn't been synced yet,
+ * or the DB call fails. The fallback is always logged so it's possible to
+ * tell which engine actually served a given call.
  */
 export async function findPath(
   sourceId: string,
@@ -35,8 +33,7 @@ export async function findPath(
   } catch (error) {
     console.warn(
       `[graph/paths] ruvector_shortest_path failed for ${sourceId} -> ${targetId} ` +
-        `(graph "${GRAPH_NAME}"); falling back to Node.js BFS over the full edges ` +
-        `table (includes synthetic mutual-proximity edges, not just real relationships): ` +
+        `(graph "${GRAPH_NAME}"); falling back to Node.js BFS over non-synthetic contact edges: ` +
         (error instanceof Error ? error.message : String(error))
     );
     return await findPathNodeJS(sourceId, targetId, maxDepth);
@@ -106,15 +103,14 @@ async function findPathRuVector(
 }
 
 /**
- * Node.js fallback: BFS on the edges table (all edge types, including
- * synthetic ones).
+ * Node.js fallback: BFS on non-synthetic contact edges.
  */
 async function findPathNodeJS(
   sourceId: string,
   targetId: string,
   maxDepth: number
 ): Promise<PathResult | null> {
-  const edges = await graphQueries.getAllEdges();
+  const edges = await graphQueries.getAllEdges({ realEdgesOnly: true });
   if (edges.length === 0) return null;
 
   // Build undirected adjacency list with edge metadata

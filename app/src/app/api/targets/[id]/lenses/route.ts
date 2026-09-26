@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   listLensesForTarget,
+  getActiveLensForTarget,
   createLensForTarget,
 } from '@/lib/targets/lens-service';
 import { getTargetById, getCurrentOwnerProfileId } from '@/lib/targets/service';
@@ -26,7 +27,8 @@ export async function GET(
       return NextResponse.json({ error: 'Target not found' }, { status: 404 });
     }
     const lenses = await listLensesForTarget(id);
-    return NextResponse.json({ data: lenses });
+    const activeLens = await getActiveLensForTarget(id);
+    return NextResponse.json({ data: lenses, activeLensId: activeLens?.id ?? null });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to list lenses', details: error instanceof Error ? error.message : undefined },

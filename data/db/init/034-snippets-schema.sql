@@ -22,14 +22,14 @@
 -- -------------------------------------------------------------------------
 -- Stored inline as bytea for now; a future migration moves large bodies to
 -- object storage. Dedup on (tenant_id, sha256) — the same logo twice is one
--- row. 1 MB cap is server-enforced; the CHECK here is a belt-and-braces safe
--- limit (note: Postgres bytea TOASTs automatically, so this is not a
--- performance concern for typical crop sizes).
+-- row. The 5 MB cap matches the server and extension; the CHECK provides
+-- a database safeguard. Postgres bytea TOASTs automatically, so this is not
+-- a performance concern for typical crop sizes.
 CREATE TABLE IF NOT EXISTS snippet_blobs (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id    UUID NOT NULL REFERENCES tenants(id),
   mime_type    TEXT NOT NULL,
-  byte_length  INTEGER NOT NULL CHECK (byte_length > 0 AND byte_length <= 1048576),
+  byte_length  INTEGER NOT NULL CHECK (byte_length > 0 AND byte_length <= 5242880),
   sha256       BYTEA NOT NULL,
   data         BYTEA NOT NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),

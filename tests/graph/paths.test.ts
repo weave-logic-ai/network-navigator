@@ -122,10 +122,12 @@ describe('findPath (RuVector-first with Node.js BFS fallback)', () => {
       edges: [{ from: 'contact-a', to: 'contact-b', edgeType: 'CONNECTED_TO', weight: 1 }],
     });
     expect(mockGetAllEdges).toHaveBeenCalledTimes(1);
+    expect(mockGetAllEdges).toHaveBeenCalledWith({ realEdgesOnly: true });
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain('[graph/paths]');
     expect(warnSpy.mock.calls[0][0]).toContain('falling back to Node.js BFS');
   });
+
 });
 
 describe('rankByRelevance (personalized PageRank)', () => {
@@ -158,6 +160,7 @@ describe('rankByRelevance (personalized PageRank)', () => {
       { id: 'C', score: 0.15 },
     ]);
     expect(warnSpy).not.toHaveBeenCalled();
+    expect(mockGetAllEdges).toHaveBeenCalledWith();
   });
 
   it('falls back to Node.js power-iteration PPR and logs it when RuVector fails', async () => {

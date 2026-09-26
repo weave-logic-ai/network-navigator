@@ -117,10 +117,14 @@ describe('/api/graph/sigma-data cluster id', () => {
     expect(allSql).toMatch(/FROM cluster_memberships cm/);
     expect(allSql).toMatch(/ORDER BY cm\.membership_score DESC/);
     expect(allSql).toMatch(/LIMIT 1/);
+    expect(allSql).toMatch(/LEFT JOIN contact_scores cs ON cs\.contact_id = c\.id/);
+    expect(allSql).toMatch(/cs\.tier/);
+    expect(allSql).toMatch(/cs\.composite_score/);
+    expect(allSql).not.toMatch(/c\.tier|c\.composite_score/);
   });
 
   it('still attaches clusterId on the nicheId-filtered path', async () => {
-    setupMockQuery();
+    const mockQuery = setupMockQuery();
     const { GET } = await import('@/app/api/graph/sigma-data/route');
     const req = new Request(
       'http://x/api/graph/sigma-data?limit=10&nicheId=niche-1',
@@ -134,6 +138,11 @@ describe('/api/graph/sigma-data cluster id', () => {
       (n: { key: string }) => n.key === 'c1'
     );
     expect(alice.attributes.clusterId).toBe('cluster-a');
+    const nodesSql = mockQuery.mock.calls.map((c) => String(c[0]))
+      .find((sql) => sql.includes('cluster_memberships'));
+    expect(nodesSql).toMatch(/FROM contact_icp_fits cif/);
+    expect(nodesSql).toMatch(/JOIN icp_profiles ip ON ip\.id = cif\.icp_profile_id/);
+    expect(nodesSql).not.toMatch(/niche_memberships/);
   });
 });
 

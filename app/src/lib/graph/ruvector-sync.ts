@@ -48,8 +48,9 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
     degree: number;
     composite_score: number | null;
   }>(
-    `SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score
+    `SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score
      FROM contacts c
+     LEFT JOIN contact_scores cs ON cs.contact_id = c.id
      WHERE c.is_archived = FALSE`
   );
 

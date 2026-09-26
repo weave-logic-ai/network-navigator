@@ -218,6 +218,10 @@ export function SigmaGraph({
             try {
               graph.addEdgeWithKey(edge.key, edge.source, edge.target, {
                 ...edge.attributes,
+                // Sigma's `type` selects a drawing program, not the domain
+                // relationship (e.g. CONNECTED_TO or MESSAGED).
+                relationshipType: edge.attributes.type,
+                type: "line",
                 size: Math.max(0.5, edge.attributes.weight),
                 color: "#e2e8f0",
               });

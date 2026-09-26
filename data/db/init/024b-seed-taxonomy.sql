@@ -1,6 +1,7 @@
 -- 024b-seed-taxonomy.sql
 -- Seed data: Fractional CTO taxonomy (industries, niches, offerings, ICPs)
--- Safe to re-run (uses ON CONFLICT DO NOTHING)
+-- Safe to re-run: unique seed keys use ON CONFLICT, while offerings (which
+-- have no unique name constraint) use a NOT EXISTS guard.
 
 -- ============================================================
 -- Industries
@@ -140,14 +141,17 @@ ON CONFLICT (industry_id, name) DO NOTHING;
 -- ============================================================
 -- Offerings
 -- ============================================================
-INSERT INTO offerings (name, description, sort_order) VALUES
+INSERT INTO offerings (name, description, sort_order)
+SELECT seed.name, seed.description, seed.sort_order
+FROM (VALUES
   ('Technical Strategy & Roadmap', 'Architecture review, technology selection, build-vs-buy analysis, and 90-day technical roadmap', 1),
   ('Engineering Team Build-Out', 'Hiring plan, candidate vetting, team structure design, engineering culture, CTO/VP Eng onboarding', 2),
   ('Due Diligence & Technical Assessment', 'Code audits, architecture reviews, security posture for investors, acquirers, or boards', 3),
   ('Cloud & DevOps Modernization', 'Cloud migration, CI/CD pipeline design, cost optimization, observability, disaster recovery', 4),
   ('Product & Platform Architecture', 'System design for scale, API strategy, data architecture, microservices, tech debt remediation', 5),
   ('Security & Compliance Program', 'SOC 2 readiness, HIPAA/PCI compliance, security architecture, incident response, vendor risk', 6)
-ON CONFLICT (name) DO NOTHING;
+) AS seed(name, description, sort_order)
+WHERE NOT EXISTS (SELECT 1 FROM offerings existing WHERE existing.name = seed.name);
 
 -- ============================================================
 -- ICPs (one per niche — generic fractional CTO buyer persona)
@@ -194,4 +198,5 @@ INSERT INTO icp_profiles (name, description, niche_id, criteria) VALUES
     '{"roles":["CEO","COO","VP Operations","Director of IT","Plant Manager"],"industries":["manufacturing","industrial","supply chain"],"companySizeRanges":["51-200","201-500"],"signals":["digital twin","predictive maintenance","IIoT","edge computing","automation"],"minConnections":50}'),
   ('Nonprofit Tech Leaders', 'Executive directors modernizing nonprofit technology',
     (SELECT id FROM niche_profiles WHERE name='Nonprofit Tech Modernization'),
-    '{"roles":["Executive Director","CEO","COO","Director of Technology","CTO"],"industries":["nonprofit","social impact","philanthropy"],"companySizeRanges":["10-50","51-200"],"signals":["CRM migration","Salesforce","digital transformation","grant management"],"minConnections":30}');
+    '{"roles":["Executive Director","CEO","COO","Director of Technology","CTO"],"industries":["nonprofit","social impact","philanthropy"],"companySizeRanges":["10-50","51-200"],"signals":["CRM migration","Salesforce","digital transformation","grant management"],"minConnections":30}')
+ON CONFLICT DO NOTHING;

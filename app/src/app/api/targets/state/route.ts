@@ -17,6 +17,7 @@ import {
   getTargetById,
 } from '@/lib/targets/service';
 import { invalidateForOwner } from '@/lib/graph/data-cache';
+import { pushTargetHistory } from '@/lib/targets/history-service';
 
 export async function GET() {
   try {
@@ -56,7 +57,19 @@ export async function PUT(request: NextRequest) {
       }
     }
 
+    const previous = await getResearchTargetState(ownerId);
     const state = await setSecondaryTarget(ownerId, body.secondaryTargetId ?? null);
+    if (state?.secondaryTargetId && previous?.secondaryTargetId !== state.secondaryTargetId) {
+      await pushTargetHistory(ownerId, {
+        targetId: state.secondaryTargetId,
+        lensId: null,
+        openedAt: new Date().toISOString(),
+      }).catch((error) => {
+        // History is a navigation cache; its failure must not make a
+        // successful target-state write look like a failed request.
+        console.warn('[targets/state] Could not record target history:', error);
+      });
+    }
     // Phase 4 Track I: invalidate the /api/graph/data cache for this owner
     // so the re-rooted graph reflects the new secondary immediately.
     invalidateForOwner(ownerId);

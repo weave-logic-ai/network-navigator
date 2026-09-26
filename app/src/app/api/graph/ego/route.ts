@@ -84,8 +84,11 @@ export async function GET(request: NextRequest) {
       current_company: string | null;
       title: string | null;
     }>(
-      `SELECT id, full_name, tier, degree, composite_score, current_company, title
-       FROM contacts WHERE id = ANY($1)`,
+      `SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
+              c.current_company, c.title
+       FROM contacts c
+       LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+       WHERE c.id = ANY($1)`,
       [allIds]
     );
 

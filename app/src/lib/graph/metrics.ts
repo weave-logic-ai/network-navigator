@@ -58,7 +58,7 @@ export async function computePageRank(
   dampingFactor: number = 0.85,
   iterations: number = 20
 ): Promise<Map<string, number>> {
-  const edges = await graphQueries.getAllEdges();
+  const edges = await graphQueries.getAllEdges({ realEdgesOnly: true });
   if (edges.length === 0) return new Map();
 
   const outLinks = new Map<string, Set<string>>();
@@ -116,7 +116,7 @@ export async function computePageRank(
 export async function computeBetweenness(
   sampleSize: number = 50
 ): Promise<Map<string, number>> {
-  const edges = await graphQueries.getAllEdges();
+  const edges = await graphQueries.getAllEdges({ realEdgesOnly: true });
   if (edges.length === 0) return new Map();
 
   const adj = new Map<string, Set<string>>();
@@ -208,7 +208,7 @@ export async function computeBetweenness(
  * Node.js fallback: compute all metrics and store them.
  */
 async function computeAllMetricsNodeJS(): Promise<GraphMetrics[]> {
-  const degreeCounts = await graphQueries.getDegreeCounts();
+  const degreeCounts = await graphQueries.getDegreeCounts({ realEdgesOnly: true });
   const pageranks = await computePageRank();
   const betweenness = await computeBetweenness();
 

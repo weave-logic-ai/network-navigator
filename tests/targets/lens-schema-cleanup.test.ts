@@ -346,3 +346,32 @@ describe('lens-service read path after 045', () => {
     expect(defaultWrites).toEqual([]);
   });
 });
+
+describe('GET target lenses active state', () => {
+  it('returns the resolved active lens even when the default is different', async () => {
+    jest.resetModules();
+    const lenses = [
+      { id: 'lens-default', isDefault: true },
+      { id: 'lens-preferred', isDefault: false },
+    ];
+    jest.doMock('@/lib/targets/service', () => ({
+      getTargetById: jest.fn().mockResolvedValue({ id: 'target-1' }),
+    }));
+    jest.doMock('@/lib/targets/lens-service', () => ({
+      listLensesForTarget: jest.fn().mockResolvedValue(lenses),
+      getActiveLensForTarget: jest.fn().mockResolvedValue(lenses[1]),
+    }));
+
+    const { GET } = await import('@/app/api/targets/[id]/lenses/route');
+    const response = await GET(
+      {} as import('next/server').NextRequest,
+      { params: Promise.resolve({ id: 'target-1' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: lenses,
+      activeLensId: 'lens-preferred',
+    });
+  });
+});

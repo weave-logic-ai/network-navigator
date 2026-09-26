@@ -118,13 +118,17 @@ export function TargetBreadcrumbs({
 
   const handleClearSecondary = useCallback(async () => {
     try {
-      await fetch("/api/targets/state", {
+      const response = await fetch("/api/targets/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ secondaryTargetId: null }),
       });
+      if (!response.ok) return;
       setSecondaryLabel(null);
       setSecondaryId(null);
+      window.dispatchEvent(new CustomEvent("research-target-changed", {
+        detail: { secondaryTargetId: null },
+      }));
     } catch {
       // Silent — state hasn't changed, user can retry.
     }
@@ -135,11 +139,15 @@ export function TargetBreadcrumbs({
     const prior = history[1];
     if (!prior) return;
     try {
-      await fetch("/api/targets/state", {
+      const response = await fetch("/api/targets/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ secondaryTargetId: prior.targetId }),
       });
+      if (!response.ok) return;
+      window.dispatchEvent(new CustomEvent("research-target-changed", {
+        detail: { secondaryTargetId: prior.targetId },
+      }));
       // Best-effort resolve for optimistic UI update.
       try {
         const targetRes = await fetch(`/api/targets?id=${prior.targetId}`);

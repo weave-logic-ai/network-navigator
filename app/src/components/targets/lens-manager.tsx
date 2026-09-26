@@ -21,7 +21,6 @@ import { buildLensShareUrls } from "@/lib/targets/lens-url";
 interface LensDto {
   id: string;
   name: string;
-  isDefault: boolean;
   createdAt: string;
   config: Record<string, unknown>;
 }
@@ -69,6 +68,7 @@ export function LensManager({
   currentConfig,
 }: LensManagerProps) {
   const [lenses, setLenses] = useState<LensDto[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingName, setSavingName] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -78,8 +78,9 @@ export function LensManager({
     try {
       const res = await fetch(`/api/targets/${primaryTargetId}/lenses`);
       if (!res.ok) return;
-      const json = (await res.json()) as { data: LensDto[] };
+      const json = (await res.json()) as { data: LensDto[]; activeLensId: string | null };
       setLenses(json.data ?? []);
+      setActiveId(json.activeLensId);
     } catch {
       /* silent */
     } finally {
@@ -94,9 +95,10 @@ export function LensManager({
   const handleActivate = useCallback(
     async (lensId: string) => {
       try {
-        await fetch(`/api/targets/${primaryTargetId}/lenses/${lensId}/activate`, {
+        const res = await fetch(`/api/targets/${primaryTargetId}/lenses/${lensId}/activate`, {
           method: "PUT",
         });
+        if (!res.ok) return;
         await load();
         onChanged?.();
       } catch {
@@ -225,7 +227,7 @@ export function LensManager({
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{lens.name}</span>
-                  {lens.isDefault ? (
+                  {lens.id === activeId ? (
                     <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase text-primary">
                       Active
                     </span>

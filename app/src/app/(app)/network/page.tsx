@@ -52,6 +52,15 @@ export default function NetworkPage() {
     };
   }, []);
 
+  useEffect(() => {
+    const onTargetChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ secondaryTargetId: string | null }>).detail;
+      setRootTargetId(detail?.secondaryTargetId ?? null);
+    };
+    window.addEventListener("research-target-changed", onTargetChanged);
+    return () => window.removeEventListener("research-target-changed", onTargetChanged);
+  }, []);
+
   const handleCompute = useCallback(async () => {
     setComputing(true);
     try {

@@ -20,6 +20,8 @@ jest.mock('@/lib/db/client', () => ({
 }));
 
 import { query } from '@/lib/db/client';
+import fs from 'fs';
+import path from 'path';
 import {
   upsertBlob,
   getBlob,
@@ -30,6 +32,8 @@ import {
 } from '@/lib/snippets/blob-store';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
+const schemaSql = fs.readFileSync(path.resolve(__dirname, '../../data/db/init/034-snippets-schema.sql'), 'utf8');
+const migrationSql = fs.readFileSync(path.resolve(__dirname, '../../data/db/init/052-snippet-blob-size-limit.sql'), 'utf8');
 
 function mockRows<T>(rows: T[]): ReturnType<typeof query> {
   return Promise.resolve({
@@ -73,6 +77,11 @@ describe('decodeAndValidateImage', () => {
     expect(() => decodeAndValidateImage(oversized, 'image/jpeg')).toThrow(/5 MB/);
   });
 
+  it('accepts a payload exactly at the 5 MB cap', () => {
+    const maxSize = Buffer.alloc(MAX_IMAGE_BYTES, 0xaa).toString('base64');
+    expect(decodeAndValidateImage(maxSize, 'image/jpeg').byteLength).toBe(MAX_IMAGE_BYTES);
+  });
+
   it('rejects an empty string payload', () => {
     expect(() => decodeAndValidateImage('', 'image/png')).toThrow(/non-empty/);
   });
@@ -83,6 +92,15 @@ describe('decodeAndValidateImage', () => {
       'image/png',
       'image/webp',
     ]);
+  });
+});
+
+describe('snippet blob database size limit', () => {
+  it('keeps fresh installs and the forward migration at the app limit', () => {
+    expect(MAX_IMAGE_BYTES).toBe(5 * 1024 * 1024);
+    expect(schemaSql).toMatch(new RegExp(`byte_length\\s+INTEGER NOT NULL CHECK \\(byte_length > 0 AND byte_length <= ${MAX_IMAGE_BYTES}\\)`));
+    expect(migrationSql).toMatch(/BEGIN;[\s\S]*DROP CONSTRAINT IF EXISTS snippet_blobs_byte_length_check;[\s\S]*ADD CONSTRAINT snippet_blobs_byte_length_check[\s\S]*COMMIT;/);
+    expect(migrationSql).toContain(`CHECK (byte_length > 0 AND byte_length <= ${MAX_IMAGE_BYTES})`);
   });
 });
 
@@ -143,6 +161,19 @@ describe('upsertBlob — dedup contract', () => {
       upsertBlob({ tenantId: 'tenant-1', mimeType: 'image/png', bytes: oversized })
     ).rejects.toThrow(/cap/);
     expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('inserts a blob exactly at the 5 MB cap', async () => {
+    mockQuery
+      .mockImplementationOnce(() => mockRows([]))
+      .mockImplementationOnce(() => mockRows([{ id: 'blob-max' }]));
+    const out = await upsertBlob({
+      tenantId: 'tenant-1',
+      mimeType: 'image/png',
+      bytes: Buffer.alloc(MAX_IMAGE_BYTES, 0xaa),
+    });
+    expect(out.byteLength).toBe(MAX_IMAGE_BYTES);
+    expect(mockQuery.mock.calls[1][1]?.[2]).toBe(MAX_IMAGE_BYTES);
   });
 
   it('rejects unsupported mime types without hitting the DB', async () => {

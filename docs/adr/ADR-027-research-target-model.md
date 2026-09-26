@@ -1,27 +1,20 @@
 # ADR-027: Research target model — one self per owner, primary/secondary split, primary immutable for v1
 
-**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+**Status**: Accepted (date: 2026-04-17) — **Implementation note updated: 2026-09-25**
 
-> **Update 2026-08-19**: The graph re-rooting mechanism named below
-> (`?rootTargetId=<secondary>`) was never built under that name, and what
-> *was* built for it is unwired. The actual implementation is
-> `?primaryTargetId=<uuid>` on `GET /api/graph/data`
-> (`app/src/app/api/graph/data/route.ts:3-19`, WS-4 Phase 1 Track B — the
-> route's own header comment notes the name mismatch against the sprint
-> planning doc). It is fully implemented server-side: re-root SQL against
-> indexed columns, an LRU cache keyed on it, and cache-invalidation wiring
-> from the targets-state and lens-activation endpoints. But it is dead
-> code — the only caller of `/api/graph/data` anywhere in the app is
-> `app/src/components/network/network-graph.tsx:128`, which fetches
-> `/api/graph/data?limit=300` and never passes `primaryTargetId`. No UI
-> currently drives secondary-target re-centering through this endpoint.
-> Worth noting: there is a second, entirely separate graph endpoint,
-> `GET /api/graph/sigma-data` (`app/src/app/api/graph/sigma-data/route.ts`),
-> called by `app/src/components/network/sigma-graph.tsx:125`. It accepts
-> `limit`, `nicheId`, `edgeTypes`, `minPagerank`, and
-> `includeProvenanceEdges` — no target-id parameter of any kind — so this
-> second, actively-used graph view has no re-rooting capability at all,
-> built or unbuilt. See the annotated Consequences bullet below.
+> **Implementation note (2026-09-25, checked against the current checkout):**
+> The live Graph tab reads `secondaryTargetId` from `/api/targets/state` in
+> `app/src/app/(app)/network/page.tsx` and passes it to `SigmaGraph`.
+> `app/src/components/network/sigma-graph.tsx` requests
+> `/api/graph/sigma-data?primaryTargetId=<secondary>`. The parameter name is
+> historical and does **not** permit changing the immutable primary/self.
+> `sigma-data` currently re-roots only `kind='contact'`; company and self
+> targets fall through to the default PageRank view. A plain node click selects
+> a node, while shift-click sets it as the secondary and re-roots. The older
+> `/api/graph/data` also accepts `primaryTargetId`, but its `NetworkGraph`
+> caller does not pass one and is not the live Graph tab. The decision below
+> remains the intended behavior; company focus and the wider app's target
+> scoping remain delivery gaps tracked in `08-phased-delivery.md`.
 
 ## Context
 
@@ -79,26 +72,25 @@ optional secondary that auto-centers the UI. Concretely:
   unchanged; a user logs in and sees exactly what they saw pre-migration
   because their primary target is themselves.
   (`04-targets-and-graph.md` §8, lines 209-210)
-- Research workflow works as described by the operator: pick a secondary, the
-  app reorients around that person/company, self becomes the comparison.
+- Intended research workflow: pick a secondary, the app reorients around that
+  person/company, and self becomes the comparison. Current code is partial;
+  see the implementation note and delivery backlog.
 - Migration is a single insert per `owner_profiles` row plus a state backfill —
   no branching read paths in existing code.
-- ~~Scoring / ECC / graph endpoints take an optional `?rootTargetId=<secondary>`;
-  primary is inferred from the session user. Endpoints that already work stay
-  working without the parameter.~~ **Correction 2026-08-19**: only
-  `/api/graph/data` implements this, under the name `?primaryTargetId=`, and
-  no caller passes it — see the update note at the top of this file.
-  (`04-targets-and-graph.md` §3, §9)
+- Graph endpoints use the historical `?primaryTargetId=<secondary>` name;
+  `sigma-data` is wired to the live Graph tab for contact targets. This is
+  partial implementation of the secondary re-center decision, not a change
+  to primary-target semantics. (`04-targets-and-graph.md` §3, §9)
 
 ### Negative
 
-- Users who want to "become someone else" for a research session cannot today.
-  They must use the secondary-target + comparison-lens workaround and accept
-  that scoring / provenance still attribute writes to their own self-target.
-  This is called out as a known future-sprint item.
-- Comparison UI has to handle the visual-swap case (the `[Compare]` toggle
-  flips primary/secondary roles for one card) — more UI states than a passive
-  bookmark would have required.
+- Users who want to "become someone else" for a research session cannot
+  change primary in v1. They set a secondary; target-aware scoring paths can
+  accept its ID, but the dashboard cards still read owner-scoped data. Do not
+  treat the two-column layout alone as a completed target comparison.
+- Comparison UI must show self against the focused secondary where the card
+  supports a meaningful comparison. The planned per-card `[Compare]` control
+  is an acceptance item, not a shipped capability.
 - `research_target_state` carries redundant columns during v1 because
   `primary_target_id` is derivable from `user_id` → `owner_profiles.id` →
   self-target. We keep the column for forward compatibility with the
@@ -106,8 +98,9 @@ optional secondary that auto-centers the UI. Concretely:
 
 ### Neutral
 
-- `research_target_icps` continues to be the place where "different lenses on
-  the same self" lives. No change to that table.
+- `research_target_icps` has a `lens_id` column from migration 046, while
+  active scoring still reads ICP IDs from `research_lenses.config`. The
+  canonical mapping and migration behavior remain an open delivery item.
 - Target history / breadcrumbs only record secondary switches in v1 (primary
   never changes for a user). History schema still supports `role='primary'` for
   forward compatibility.

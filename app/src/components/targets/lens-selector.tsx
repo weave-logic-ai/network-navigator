@@ -13,7 +13,6 @@ import { LensManager } from "./lens-manager";
 interface LensDto {
   id: string;
   name: string;
-  isDefault: boolean;
   createdAt: string;
   config: Record<string, unknown>;
 }
@@ -32,10 +31,9 @@ export function LensSelector({ primaryTargetId }: LensSelectorProps) {
     try {
       const res = await fetch(`/api/targets/${primaryTargetId}/lenses`);
       if (!res.ok) return;
-      const json = (await res.json()) as { data: LensDto[] };
+      const json = (await res.json()) as { data: LensDto[]; activeLensId: string | null };
       setLenses(json.data ?? []);
-      const current = json.data?.find((l) => l.isDefault) ?? json.data?.[0];
-      setActiveId(current?.id ?? null);
+      setActiveId(json.activeLensId);
     } catch {
       // Silent — selector is additive UI and tolerates fetch failures.
     }
@@ -62,21 +60,19 @@ export function LensSelector({ primaryTargetId }: LensSelectorProps) {
       if (!nextId || nextId === activeId) return;
       setPending(true);
       try {
-        await fetch(
+        const res = await fetch(
           `/api/targets/${primaryTargetId}/lenses/${nextId}/activate`,
           { method: "PUT" }
         );
-        setActiveId(nextId);
-        setLenses((prev) =>
-          prev.map((l) => ({ ...l, isDefault: l.id === nextId }))
-        );
+        if (!res.ok) return;
+        await load();
       } catch {
         // Silent — user can retry.
       } finally {
         setPending(false);
       }
     },
-    [primaryTargetId, activeId]
+    [primaryTargetId, activeId, load]
   );
 
   const showSelect = lenses.length >= 2;

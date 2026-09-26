@@ -1,7 +1,7 @@
 // Research Tools Sprint — WS-4 Phase 4 Track H: secondary-target history
 // ring-buffer.
 //
-// Each time the user changes the secondary target, the UI pushes a small
+// Each time the user changes the secondary target, the state endpoint pushes a small
 // `(targetId, lensId, openedAt)` entry onto this ring-buffer. The buffer is
 // stored as a JSONB array on `research_target_state.history` (migration 043)
 // and capped at 20 entries — the cap is enforced here at write time, not by

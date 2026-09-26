@@ -83,6 +83,10 @@ describe('computeAllMetrics (RuVector-first with Node.js fallback)', () => {
     const result = await computeAllMetrics();
 
     expect(result).toEqual([]);
+    expect(mockGetDegreeCounts).toHaveBeenCalledWith({ realEdgesOnly: true });
+    expect(mockGetAllEdges).toHaveBeenCalledTimes(2);
+    expect(mockGetAllEdges).toHaveBeenNthCalledWith(1, { realEdgesOnly: true });
+    expect(mockGetAllEdges).toHaveBeenNthCalledWith(2, { realEdgesOnly: true });
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain('[graph/metrics]');
     expect(warnSpy.mock.calls[0][0]).toContain('falling back to the Node.js');

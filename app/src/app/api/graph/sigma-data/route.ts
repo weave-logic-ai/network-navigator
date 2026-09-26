@@ -128,11 +128,12 @@ export async function GET(request: NextRequest) {
                WHERE source_contact_id = $1 OR target_contact_id = $1
              )
         )
-        SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score,
+        SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
                gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
         FROM contacts c
         INNER JOIN neighborhood n ON n.id = c.id
+        LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
         ${clusterJoin}
         WHERE c.is_archived = FALSE
@@ -142,13 +143,20 @@ export async function GET(request: NextRequest) {
       nodesParams.push(rootContactId, minPagerank, limit);
     } else if (nicheId) {
       nodesQuery = `
-        SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score,
+        SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
                gm.pagerank, gm.betweenness_centrality,
                nm.niche_id, top_cluster.cluster_id
         FROM contacts c
+        LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
-        LEFT JOIN niche_memberships nm ON nm.contact_id = c.id AND nm.niche_id = $${paramIdx}
+        LEFT JOIN LATERAL (
+          SELECT ip.niche_id
+          FROM contact_icp_fits cif
+          JOIN icp_profiles ip ON ip.id = cif.icp_profile_id
+          WHERE cif.contact_id = c.id AND ip.niche_id = $${paramIdx}
+          LIMIT 1
+        ) nm ON true
         ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $${paramIdx + 1}
@@ -157,10 +165,11 @@ export async function GET(request: NextRequest) {
       nodesParams.push(nicheId, minPagerank, limit);
     } else {
       nodesQuery = `
-        SELECT c.id, c.full_name, c.tier, c.degree, c.composite_score,
+        SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
                gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
         FROM contacts c
+        LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
         ${clusterJoin}
         WHERE c.is_archived = FALSE

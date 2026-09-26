@@ -374,7 +374,7 @@ America/Toronto, all inside the wake window:
 | News sweep | daily 07:00 | `POST /api/sources/cron/news-sweep` | `X-Cron-Secret` |
 | Podcast refresh | daily 08:00 | `POST /api/sources/cron/podcast-refresh` | `X-Cron-Secret` |
 | Blog discovery | weekly Mon 09:00 | `POST /api/sources/cron/blog-discovery` | `X-Cron-Secret` |
-| Parser roll-up | daily 04:00 | `POST /api/sources/cron/parser-rollup` | `X-Cron-Secret` |
+| Parser roll-up | daily 06:15 | `POST /api/sources/cron/parser-rollup` | `X-Cron-Secret` |
 | Scoring run | daily 05:30 | `POST /api/scoring/run` | none today |
 | Graph metrics + communities | daily 06:00 | `POST /api/graph/compute` | none today |
 | Goal tick (background pool) | every 2 h | `POST /api/goals/tick` | none today |
@@ -393,6 +393,13 @@ Notes that matter for wiring this up:
 - `parser-rollup` additionally 404s unless `RESEARCH_FLAGS.parserTelemetry`
   is on. A schedule against a flag-gated route returns 404, not an error —
   check the response body, not just reachability.
+- The old 04:00 roll-up slot was outside this desktop's 06:00–22:00 wake
+  window. Create the 06:15 schedule only after the bootstrap task starts the
+  stack (it still runs with `--no-stack` as of 2026-09-25), the app is healthy,
+  `RESEARCH_PARSER_TELEMETRY=true`, and `CRON_SECRET` is configured in the
+  deployment environment. Docker Compose now forwards `CRON_SECRET` to the
+  app; an unset value still fails closed. Verify one authorized 200 response
+  and the next scheduled run before calling this operational.
 - `scoring/run`, `graph/compute` and `goals/tick` carry **no auth at all**
   today. That is tolerable while the instance binds to localhost; it is not
   tolerable the moment the port is reachable. ADR-037's client-token work
