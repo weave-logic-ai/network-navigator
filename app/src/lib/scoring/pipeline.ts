@@ -183,7 +183,7 @@ export async function scoreContact(
   // handler that replaces the legacy trigger below — this call site is the
   // production wiring that task-triggers.ts's early-return assumes exists.
   emitScoringImpulses(contactId, oldScore, score, undefined, targetId).catch((err) => {
-    console.error(`[scoring] Impulse emission failed for ${contactId}:`, err);
+    console.error('[scoring] Impulse emission failed', { contactId, error: err });
   });
 
   // Generate tasks based on score transitions (fire-and-forget). Self-guards:
@@ -191,7 +191,7 @@ export async function scoreContact(
   // task-triggers.ts's misconfiguration guard for what happens if that ever
   // stops being true).
   checkAndGenerateTasks(contactId, oldScore, score, true).catch((err) => {
-    console.error(`[scoring] Task trigger failed for ${contactId}:`, err);
+    console.error('[scoring] Task trigger failed', { contactId, error: err });
   });
 
   // Compute ICP fits for all active profiles

@@ -102,7 +102,14 @@ test('redact() rewrites bare media.licdn.com URLs', () => {
     'background-image: url(https://media.licdn.com/dms/image/abc123)'
   );
   assert.ok(output.includes('https://example.invalid/licdn-redacted.png'));
-  assert.ok(!output.includes('media.licdn.com'));
+  assert.doesNotMatch(output, /https?:\/\/(?:media|static)\.licdn\.com\//i);
+});
+
+test('detectSurvivingPii() does not accept a placeholder elsewhere in a URL as redaction', () => {
+  const survivors = detectSurvivingPii(
+    'https://media.licdn.com/dms/image/private?redirect=https://example.invalid/placeholder.png'
+  );
+  assert.ok(survivors.some((survivor) => survivor.rule === 'media-licdn'));
 });
 
 test('redact() leaves text with no PII untouched (zero hits)', () => {

@@ -192,7 +192,7 @@ export async function POST(request: NextRequest) {
           getDefaultTenantId()
             .then((tenantId) => extractCrossRefsFromEnrichmentResults(id, results, tenantId))
             .catch((err) => {
-              console.error(`[cross-refs] Failed to extract cross-refs for contact ${id}:`, err);
+              console.error('[cross-refs] Failed to extract cross-refs', { contactId: id, error: err });
             });
         }
 

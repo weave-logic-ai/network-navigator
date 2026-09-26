@@ -1,6 +1,6 @@
 // Redaction rule set for LinkedIn capture fixtures.
-// Version is bumped on any change; the value is copied into .meta.json
-// so downstream tools can tell which rule-set produced a fixture.
+// Version is bumped when replacement rules change; the value is copied into
+// .meta.json so downstream tools can tell which rule-set produced a fixture.
 //
 // Rules are tuned to be aggressive: false positives are acceptable because
 // fixtures are only used to exercise parsers, never for display. Every
@@ -172,24 +172,36 @@ export function redact(input: string): { output: string; hits: Record<string, nu
   return { output: current, hits };
 }
 
-// Tokens that indicate a substring has already been redacted by this
-// ruleset.  Any match containing one of these is not considered residual
-// PII.  Kept broad because false negatives are the only real failure mode.
-const REDACTED_TOKENS = [
-  'redacted',
-  'REDACTED',
-  'Redacted',
-  'example.invalid',
-  '+1-555-000-0000',
-  'placeholder.png',
-  'licdn-redacted',
-];
-
-function looksRedacted(sample: string): boolean {
-  for (const tok of REDACTED_TOKENS) {
-    if (sample.includes(tok)) return true;
+// Only the exact replacement shape for a rule counts as redacted. A broad
+// substring check could hide a real email or URL merely because another
+// part of the match contained "redacted" or "example.invalid".
+function looksRedacted(ruleName: string, sample: string): boolean {
+  switch (ruleName) {
+    case 'img-src':
+      return /\bsrc=["']https:\/\/example\.invalid\/placeholder\.png["']$/i.test(sample);
+    case 'img-srcset':
+      return /\bsrcset=["']https:\/\/example\.invalid\/placeholder\.png 1x["']$/i.test(sample);
+    case 'linkedin-profile-slug':
+      return /^\/in\/redacted-(?:[a-f0-9]{6}|(?:cn|cx|fa|mx|mp|c|art|r|fb|v)[1-6]|slug)$/i.test(sample);
+    case 'linkedin-company-slug':
+      return /^\/company\/redacted-(?:[a-f0-9]{6}|slug)$/i.test(sample);
+    case 'email':
+      return sample === 'redacted@example.invalid';
+    case 'phone':
+      return sample === '+1-555-000-0000';
+    case 'api-key-header':
+      return /[:=]\s*REDACTED$/i.test(sample);
+    case 'name-query-arg':
+      return /=redacted$/i.test(sample);
+    case 'profile-strong-name':
+      return /^<strong\b[^>]*>Redacted Name<\/strong>$/i.test(sample);
+    case 'data-uri':
+      return sample === 'data:image/png;base64,REDACTED';
+    case 'attr-name-pattern':
+      return /^(?:aria-label|title|alt)=["']Redacted Value(?:\s+(?:profile picture|company logo|connections|degree))*["']$/i.test(sample);
+    default:
+      return false;
   }
-  return false;
 }
 
 /** Return positions of any surviving PII so the linter can flag fixtures.
@@ -209,7 +221,7 @@ export function detectSurvivingPii(input: string): Array<{ rule: string; sample:
     rule.pattern.lastIndex = 0;
     const matches = input.match(rule.pattern);
     if (!matches) continue;
-    const real = matches.find((m) => !looksRedacted(m));
+    const real = matches.find((m) => !looksRedacted(rule.name, m));
     if (real) {
       survivors.push({ rule: rule.name, sample: real.slice(0, 120) });
     }
