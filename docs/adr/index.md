@@ -21,6 +21,8 @@ their status is updated to `Superseded by ADR-NNN`.
 | [ADR-033](./ADR-033-research-mode-rollout.md) | Research-mode rollout — per-user flag plus suggestion-engine nudge | **Superseded by ADR-035 (2026-08-19)** — never implemented; drift warning retained in file |
 | [ADR-034](./ADR-034-per-component-harness-strategy.md) | Per-component harness strategy — scoring, CI, and the no-op-metric rule | Accepted (2026-08-18) |
 | [ADR-035](./ADR-035-research-mode-gating-supersedes-033.md) | Research-mode gating is per-deployment, not per-user (supersedes ADR-033) | Accepted (2026-08-19) |
+| [ADR-036](./ADR-036-editorial-engine-bounded-context.md) | The editorial engine is a new bounded context, not an extension of outreach | Proposed (2026-09-19) |
+| [ADR-037](./ADR-037-publicist-skill-pack-distribution.md) | Distribute the publicist as a manifest-generated skill pack bound to an operator-run instance | Proposed (2026-09-19) |
 
 ## Sprint grouping
 
@@ -32,6 +34,11 @@ questions in `09-open-questions.md`.
 ADR-034 is not part of that sprint; it documents the CI/harness/scoring
 architecture adopted for the repo as a whole.
 
+ADR-036 and ADR-037 open the **publicist sprint**: the editorial bounded
+context and its distribution as a skill pack. Delivery plan in
+`docs/plans/publicist-engine.md`; host design in
+`docs/plans/ruos-deployment.md`.
+
 **Caution on numbering**: MetaHarness/ruflo tooling emits its own upstream
 references such as "OIA manifest (ADR-034)" in scan output — that is a
 *different* project's ADR sequence (ruflo's), not this repo's. This
@@ -39,7 +46,7 @@ repo's ADR-034 is the one indexed above.
 
 ## Conventions
 
-- **Numbering**: zero-padded to three digits. Next available: ADR-036.
+- **Numbering**: zero-padded to three digits. Next available: ADR-038.
 - **File name**: `ADR-NNN-<kebab-slug>.md` matching the decision title.
 - **Status values**: `Proposed`, `Accepted`, `Deprecated`, `Superseded by ADR-NNN`.
 - **Dates**: ISO 8601 (YYYY-MM-DD) in the Status line.
