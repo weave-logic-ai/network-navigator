@@ -26,7 +26,7 @@ function graphResponse(response: Response): boolean {
   return response.ok() && new URL(response.url()).pathname === '/api/graph/sigma-data';
 }
 
-async function paintedGraph(page: Page, stats?: GraphStats): Promise<number> {
+async function paintedGraph(page: Page, stats?: GraphStats, priorRevision?: number): Promise<number> {
   await expect(page.getByText('Loading graph data...')).toBeHidden();
   if (stats) {
     await expect(page.getByText(
@@ -35,6 +35,10 @@ async function paintedGraph(page: Page, stats?: GraphStats): Promise<number> {
     )).toBeVisible();
   }
   await expect(page.locator('canvas').first()).toBeVisible();
+  if (priorRevision !== undefined) {
+    await expect.poll(async () => Number(await page.locator('[data-graph-revision]').getAttribute('data-graph-revision')))
+      .toBeGreaterThan(priorRevision);
+  }
   return page.evaluate(() => new Promise<number>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve(Date.now())));
   }));
@@ -50,8 +54,8 @@ async function focusWithPicker(page: Page, name: string): Promise<Sample> {
   const graphRequest = page.waitForResponse((response) =>
     graphResponse(response) && Boolean(new URL(response.url()).searchParams.get('primaryTargetId')),
   );
-  // This includes browser automation dispatch and the picker's full reload.
-  // The browser clock survives that navigation via sessionStorage.
+  const priorRevision = Number(await page.locator('[data-graph-revision]').getAttribute('data-graph-revision'));
+  // Include the picker write and the graph refresh in the same browser clock.
   await page.evaluate(() => sessionStorage.setItem('networkPerfStart', String(Date.now())));
   await result.click();
   const response = await graphRequest;
@@ -59,7 +63,7 @@ async function focusWithPicker(page: Page, name: string): Promise<Sample> {
   const apiEnd = Date.now();
   const body = await response.json() as { data?: { stats?: GraphStats } };
   expect(body.data?.stats).toBeDefined();
-  const paintEnd = await paintedGraph(page, body.data!.stats!);
+  const paintEnd = await paintedGraph(page, body.data!.stats!, priorRevision);
   const start = await page.evaluate(() => Number(sessionStorage.getItem('networkPerfStart')));
   return {
     focusMs: paintEnd - start,
@@ -84,6 +88,11 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
   expect(initialBody.data?.stats?.totalEdges ?? 0, 'Fixture must have real visible edges')
     .toBeGreaterThan(0);
 
+  const clearState = await request.put(`${baseURL}/api/targets/state`, {
+    data: { secondaryTargetId: null },
+  });
+  expect(clearState.ok(), 'Fixture must allow resetting the secondary target').toBe(true);
+
   await page.goto(`${baseURL}/network`);
   await paintedGraph(page);
   await expect(page.getByRole('navigation', { name: 'Research target breadcrumbs' })).toBeVisible();
@@ -91,8 +100,8 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
   const focus: Sample[] = [];
   const backMs: number[] = [];
   let backWithoutGraphRefresh = 0;
+  const a = await focusWithPicker(page, contactA!);
   for (let i = 0; i < iterations; i++) {
-    const a = await focusWithPicker(page, contactA!);
     const b = await focusWithPicker(page, contactB!);
     expect(a.rootId).not.toBe(b.rootId);
     focus.push(b);
@@ -105,6 +114,7 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
       graphResponse(response) && new URL(response.url()).searchParams.get('primaryTargetId') === a.rootId,
     { timeout: 3000 })
       .catch(() => null);
+    const priorRevision = Number(await page.locator('[data-graph-revision]').getAttribute('data-graph-revision'));
     const start = Date.now();
     await back.click();
     const response = await graphRequest;
@@ -115,7 +125,7 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
     await response.finished();
     const body = await response.json() as { data?: { stats?: GraphStats } };
     expect(body.data?.stats).toBeDefined();
-    const paintEnd = await paintedGraph(page, body.data!.stats!);
+    const paintEnd = await paintedGraph(page, body.data!.stats!, priorRevision);
     backMs.push(paintEnd - start);
   }
 
@@ -130,7 +140,7 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
     apiEndToPaintP95Ms: renderP95,
     backToPaintP95Ms: backMs.length === iterations ? p95(backMs) : null,
     backWithoutGraphRefresh,
-    note: 'Real API and Sigma canvas; includes picker reload and Playwright dispatch. No mock/cache-only budget claim.',
+    note: 'Real API and Sigma canvas; includes picker write and Playwright dispatch. No mock/cache-only budget claim.',
   }));
 
   expect(Math.min(...focus.map((sample) => sample.nodes))).toBeGreaterThan(0);

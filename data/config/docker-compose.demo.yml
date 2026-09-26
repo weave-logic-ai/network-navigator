@@ -1,0 +1,49 @@
+# From the repo root: docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo up -d --no-build
+# App/extension URL: http://localhost:3751. Stop with the same command and
+# `stop` in place of `up -d --no-build`; avoid `down -v` to retain demo data.
+# This stack has its own database/app-data volumes and only binds the app to localhost.
+services:
+  db:
+    container_name: ctox-demo-db
+    ports: !override []
+    volumes: !override
+      - ctox-demo-db:/var/lib/postgresql/data
+
+  app:
+    image: network-navigator-app:latest
+    container_name: ctox-demo-app
+    ports: !override
+      - "127.0.0.1:3751:3000"
+    volumes: !override
+      - ctox-demo-data:/data
+    environment:
+      PDL_API_KEY: ""
+      APOLLO_API_KEY: ""
+      LUSHA_API_KEY: ""
+      THEIRSTACK_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      CRON_SECRET: ""
+      ECC_CAUSAL_GRAPH: "false"
+      ECC_EXO_CHAIN: "false"
+      ECC_IMPULSES: "false"
+      ECC_COGNITIVE_TICK: "false"
+      ECC_CROSS_REFS: "false"
+      RESEARCH_TARGETS: "true"
+      RESEARCH_SNIPPETS: "true"
+      RESEARCH_PARSER_TELEMETRY: "true"
+      RESEARCH_SOURCES: "true"
+      RESEARCH_CONNECTOR_NEWS: "false"
+      RESEARCH_CONNECTOR_NEWS_WSJ: "false"
+      RESEARCH_CONNECTOR_NEWS_BLOOMBERG: "false"
+      RESEARCH_CONNECTOR_NEWS_REUTERS: "false"
+      RESEARCH_CONNECTOR_NEWS_TECHCRUNCH: "false"
+      RESEARCH_CONNECTOR_NEWS_CNBC: "false"
+      RESEARCH_CONNECTOR_PODCAST: "false"
+      RESEARCH_CONNECTOR_RSS: "false"
+      RESEARCH_CONNECTOR_BLOG: "false"
+      RESEARCH_CONNECTOR_GOOGLE_NEWS: "false"
+      RESEARCH_RECENCY_MODIFIER: "false"
+
+volumes:
+  ctox-demo-db:
+  ctox-demo-data:

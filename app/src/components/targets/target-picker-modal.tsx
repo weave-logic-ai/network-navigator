@@ -129,15 +129,20 @@ export function TargetPickerModal() {
       if (!createRes.ok) return;
       const createJson = (await createRes.json()) as { data: { id: string } };
       // Set as secondary
-      await fetch("/api/targets/state", {
+      const stateRes = await fetch("/api/targets/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
       });
+      if (!stateRes.ok) return;
       setOpen(false);
       setQ("");
-      // Trigger re-render of breadcrumbs via a full reload — simplest for v1.
-      window.location.reload();
+      window.dispatchEvent(new CustomEvent("research-target-changed", {
+        detail: {
+          secondaryTargetId: createJson.data.id,
+          secondaryTargetLabel: result.label,
+        },
+      }));
     } catch {
       // Silent — leave modal open so user can retry.
     }

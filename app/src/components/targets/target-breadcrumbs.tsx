@@ -61,6 +61,20 @@ export function TargetBreadcrumbs({
   const [history, setHistory] = useState<HistoryEntryDto[]>([]);
   const [hovered, setHovered] = useState(false);
 
+  useEffect(() => {
+    const onTargetChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        secondaryTargetId: string | null;
+        secondaryTargetLabel?: string | null;
+      }>).detail;
+      setSecondaryId(detail?.secondaryTargetId ?? null);
+      setSecondaryLabel(detail?.secondaryTargetLabel ?? null);
+      setHistory([]);
+    };
+    window.addEventListener("research-target-changed", onTargetChanged);
+    return () => window.removeEventListener("research-target-changed", onTargetChanged);
+  }, []);
+
   // Keep the component in sync if another tab / page updated the state.
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +89,7 @@ export function TargetBreadcrumbs({
           setSecondaryId(null);
           return;
         }
-        if (json.data.secondaryTargetId === secondaryId) return;
+        if (json.data.secondaryTargetId === secondaryId && secondaryLabel) return;
         // Resolve the new secondary label.
         const targetRes = await fetch(
           `/api/targets?id=${json.data.secondaryTargetId}`
@@ -93,7 +107,7 @@ export function TargetBreadcrumbs({
     return () => {
       cancelled = true;
     };
-  }, [secondaryId]);
+  }, [secondaryId, secondaryLabel]);
 
   // Load history when the user hovers — lazy fetch to avoid a per-page-load
   // request when the hover card would never be shown.
@@ -114,7 +128,7 @@ export function TargetBreadcrumbs({
     return () => {
       cancelled = true;
     };
-  }, [hovered, interactive]);
+  }, [hovered, interactive, secondaryId]);
 
   const handleClearSecondary = useCallback(async () => {
     try {

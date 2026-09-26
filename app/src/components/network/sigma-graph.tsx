@@ -119,7 +119,11 @@ export function SigmaGraph({
   const sigmaRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
+  const initializingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const latestDataRef = useRef<GraphData | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
+  const [graphRevision, setGraphRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -136,7 +140,6 @@ export function SigmaGraph({
   );
 
   const loadData = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
@@ -181,12 +184,77 @@ export function SigmaGraph({
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sigmaRef.current?.kill();
+      sigmaRef.current = null;
+      graphRef.current = null;
+    };
+  }, []);
+
+  // Preserve positions and the WebGL renderer when a target changes. The
+  // initial ForceAtlas2 pass is expensive at 1,000+ nodes; running it again
+  // for the same graph made an ordinary target switch exceed the 200 ms
+  // client-observed re-center budget.
+  const applyDataToGraph = useCallback((
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph: any,
+    nextData: GraphData,
+  ) => {
+    const nodeKeys = new Set(nextData.nodes.map((node) => node.key));
+    const removedNodes: string[] = [];
+    graph.forEachNode((key: string) => {
+      if (!nodeKeys.has(key)) removedNodes.push(key);
+    });
+    for (const key of removedNodes) graph.dropNode(key);
+
+    for (const node of nextData.nodes) {
+      if (graph.hasNode(node.key)) {
+        const { x, y } = graph.getNodeAttributes(node.key);
+        graph.mergeNodeAttributes(node.key, { ...node.attributes, x, y });
+      } else {
+        graph.addNode(node.key, node.attributes);
+      }
+    }
+
+    const edgeKeys = new Set(nextData.edges.map((edge) => edge.key));
+    const removedEdges: string[] = [];
+    graph.forEachEdge((key: string) => {
+      if (!edgeKeys.has(key)) removedEdges.push(key);
+    });
+    for (const key of removedEdges) graph.dropEdge(key);
+
+    for (const edge of nextData.edges) {
+      if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
+      const attributes = {
+        ...edge.attributes,
+        relationshipType: edge.attributes.type,
+        type: "line",
+        size: Math.max(0.5, edge.attributes.weight),
+        color: "#e2e8f0",
+      };
+      if (graph.hasEdge(edge.key)) {
+        graph.mergeEdgeAttributes(edge.key, attributes);
+      } else {
+        graph.addEdgeWithKey(edge.key, edge.source, edge.target, attributes);
+      }
+    }
+  }, []);
+
   // Initialize Sigma when data arrives — all imports are dynamic
   useEffect(() => {
     if (!data || !containerRef.current) return;
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let sigmaInstance: any = null;
+    latestDataRef.current = data;
+    if (sigmaRef.current && graphRef.current) {
+      applyDataToGraph(graphRef.current, data);
+      sigmaRef.current.refresh();
+      setGraphRevision((revision) => revision + 1);
+      return;
+    }
+    if (initializingRef.current) return;
+    initializingRef.current = true;
 
     const init = async () => {
       try {
@@ -199,39 +267,9 @@ export function SigmaGraph({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const graph = new (Graph as any)({ multi: true, type: "directed" });
 
-        // Add nodes
-        for (const node of data.nodes) {
-          if (!graph.hasNode(node.key)) {
-            graph.addNode(node.key, {
-              ...node.attributes,
-              label: node.attributes.label,
-            });
-          }
-        }
-
-        // Add edges
-        for (const edge of data.edges) {
-          if (
-            graph.hasNode(edge.source) &&
-            graph.hasNode(edge.target)
-          ) {
-            try {
-              graph.addEdgeWithKey(edge.key, edge.source, edge.target, {
-                ...edge.attributes,
-                // Sigma's `type` selects a drawing program, not the domain
-                // relationship (e.g. CONNECTED_TO or MESSAGED).
-                relationshipType: edge.attributes.type,
-                type: "line",
-                size: Math.max(0.5, edge.attributes.weight),
-                color: "#e2e8f0",
-              });
-            } catch {
-              // Skip duplicate edges
-            }
-          }
-        }
-
-        graphRef.current = graph;
+        const initialData = latestDataRef.current;
+        if (!initialData || !mountedRef.current) return;
+        applyDataToGraph(graph, initialData);
 
         // Run ForceAtlas2 layout
         try {
@@ -242,7 +280,7 @@ export function SigmaGraph({
             settings: {
               gravity: 1,
               scalingRatio: 10,
-              barnesHutOptimize: graph.order > 1000,
+              barnesHutOptimize: graph.order >= 1000,
               strongGravityMode: false,
               outboundAttractionDistribution: true,
               adjustSizes: true,
@@ -253,7 +291,8 @@ export function SigmaGraph({
         }
 
         // Create Sigma renderer
-        sigmaInstance = new Sigma(graph, containerRef.current!, {
+        if (!mountedRef.current || !containerRef.current) return;
+        const sigmaInstance = new Sigma(graph, containerRef.current, {
           renderLabels: true,
           labelRenderedSizeThreshold: 8,
           labelSize: 12,
@@ -264,7 +303,7 @@ export function SigmaGraph({
           maxCameraRatio: 10,
         });
 
-        // Click handler. Plain click selects/re-roots (existing behavior);
+        // Click handler. Plain click selects a node;
         // shift-click sets the clicked node as the SECONDARY research target
         // (WS-4 §3.2). The picker modal handles regular "pick a target" flows,
         // so shift-click is the graph-native shortcut — no modal appears.
@@ -282,9 +321,7 @@ export function SigmaGraph({
           if (isShift) {
             // Fire-and-forget; POST creates (or fetches) the contact target
             // row, then PUT writes it as `secondary_target_id`. Silent on
-            // failure — we still flash the node so the user sees the
-            // interaction landed client-side, and the breadcrumb will
-            // refresh on next state poll.
+            // failure — the amber flash confirms the click was received.
             //
             // ADR-027: setting the secondary re-centers the graph, so once
             // the target row exists we re-root on it optimistically (no
@@ -294,6 +331,12 @@ export function SigmaGraph({
               if (result.ok && result.secondaryTargetId) {
                 setActiveRootTargetId(result.secondaryTargetId);
                 onRootTargetIdChange?.(result.secondaryTargetId);
+                window.dispatchEvent(new CustomEvent("research-target-changed", {
+                  detail: {
+                    secondaryTargetId: result.secondaryTargetId,
+                    secondaryTargetLabel: attrs.label,
+                  },
+                }));
               }
             });
 
@@ -328,27 +371,22 @@ export function SigmaGraph({
         });
 
         sigmaRef.current = sigmaInstance;
+        graphRef.current = graph;
+        if (latestDataRef.current && latestDataRef.current !== initialData) {
+          applyDataToGraph(graph, latestDataRef.current);
+          sigmaInstance.refresh();
+        }
+        setGraphRevision((revision) => revision + 1);
       } catch (err) {
         console.error("[sigma-graph] Failed to initialize:", err);
-        setError("Failed to initialize graph renderer");
+        if (mountedRef.current) setError("Failed to initialize graph renderer");
+      } finally {
+        initializingRef.current = false;
       }
     };
 
-    init();
-
-    return () => {
-      if (sigmaInstance) {
-        try {
-          sigmaInstance.kill();
-        } catch {
-          // Ignore cleanup errors
-        }
-        sigmaInstance = null;
-      }
-      sigmaRef.current = null;
-      graphRef.current = null;
-    };
-  }, [data, onNodeClick, onRootTargetIdChange]);
+    void init();
+  }, [data, onNodeClick, onRootTargetIdChange, applyDataToGraph]);
 
   // Search + shift-click flash + cluster highlight: the single node reducer
   // combines all three signals so the amber flash survives even when a
@@ -446,7 +484,7 @@ export function SigmaGraph({
   }
 
   return (
-    <div className="space-y-2 p-2">
+    <div className="space-y-2 p-2" data-graph-revision={graphRevision}>
       {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
