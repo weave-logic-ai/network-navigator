@@ -21,6 +21,45 @@ async function getEmbedder() {
   return pipelinePromise;
 }
 
+/** Shape of the feature-extraction pipeline once loaded. */
+type Embedder = (
+  texts: string[],
+  options?: Record<string, unknown>
+) => Promise<{ tolist: () => number[][] }>;
+
+/**
+ * Embed a single piece of text using the same model, pooling and
+ * normalization as the stored profile embeddings, so that a query vector and
+ * a stored vector are comparable. Used by hybrid search.
+ *
+ * The pipeline is lazy-loaded and cached process-wide by getEmbedder(), so the
+ * first call pays model initialization and later calls do not.
+ */
+export async function embedText(text: string): Promise<number[]> {
+  const [vector] = await embedTexts([text]);
+  if (!vector || vector.length === 0) {
+    throw new Error('Embedding model returned an empty vector');
+  }
+  return vector;
+}
+
+/**
+ * Embed several texts in one pass. Preferred over repeated `embedText` calls
+ * when embedding a batch — the model runs once over the whole array.
+ * Returned vectors are in the same order as the input.
+ */
+export async function embedTexts(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const embedder = (await getEmbedder()) as Embedder;
+  const output = await embedder(texts, { pooling: 'mean', normalize: true });
+  return output.tolist();
+}
+
+/** Render a vector as the array literal a `ruvector` column accepts. */
+export function toRuvectorLiteral(vector: number[]): string {
+  return `[${vector.join(',')}]`;
+}
+
 function buildSourceText(contact: {
   headline?: string | null;
   title?: string | null;
@@ -81,7 +120,7 @@ export async function generateAllEmbeddings(
 
   onProgress?.({ phase: 'embeddings', current: 0, total, detail: 'Loading embedding model...' });
 
-  const embedder = await getEmbedder() as (texts: string[], options?: Record<string, unknown>) => Promise<{ tolist: () => number[][] }>;
+  const embedder = (await getEmbedder()) as Embedder;
 
   for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
     const batch = contacts.slice(i, i + BATCH_SIZE);
@@ -108,8 +147,7 @@ export async function generateAllEmbeddings(
         const vector = vectors[j];
 
         try {
-          // Store as ruvector using array literal
-          const vectorStr = `[${vector.join(',')}]`;
+          const vectorStr = toRuvectorLiteral(vector);
           await query(
             `INSERT INTO profile_embeddings (contact_id, embedding, source_text, model)
              VALUES ($1, $2::ruvector, $3, 'all-MiniLM-L6-v2')

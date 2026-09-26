@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
+import { embedText, toRuvectorLiteral } from '@/lib/embeddings/generator';
 
 interface ContactRow {
   id: string;
@@ -36,23 +37,51 @@ interface HybridSearchResult {
 }
 
 /**
- * Attempts hybrid search (keyword + vector). Falls back to keyword-only
- * if ruvector_embed is unavailable (e.g., outside ruvector-postgres).
+ * Attempts hybrid search (keyword + vector), falling back to keyword-only
+ * when the vector half cannot run.
+ *
+ * The query vector is computed in-process by `embedText`, using the same
+ * model, pooling and normalization that produced the stored
+ * `profile_embeddings` rows. An earlier version asked Postgres to embed the
+ * query with `ruvector_embed('all-MiniLM-L6-v2', $1)`. That function was
+ * absent from the inspected deployment image; upstream implementations also
+ * take text before model name. The broad fallback below hid the failure.
+ * Embedding in Node keeps query vectors consistent with stored vectors and
+ * avoids depending on an optional database embedding function.
  */
 async function hybridSearch(
   searchQuery: string,
   limit: number
 ): Promise<HybridSearchResult[]> {
+  let queryVector: string;
   try {
-    return await fullHybridSearch(searchQuery, limit);
+    queryVector = toRuvectorLiteral(await embedText(searchQuery));
   } catch (error) {
-    // If the vector function doesn't exist, fall back to keyword-only
+    // The model could not load or returned nothing. Keyword-only is a
+    // legitimate degraded result, but it should be visible, not silent.
+    console.warn(
+      '[hybrid-search] query embedding unavailable, falling back to keyword-only:',
+      error instanceof Error ? error.message : error
+    );
+    return keywordOnlySearch(searchQuery, limit);
+  }
+
+  try {
+    return await fullHybridSearch(searchQuery, queryVector, limit);
+  } catch (error) {
+    // Narrow, deliberate fallback: only when the vector *storage* side is
+    // unavailable (extension absent, or profile_embeddings missing). Any
+    // other failure is a real error and must not be disguised as a search
+    // result — the previous `message.includes('function')` test matched
+    // almost any Postgres error.
     const message = error instanceof Error ? error.message : '';
-    if (
-      message.includes('ruvector_embed') ||
-      message.includes('function') ||
-      message.includes('does not exist')
-    ) {
+    const vectorSideMissing =
+      /\bruvector\b/.test(message) || /\bprofile_embeddings\b/.test(message);
+    if (vectorSideMissing) {
+      console.warn(
+        '[hybrid-search] vector side unavailable, falling back to keyword-only:',
+        message
+      );
       return keywordOnlySearch(searchQuery, limit);
     }
     throw error;
@@ -61,6 +90,7 @@ async function hybridSearch(
 
 async function fullHybridSearch(
   searchQuery: string,
+  queryVector: string,
   limit: number
 ): Promise<HybridSearchResult[]> {
   const result = await query<ContactRow & {
@@ -82,9 +112,9 @@ async function fullHybridSearch(
     ),
     vector_matches AS (
       SELECT pe.contact_id AS id,
-        1 - (pe.embedding <=> ruvector_embed('all-MiniLM-L6-v2', $1)) AS vector_score
+        1 - (pe.embedding <=> $2::ruvector) AS vector_score
       FROM profile_embeddings pe
-      ORDER BY pe.embedding <=> ruvector_embed('all-MiniLM-L6-v2', $1)
+      ORDER BY pe.embedding <=> $2::ruvector
       LIMIT 50
     )
     SELECT c.*,
@@ -97,8 +127,8 @@ async function fullHybridSearch(
     WHERE (km.id IS NOT NULL OR vm.id IS NOT NULL)
       AND NOT c.is_archived
     ORDER BY fusion_score DESC
-    LIMIT $2`,
-    [searchQuery, limit]
+    LIMIT $3`,
+    [searchQuery, queryVector, limit]
   );
 
   return result.rows.map(mapHybridResult);
