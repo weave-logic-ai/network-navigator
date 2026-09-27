@@ -17,11 +17,15 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
 
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
-    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '20', 10)));
-    const sort = searchParams.get('sort') || 'created_at';
-    const order = searchParams.get('order') === 'asc' ? 'asc' : 'desc';
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '20', 10) || 20));
+    const sort = searchParams.get('sort_by') || searchParams.get('sort') || 'created_at';
+    const order = (searchParams.get('sort_order') || searchParams.get('order')) === 'asc' ? 'asc' : 'desc';
     const tier = searchParams.get('tier') || undefined;
+    const enrichmentStatus = searchParams.get('enrichment_status');
+    if (enrichmentStatus && !['has_data', 'no_data'].includes(enrichmentStatus)) {
+      return NextResponse.json({ error: 'Invalid enrichment_status' }, { status: 400 });
+    }
     const company = searchParams.get('company') || undefined;
     const search = searchParams.get('search') || undefined;
     const tagsParam = searchParams.get('tags');
@@ -35,6 +39,7 @@ export async function GET(request: NextRequest) {
       sort,
       order: order as 'asc' | 'desc',
       tier,
+      enrichmentStatus: enrichmentStatus as 'has_data' | 'no_data' | undefined,
       company,
       tags,
       search,

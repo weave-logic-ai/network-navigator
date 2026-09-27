@@ -8,6 +8,7 @@ interface ListContactsOptions {
   sort?: string;
   order?: 'asc' | 'desc';
   tier?: string;
+  enrichmentStatus?: 'has_data' | 'no_data';
   company?: string;
   tags?: string[];
   search?: string;
@@ -50,18 +51,47 @@ interface ContactRow {
   company_industry?: string | null;
   composite_score?: number | null;
   referral_likelihood?: number | null;
+  referral_tier?: string | null;
+  enrichment_status?: 'has_data' | 'no_data';
+  outreach_state?: string | null;
   tier?: string | null;
 }
 
 const ALLOWED_SORT_COLUMNS: Record<string, string> = {
   name: 'c.full_name',
+  fullName: 'COALESCE(NULLIF(c.full_name, \'\'), NULLIF(TRIM(CONCAT_WS(\' \', c.first_name, c.last_name)), \'\'))',
   first_name: 'c.first_name',
   last_name: 'c.last_name',
   company: 'c.current_company',
   score: 'cs.composite_score',
+  compositeScore: 'cs.composite_score',
+  tier: `CASE cs.tier
+    WHEN 'gold' THEN 4 WHEN 'silver' THEN 3 WHEN 'bronze' THEN 2
+    WHEN 'watch' THEN 1 WHEN 'unscored' THEN 0 END`,
+  referralTier: `CASE cs.referral_tier
+    WHEN 'gold-referral' THEN 4 WHEN 'silver-referral' THEN 3
+    WHEN 'bronze-referral' THEN 2 WHEN 'watch-referral' THEN 1 END`,
   created_at: 'c.created_at',
   updated_at: 'c.updated_at',
 };
+
+// This indicates that a lookup returned fields, not that the user applied them.
+const HAS_PERSON_ENRICHMENT = `EXISTS (
+  SELECT 1 FROM person_enrichments pe
+  WHERE pe.contact_id = c.id
+    AND COALESCE(cardinality(pe.enriched_fields), 0) > 0
+)`;
+
+// Preview lookups are included here. The enrichment apply path does not record
+// an apply receipt, so neither this query nor the UI claims a field was applied.
+const HAS_TRANSACTION_DATA = `EXISTS (
+  SELECT 1 FROM enrichment_transactions et
+  WHERE et.contact_id = c.id AND et.status = 'success'
+    AND COALESCE(cardinality(et.fields_returned), 0) > 0
+)`;
+
+// The same definition drives both list membership and the visible badge.
+const HAS_ENRICHMENT_DATA = `(${HAS_PERSON_ENRICHMENT} OR ${HAS_TRANSACTION_DATA})`;
 
 export async function listContacts(
   options: ListContactsOptions = {}
@@ -72,6 +102,7 @@ export async function listContacts(
     sort = 'created_at',
     order = 'desc',
     tier,
+    enrichmentStatus,
     company,
     tags,
     search,
@@ -96,6 +127,12 @@ export async function listContacts(
     params.push(tier);
   }
 
+  if (enrichmentStatus === 'has_data') {
+    conditions.push(HAS_ENRICHMENT_DATA);
+  } else if (enrichmentStatus === 'no_data') {
+    conditions.push(`NOT ${HAS_ENRICHMENT_DATA}`);
+  }
+
   if (company) {
     conditions.push(`c.current_company ILIKE $${paramIdx++}`);
     params.push(`%${company}%`);
@@ -108,7 +145,11 @@ export async function listContacts(
 
   if (search) {
     conditions.push(
-      `(c.full_name ILIKE $${paramIdx} OR c.headline ILIKE $${paramIdx} OR c.title ILIKE $${paramIdx} OR c.current_company ILIKE $${paramIdx})`
+      `(c.full_name ILIKE $${paramIdx} OR c.first_name ILIKE $${paramIdx}
+        OR c.last_name ILIKE $${paramIdx}
+        OR TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) ILIKE $${paramIdx}
+        OR c.headline ILIKE $${paramIdx} OR c.title ILIKE $${paramIdx}
+        OR c.current_company ILIKE $${paramIdx})`
     );
     params.push(`%${search}%`);
     paramIdx++;
@@ -153,7 +194,9 @@ export async function listContacts(
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sortColumn = ALLOWED_SORT_COLUMNS[sort] || 'c.created_at';
+  const sortColumn = Object.prototype.hasOwnProperty.call(ALLOWED_SORT_COLUMNS, sort)
+    ? ALLOWED_SORT_COLUMNS[sort]
+    : 'c.created_at';
   const sortOrder = order === 'asc' ? 'ASC' : 'DESC';
   const offset = (page - 1) * limit;
 
@@ -170,12 +213,20 @@ export async function listContacts(
   const dataParams = [...params, limit, offset];
   const dataResult = await query<ContactRow>(
     `SELECT c.*, co.name AS company_name, co.industry AS company_industry,
-            cs.composite_score, cs.referral_likelihood, cs.tier
+            cs.composite_score, cs.referral_likelihood, cs.referral_tier, cs.tier,
+            CASE WHEN ${HAS_ENRICHMENT_DATA}
+              THEN 'has_data' ELSE 'no_data' END AS enrichment_status,
+            os.state AS outreach_state
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+     LEFT JOIN LATERAL (
+       SELECT state FROM outreach_states
+       WHERE contact_id = c.id
+       ORDER BY updated_at DESC, id DESC LIMIT 1
+     ) os ON TRUE
      ${whereClause}
-     ORDER BY ${sortColumn} ${sortOrder} NULLS LAST
+     ORDER BY ${sortColumn} ${sortOrder} NULLS LAST, c.id ASC
      LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
     dataParams
   );

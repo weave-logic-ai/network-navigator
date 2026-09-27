@@ -79,12 +79,12 @@ export function ContactsTableToolbar({
         onValueChange={onEnrichmentChange}
       >
         <SelectTrigger className="w-[160px]">
-          <SelectValue placeholder="Enrichment" />
+          <SelectValue placeholder="Lookup data" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All Status</SelectItem>
-          <SelectItem value="enriched">Enriched</SelectItem>
-          <SelectItem value="pending">Pending</SelectItem>
+          <SelectItem value="all">All lookup data</SelectItem>
+          <SelectItem value="has_data">Lookup data found</SelectItem>
+          <SelectItem value="no_data">No lookup data</SelectItem>
         </SelectContent>
       </Select>
       {activeFilterCount > 0 && (

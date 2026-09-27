@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Table,
@@ -22,8 +21,14 @@ import { ContactsTablePagination } from "./contacts-table-pagination";
 import { columns } from "./contacts-table-columns";
 import type { ContactListParams } from "@/lib/types/contact";
 
+const REFERRAL_BADGES: Record<string, { label: string; className: string }> = {
+  "gold-referral": { label: "Gold referral", className: "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/30 dark:text-amber-400" },
+  "silver-referral": { label: "Silver referral", className: "bg-gray-100 text-gray-800 border-gray-300 dark:bg-gray-800/30 dark:text-gray-400" },
+  "bronze-referral": { label: "Bronze referral", className: "bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-900/30 dark:text-orange-400" },
+  "watch-referral": { label: "Watch referral", className: "bg-muted text-muted-foreground border-muted" },
+};
+
 export function ContactsTable() {
-  const router = useRouter();
   const [params, setParams] = useState<ContactListParams>({
     page: 1,
     limit: 25,
@@ -43,6 +48,7 @@ export function ContactsTable() {
   const handleSort = (key: string) => {
     setParams((prev) => ({
       ...prev,
+      page: 1,
       sortBy: key,
       sortOrder:
         prev.sortBy === key && prev.sortOrder === "asc" ? "desc" : "asc",
@@ -59,7 +65,7 @@ export function ContactsTable() {
     );
   }
 
-  if (!isLoading && contacts.length === 0) {
+  if (!isLoading && contacts.length === 0 && !params.search && !params.tier && !params.enrichmentStatus) {
     return (
       <div className="rounded-md border p-12 text-center">
         <p className="mb-4 text-muted-foreground">
@@ -87,7 +93,8 @@ export function ContactsTable() {
         enrichmentStatus={params.enrichmentStatus ?? ""}
         onEnrichmentChange={(status) =>
           updateParams({
-            enrichmentStatus: status === "all" ? undefined : status,
+            enrichmentStatus: status === "has_data" || status === "no_data"
+              ? status : undefined,
           })
         }
         onClearFilters={() =>
@@ -106,15 +113,17 @@ export function ContactsTable() {
                 <TableHead
                   key={col.key}
                   style={{ width: col.width }}
-                  className={col.sortable ? "cursor-pointer select-none" : ""}
-                  onClick={col.sortable ? () => handleSort(col.key) : undefined}
+                  className={col.sortable ? "select-none" : ""}
+                  aria-sort={col.sortable && params.sortBy === col.key
+                    ? params.sortOrder === "asc" ? "ascending" : "descending"
+                    : undefined}
                 >
-                  <div className="flex items-center gap-1">
-                    {col.label}
-                    {col.sortable && (
-                      <ArrowUpDown className="h-3 w-3 text-muted-foreground" />
-                    )}
-                  </div>
+                  {col.sortable ? (
+                    <button type="button" onClick={() => handleSort(col.key)} className="flex items-center gap-1 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
+                      {col.key === "tier" ? "Tier" : col.key === "compositeScore" ? "Score /100" : col.label}
+                      <ArrowUpDown aria-hidden="true" className="h-3 w-3 text-muted-foreground" />
+                    </button>
+                  ) : col.label}
                 </TableHead>
               ))}
             </TableRow>
@@ -130,16 +139,18 @@ export function ContactsTable() {
                     ))}
                   </TableRow>
                 ))
-              : contacts.map((contact) => (
-                  <TableRow
-                    key={contact.id}
-                    className="cursor-pointer"
-                    onClick={() => router.push(`/contacts/${contact.id}`)}
-                  >
+              : contacts.length === 0 ? (
+                  <TableRow><TableCell colSpan={columns.length} className="py-8 text-center text-muted-foreground">
+                    No contacts match these filters. Clear the filters to see all contacts.
+                  </TableCell></TableRow>
+                ) : contacts.map((contact) => (
+                  <TableRow key={contact.id}>
                     <TableCell className="font-medium">
-                      {contact.fullName ||
+                      <Link href={`/contacts/${contact.id}`} className="underline-offset-2 hover:underline focus-visible:underline">
+                        {contact.fullName ||
                         `${contact.firstName ?? ""} ${contact.lastName ?? ""}`.trim() ||
                         "Unknown"}
+                      </Link>
                     </TableCell>
                     <TableCell>
                       <div>
@@ -150,14 +161,18 @@ export function ContactsTable() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
-                      {contact.compositeScore ?? 0}
+                      {contact.compositeScore == null
+                        ? <span className="text-muted-foreground">Unknown</span>
+                        : Math.round(contact.compositeScore * 100)}
                     </TableCell>
                     <TableCell>
                       <TierBadge tier={contact.tier} />
                     </TableCell>
                     <TableCell>
-                      {contact.referralTier ? (
-                        <TierBadge tier={contact.referralTier} />
+                      {contact.referralTier && REFERRAL_BADGES[contact.referralTier] ? (
+                        <Badge variant="outline" className={`text-xs whitespace-nowrap ${REFERRAL_BADGES[contact.referralTier].className}`}>
+                          {REFERRAL_BADGES[contact.referralTier].label}
+                        </Badge>
                       ) : (
                         <span className="text-xs text-muted-foreground">-</span>
                       )}
@@ -165,13 +180,15 @@ export function ContactsTable() {
                     <TableCell>
                       <Badge
                         variant={
-                          contact.enrichmentStatus === "enriched"
+                          contact.enrichmentStatus === "has_data"
                             ? "default"
                             : "secondary"
                         }
                         className="text-xs"
                       >
-                        {contact.enrichmentStatus ?? "pending"}
+                        {contact.enrichmentStatus === "has_data"
+                          ? "Lookup data found"
+                          : contact.enrichmentStatus === "no_data" ? "No lookup data" : "Unknown"}
                       </Badge>
                     </TableCell>
                     <TableCell>

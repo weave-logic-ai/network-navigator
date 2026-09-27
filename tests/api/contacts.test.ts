@@ -1,95 +1,87 @@
-// API contacts route tests (unit-level - testing validation logic)
+import type { NextRequest } from 'next/server';
+import { buildContactsUrl } from '@/lib/api/contacts';
+import { GET } from '@/app/api/contacts/route';
+import { listContacts } from '@/lib/db/queries/contacts';
+import { query } from '@/lib/db/client';
 
-describe('Contacts API', () => {
-  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+jest.mock('@/lib/db/client', () => ({ query: jest.fn() }));
 
-  describe('UUID validation', () => {
-    it('should accept valid UUIDs', () => {
-      expect(UUID_REGEX.test('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
-      expect(UUID_REGEX.test('6ba7b810-9dad-11d1-80b4-00c04fd430c8')).toBe(true);
-    });
+const mockQuery = query as jest.MockedFunction<typeof query>;
+const request = (url: string) => ({ url }) as NextRequest;
 
-    it('should reject invalid UUIDs', () => {
-      expect(UUID_REGEX.test('not-a-uuid')).toBe(false);
-      expect(UUID_REGEX.test('123')).toBe(false);
-      expect(UUID_REGEX.test('')).toBe(false);
-      expect(UUID_REGEX.test('550e8400-e29b-41d4-a716')).toBe(false);
-    });
+describe('Contacts list contract', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('sends the table sort and filter names through the route to the query', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    const url = buildContactsUrl({ sortBy: 'referralTier', sortOrder: 'asc', enrichmentStatus: 'has_data', tier: 'gold', search: 'Ada' });
+    const response = await GET(request(`http://localhost${url}`));
+    expect(response.status).toBe(200);
+    expect(mockQuery.mock.calls[0][0]).toContain('cs.tier = $1');
+    expect(mockQuery.mock.calls[0][0]).toContain('EXISTS (\n  SELECT 1 FROM person_enrichments');
+    expect(mockQuery.mock.calls[0][1]).toEqual(['gold', '%Ada%']);
+    expect(mockQuery.mock.calls[1][0]).toContain('ORDER BY CASE cs.referral_tier');
+    expect(mockQuery.mock.calls[1][0]).toContain('WHEN \'gold-referral\' THEN 4');
   });
 
-  describe('pagination parameter validation', () => {
-    it('should clamp page to minimum 1', () => {
-      const page = Math.max(1, parseInt('-1', 10));
-      expect(page).toBe(1);
-    });
-
-    it('should clamp limit to range 1-100', () => {
-      const limit1 = Math.min(100, Math.max(1, parseInt('200', 10)));
-      expect(limit1).toBe(100);
-
-      const limit2 = Math.min(100, Math.max(1, parseInt('0', 10)));
-      expect(limit2).toBe(1);
-    });
-
-    it('should default page to 1 and limit to 20', () => {
-      const page = parseInt('', 10) || 1;
-      const limit = parseInt('', 10) || 20;
-      expect(page).toBe(1);
-      expect(limit).toBe(20);
-    });
+  it('sorts every exposed table key by a selected SQL expression', async () => {
+    for (const key of ['fullName', 'compositeScore', 'tier', 'referralTier']) {
+      mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+        .mockResolvedValueOnce({ rows: [] } as never);
+      await listContacts({ sort: key });
+      const sql = mockQuery.mock.calls.at(-1)?.[0];
+      expect(sql).toMatch(/ORDER BY (?!c\.created_at)/);
+    }
   });
 
-  describe('input sanitization', () => {
-    it('should only allow known fields for contact creation', () => {
-      const allowedFields = [
-        'linkedin_url', 'first_name', 'last_name', 'full_name', 'headline',
-        'title', 'current_company', 'current_company_id', 'location', 'about',
-        'email', 'phone', 'tags',
-      ];
+  it.each(['constructor', 'toString', '__proto__'])(
+    'uses the safe created_at fallback for inherited sort key %s',
+    async (sort) => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+        .mockResolvedValueOnce({ rows: [] } as never);
+      const response = await GET(request(`http://localhost/api/contacts?${new URLSearchParams({ sort_by: sort })}`));
+      expect(response.status).toBe(200);
+      expect(mockQuery.mock.calls[1][0]).toContain('ORDER BY c.created_at DESC NULLS LAST');
+    }
+  );
 
-      const input = {
-        linkedin_url: 'https://linkedin.com/in/test',
-        first_name: 'John',
-        malicious_field: 'DROP TABLE contacts',
-        __proto__: 'bad',
-      };
-
-      const sanitized: Record<string, unknown> = {};
-      for (const field of allowedFields) {
-        if ((input as Record<string, unknown>)[field] !== undefined) {
-          sanitized[field] = (input as Record<string, unknown>)[field];
-        }
-      }
-
-      expect(sanitized).toEqual({
-        linkedin_url: 'https://linkedin.com/in/test',
-        first_name: 'John',
-      });
-      expect(sanitized).not.toHaveProperty('malicious_field');
-      expect(Object.keys(sanitized)).not.toContain('__proto__');
-    });
-
-    it('should reject contact without linkedin_url', () => {
-      const body = { first_name: 'John', last_name: 'Doe' };
-      const isValid = body.hasOwnProperty('linkedin_url') && typeof (body as Record<string, unknown>).linkedin_url === 'string';
-      expect(isValid).toBe(false);
-    });
+  it('projects lookup data without claiming it was applied or is pending', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    await listContacts({ enrichmentStatus: 'no_data' });
+    const [count, data] = mockQuery.mock.calls.map((call) => call[0]);
+    expect(count).toContain('NOT (EXISTS (\n  SELECT 1 FROM person_enrichments');
+    expect(count).toContain('COALESCE(cardinality(pe.enriched_fields), 0) > 0');
+    expect(count).toContain('FROM enrichment_transactions et');
+    expect(count).toContain("et.status = 'success'");
+    expect(count).toContain('COALESCE(cardinality(et.fields_returned), 0) > 0');
+    expect(count).not.toContain('c.updated_at >= et.created_at');
+    expect(data).toContain('COALESCE(cardinality(pe.enriched_fields), 0) > 0');
+    expect(data).toContain('FROM enrichment_transactions et');
+    expect(data).toContain('cs.referral_tier');
+    expect(data).toContain('os.state AS outreach_state');
+    expect(data).toContain('ORDER BY updated_at DESC, id DESC LIMIT 1');
   });
 
-  describe('sort column allowlist', () => {
-    it('should only allow known sort columns', () => {
-      const allowed: Record<string, string> = {
-        name: 'c.full_name',
-        first_name: 'c.first_name',
-        last_name: 'c.last_name',
-        company: 'c.current_company',
-        score: 'cs.composite_score',
-        created_at: 'c.created_at',
-        updated_at: 'c.updated_at',
-      };
+  it('searches the first and last name used by the table fallback', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    await listContacts({ search: 'Nora Vale' });
+    const countSql = mockQuery.mock.calls[0][0];
+    expect(countSql).toContain('c.first_name ILIKE $1');
+    expect(countSql).toContain('c.last_name ILIKE $1');
+    expect(countSql).toContain("TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) ILIKE $1");
+    expect(mockQuery.mock.calls[0][1]).toEqual(['%Nora Vale%']);
+  });
 
-      expect(allowed['name']).toBe('c.full_name');
-      expect(allowed['malicious; DROP TABLE']).toBeUndefined();
-    });
+  it('rejects unsupported enrichment values and preserves legacy dashboard score sorting', async () => {
+    const invalid = await GET(request('http://localhost/api/contacts?enrichment_status=failed'));
+    expect(invalid.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    await GET(request('http://localhost/api/contacts?sort=score&order=desc'));
+    expect(mockQuery.mock.calls[1][0]).toContain('ORDER BY cs.composite_score DESC NULLS LAST');
   });
 });

@@ -46,7 +46,7 @@ export const columns: ColumnDef[] = [
   },
   {
     key: "enrichmentStatus",
-    label: "Enrichment",
+    label: "Lookup data",
     width: "120px",
     sortable: false,
     accessor: (c) => c.enrichmentStatus,

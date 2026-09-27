@@ -24,7 +24,7 @@ export interface Contact {
   compositeScore?: number | null;
   tier?: string | null;
   persona?: string | null;
-  enrichmentStatus?: string;
+  enrichmentStatus?: EnrichmentStatus;
   outreachState?: string | null;
   referralLikelihood?: number | null;
   referralTier?: string | null;
@@ -34,7 +34,8 @@ export interface Contact {
 
 export type TierValue = "gold" | "silver" | "bronze" | "watch" | null;
 
-export type EnrichmentStatus = "pending" | "enriched" | "failed";
+/** Provider lookup returned fields; this does not mean they were applied. */
+export type EnrichmentStatus = "has_data" | "no_data";
 
 export type OutreachState =
   | "not_started"
@@ -51,5 +52,5 @@ export interface ContactListParams {
   sortOrder?: "asc" | "desc";
   search?: string;
   tier?: string;
-  enrichmentStatus?: string;
+  enrichmentStatus?: EnrichmentStatus;
 }
