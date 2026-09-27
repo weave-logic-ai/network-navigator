@@ -2,7 +2,7 @@ import { getPool } from '@/lib/db/client';
 import { captureOwnerScoringBasis, previewContactForTarget, scoreBatch, scoreContact } from '@/lib/scoring/pipeline';
 import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { ECC_FLAGS } from '@/lib/ecc/types';
-import { getContactScoreBreakdown, upsertContactScore } from '@/lib/db/queries/scoring';
+import { getAllContactIds, getContactScoreBreakdown, upsertContactScore } from '@/lib/db/queries/scoring';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { CompositeScore } from '@/lib/scoring/types';
@@ -193,6 +193,10 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
       INSERT INTO research_target_icps VALUES ('${foreignTarget}', '${foreignLens}', '${icpA}');
     `);
     try {
+      expect(await getAllContactIds()).not.toContain(foreignContact);
+      const basis = await captureOwnerScoringBasis();
+      await expect(scoreContact(foreignContact, undefined, undefined, basis))
+        .rejects.toThrow(`Contact not found: ${foreignContact}`);
       await expect(previewContactForTarget(contactId, foreignTarget)).rejects.toMatchObject({ status: 404 });
       await expect(previewContactForTarget(foreignContact, targetId)).rejects.toMatchObject({ status: 404 });
       await expect(previewContactForTarget(foreignContact, foreignTarget)).rejects.toMatchObject({ status: 404 });

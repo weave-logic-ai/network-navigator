@@ -109,6 +109,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
       getWeightProfileByName: jest.fn().mockResolvedValue(null),
       getContactScoringData: jest.fn().mockResolvedValue(fullContact()),
+      isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
       getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
@@ -279,6 +280,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
       getWeightProfileByName: jest.fn().mockResolvedValue(null),
       getContactScoringData: jest.fn().mockResolvedValue(fullContact()),
+      isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
       getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
@@ -377,6 +379,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
       getWeightProfileByName: jest.fn().mockResolvedValue(null),
       getContactScoringData: jest.fn().mockResolvedValue(fullContact({ degree: 1 })),
+      isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
       getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({

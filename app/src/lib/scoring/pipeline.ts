@@ -336,6 +336,9 @@ export async function scoreContact(
     // replace a newer score after waiting for the write lock.
     const locked = await client.query('SELECT id FROM contacts WHERE id = $1 FOR UPDATE', [contactId]);
     if (locked.rows.length === 0) throw new Error(`Contact not found: ${contactId}`);
+    if (!await scoringQueries.isOwnerScorableContact(contactId, client)) {
+      throw new Error(`Contact not found: ${contactId}`);
+    }
     const contact = await scoringQueries.getContactScoringData(contactId, client);
     if (!contact) throw new Error(`Contact not found: ${contactId}`);
     const weightManager = new WeightManager(ownerBasis.weightProfile);

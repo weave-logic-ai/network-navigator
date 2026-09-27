@@ -149,9 +149,43 @@ export async function getContactScoringData(contactId: string, client?: PoolClie
   };
 }
 
+// Contacts predate tenants and have no tenant_id. A contact with an explicit
+// target belongs to the default operator only if that tenant has a contact
+// target for it. Untargeted legacy contacts remain in the default tenant's
+// scoring set; a contact targeted only by another tenant is never scored here.
+const ownerScorableContactPredicate = `EXISTS (
+  SELECT 1 FROM tenants tenant
+  JOIN owner_profiles owner ON owner.is_current = TRUE
+  JOIN research_targets self_target
+    ON self_target.tenant_id = tenant.id AND self_target.kind = 'self'
+   AND self_target.owner_id = owner.id
+  WHERE tenant.slug = 'default'
+    AND (SELECT COUNT(*) FROM owner_profiles WHERE is_current = TRUE) = 1
+    AND (
+      EXISTS (SELECT 1 FROM research_targets scoped_target
+        WHERE scoped_target.kind = 'contact'
+          AND scoped_target.contact_id = contact.id
+          AND scoped_target.tenant_id = tenant.id)
+      OR NOT EXISTS (SELECT 1 FROM research_targets any_target
+        WHERE any_target.kind = 'contact'
+          AND any_target.contact_id = contact.id)
+    )
+)`;
+
+export async function isOwnerScorableContact(contactId: string, client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ allowed: boolean }>(
+    `SELECT ${ownerScorableContactPredicate} AS allowed
+     FROM contacts contact WHERE contact.id = $1`,
+    [contactId]
+  );
+  return result.rows[0]?.allowed === true;
+}
+
 export async function getAllContactIds(): Promise<string[]> {
   const result = await query<{ id: string }>(
-    'SELECT id FROM contacts WHERE is_archived = FALSE ORDER BY created_at'
+    `SELECT contact.id FROM contacts contact
+     WHERE contact.is_archived = FALSE AND ${ownerScorableContactPredicate}
+     ORDER BY contact.created_at`
   );
   return result.rows.map(r => r.id);
 }

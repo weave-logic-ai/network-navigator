@@ -55,6 +55,7 @@ beforeEach(() => {
   RESEARCH_FLAGS.targets = true;
   ECC_FLAGS.causalGraph = false;
   mockedQueries.getContactScoringData.mockResolvedValue(contact);
+  mockedQueries.isOwnerScorableContact.mockResolvedValue(true);
   mockedQueries.getDefaultWeightProfile.mockResolvedValue(null);
   mockedQueries.getAllContactIds.mockResolvedValue([]);
   mockedQueries.getActiveIcpProfiles.mockResolvedValue([]);
