@@ -43,7 +43,28 @@ test("Choose target restores focus after Escape and selection", async ({ page })
   }));
   await page.route("**/api/companies/search?*", (route) => route.fulfill({ json: { data: [] } }));
   await page.route("**/api/targets", (route) => route.fulfill({ json: { data: { id: "target-1" } } }));
-  await page.route("**/api/targets/state", (route) => route.fulfill({ json: { data: {} } }));
+  let revision = 0;
+  let secondaryTargetId: string | null = null;
+  await page.route("**/api/targets/state", (route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON() as {
+        expectedRevision: string;
+        action: { type: string; targetId?: string | null };
+      };
+      if (body.expectedRevision !== String(revision) || body.action.type !== "focus") {
+        return route.fulfill({ status: 409, json: { error: "Context changed" } });
+      }
+      revision++;
+      secondaryTargetId = body.action.targetId ?? null;
+    }
+    return route.fulfill({ json: { data: {
+      tenantId: "fixture-tenant", userId: "fixture-owner", revision: String(revision),
+      primaryTargetId: null, secondaryTargetId, primaryLabel: "Self",
+      focusLabel: secondaryTargetId ? "Fixture Person" : null,
+      activeLensId: null, activeLensLabel: null, canGoBack: secondaryTargetId !== null,
+      warning: null, history: [],
+    } } });
+  });
   await page.keyboard.press("Enter");
   await expect(dialog).toBeVisible();
   await dialog.getByRole("textbox", { name: "Search contacts and companies" }).fill("Fixture");

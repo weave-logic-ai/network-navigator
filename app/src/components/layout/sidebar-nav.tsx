@@ -95,7 +95,7 @@ export function SidebarNav({ researchFlags }: { researchFlags: ResearchFlags }) 
 
   const sidebarContent = (
     <TooltipProvider>
-      <div className="flex h-full flex-col">
+      <div className="flex h-full min-h-0 flex-col">
         <div className="flex h-14 items-center border-b px-4">
           {!collapsed && (
             <span className="text-lg font-semibold">Prospector</span>
@@ -114,7 +114,7 @@ export function SidebarNav({ researchFlags }: { researchFlags: ResearchFlags }) 
             )}
           </Button>
         </div>
-        <ScrollArea className="flex-1 px-2 py-2">
+        <ScrollArea className="min-h-0 flex-1 px-2 py-2">
           <nav className="flex flex-col gap-1">
             {primaryNav.map((item) => (
               <SidebarNavItem key={item.href} {...item} collapsed={collapsed} onNavigate={dismissMobile} />
@@ -190,11 +190,11 @@ export function SidebarNav({ researchFlags }: { researchFlags: ResearchFlags }) 
     return (
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetTrigger asChild>
-          <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open navigation menu">
+          <Button variant="ghost" size="icon" className="shrink-0 md:hidden" aria-label="Open navigation menu">
             <PanelLeft className="h-5 w-5" />
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="w-[240px] p-0" aria-describedby={undefined}>
+        <SheetContent side="left" className="w-[min(15rem,calc(100vw-2rem))] p-0" aria-describedby={undefined}>
           <SheetTitle className="sr-only">Navigation menu</SheetTitle>
           {sidebarContent}
         </SheetContent>
@@ -205,7 +205,7 @@ export function SidebarNav({ researchFlags }: { researchFlags: ResearchFlags }) 
   return (
     <aside
       className={cn(
-        "hidden border-r bg-background md:flex md:flex-col",
+        "hidden min-h-0 shrink-0 border-r bg-background md:flex md:flex-col",
         "transition-[width] duration-200 ease-in-out",
         collapsed ? "w-16" : "w-60"
       )}
