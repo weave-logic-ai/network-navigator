@@ -6,7 +6,7 @@ import type { CapturePayload } from './types/index.ts';
 
 test('worker keeps one replay owner and reports offline, submitted, limit and missing-script outcomes', async () => {
   const storage: Record<string, unknown> = {
-    extensionToken: 'synthetic-token',
+    extensionToken: `ext_${'a'.repeat(43)}`,
     appUrl: 'http://localhost:3750',
     captureLimit: 1,
     settings: { maxQueueSize: 1 },
