@@ -20,6 +20,7 @@ import {
   WS_RECONNECT_MULTIPLIER,
 } from './constants';
 import { getToken, setConnectionState } from '../utils/storage';
+import { isFullExtensionToken } from './outreach-api';
 
 export type WsEventHandler = (event: WsMessage) => void;
 
@@ -43,7 +44,7 @@ export class AppClient {
     body?: unknown
   ): Promise<T> {
     const token = await getToken();
-    if (!token) throw new Error('No extension token configured');
+    if (!isFullExtensionToken(token)) throw new Error('Full extension token required');
 
     const response = await fetch(`${this.appUrl}${path}`, {
       method,
@@ -150,6 +151,7 @@ export class AppClient {
   async register(
     displayToken: string
   ): Promise<{ success: boolean; extensionId: string; settings: ExtensionSettings }> {
+    if (!isFullExtensionToken(displayToken)) throw new Error('Full extension token required');
     const response = await fetch(`${this.appUrl}/api/extension/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -167,7 +169,7 @@ export class AppClient {
 
   async connectWebSocket(): Promise<void> {
     const token = await getToken();
-    if (!token) {
+    if (!isFullExtensionToken(token)) {
       this._connectionState = 'disconnected';
       await setConnectionState('disconnected');
       return;

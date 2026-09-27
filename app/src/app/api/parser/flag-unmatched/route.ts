@@ -15,6 +15,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { query } from '@/lib/db/client';
 import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { recordEvent } from '@/lib/analytics/events';
+import { requireVisibilityPrincipal } from '@/lib/auth/extension-visibility-boundary';
 import {
   buildRegressionPayload,
   dispatchRegressionToGithub,
@@ -51,6 +52,8 @@ async function resolveTenantId(): Promise<string | null> {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireVisibilityPrincipal(request, true);
+  if (denied) return denied;
   if (!RESEARCH_FLAGS.parserTelemetry) {
     return NextResponse.json(
       { error: 'RESEARCH_PARSER_TELEMETRY is off' },

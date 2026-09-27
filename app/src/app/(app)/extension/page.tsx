@@ -504,9 +504,7 @@ export default function ExtensionPage() {
                         </div>
                       </div>
                       <p className="text-muted-foreground mt-1">
-                        {t.lastUsedAt
-                          ? `Last used ${formatTimeAgo(t.lastUsedAt)}`
-                          : "Never used"}
+                        {`Created ${formatTimeAgo(t.createdAt)}`}
                       </p>
                     </div>
                   ))}

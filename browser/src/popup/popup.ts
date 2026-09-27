@@ -4,6 +4,7 @@
 import type { ExtensionMessage, ExtensionTask, OutreachTemplate } from '../types';
 import { logger } from '../utils/logger';
 import { getDailyCaptureCount, getCaptureLimit } from '../utils/storage';
+import { ExtensionAuthError, fetchOutreachTemplates, isFullExtensionToken, personalizeOutreachTemplate, registerFullExtensionToken } from '../shared/outreach-api';
 
 // ============================================================
 // DOM References
@@ -186,20 +187,44 @@ function escapeHtml(text: string): string {
 // ============================================================
 
 async function checkRegistration(): Promise<boolean> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['extensionToken', 'extensionId'], (result) => {
-      const hasToken = !!result.extensionToken;
-      registerSection.style.display = hasToken ? 'none' : 'block';
-      mainSection.style.display = hasToken ? 'block' : 'none';
-      resolve(hasToken);
-    });
-  });
+  const result = await chrome.storage.local.get(['extensionToken', 'extensionId', 'appUrl']);
+  let hasToken = isFullExtensionToken(result.extensionToken);
+  let error = result.extensionToken && !hasToken
+    ? 'Saved display prefix cannot authenticate. Enter the full extension token to reconnect.'
+    : '';
+  if (hasToken) {
+    try {
+      await registerFullExtensionToken(
+        (result.appUrl as string) || 'http://localhost:3750', result.extensionToken as string
+      );
+    } catch (failure) {
+      if (failure instanceof ExtensionAuthError && failure.status === 401) {
+        hasToken = false;
+        error = 'Saved token expired or was revoked. Enter a new full token to reconnect.';
+        await chrome.storage.local.remove(['extensionToken', 'extensionId']);
+      }
+      // An offline app does not erase a stored credential.
+    }
+  }
+  registerSection.style.display = hasToken ? 'none' : 'block';
+  mainSection.style.display = hasToken ? 'block' : 'none';
+  registerError.textContent = error;
+  registerError.style.display = error ? 'block' : 'none';
+  return hasToken;
+}
+
+async function showPopupReauth(message: string): Promise<void> {
+  await chrome.storage.local.remove(['extensionToken', 'extensionId']);
+  registerSection.style.display = 'block';
+  mainSection.style.display = 'none';
+  registerError.textContent = message;
+  registerError.style.display = 'block';
 }
 
 registerBtn.addEventListener('click', async () => {
   const token = tokenInput.value.trim();
-  if (!token) {
-    registerError.textContent = 'Please enter a display token';
+  if (!isFullExtensionToken(token)) {
+    registerError.textContent = 'Enter the full extension token (ext_ followed by 43 characters).';
     registerError.style.display = 'block';
     return;
   }
@@ -214,26 +239,18 @@ registerBtn.addEventListener('click', async () => {
       });
     });
 
-    const response = await fetch(`${appUrl}/api/extension/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ displayToken: token }),
-    });
-
-    if (!response.ok) {
-      throw new Error('Invalid token');
-    }
-
-    const data = await response.json();
+    const data = await registerFullExtensionToken(appUrl, token);
     await chrome.storage.local.set({
       extensionToken: token,
       extensionId: data.extensionId,
       settings: data.settings,
     });
+    tokenInput.value = '';
 
     registerSection.style.display = 'none';
     mainSection.style.display = 'block';
     await updateStatus();
+    await loadTemplates();
   } catch (err) {
     registerError.textContent = 'Registration failed. Check your token and try again.';
     registerError.style.display = 'block';
@@ -271,6 +288,7 @@ captureBtn.addEventListener('click', () => {
 // ============================================================
 
 let loadedTemplates: OutreachTemplate[] = [];
+let templatesFromServer = false;
 
 const DEFAULT_TEMPLATES: OutreachTemplate[] = [
   {
@@ -297,6 +315,7 @@ const DEFAULT_TEMPLATES: OutreachTemplate[] = [
 ];
 
 async function loadTemplates(): Promise<void> {
+  templatesFromServer = false;
   try {
     const appUrl = await new Promise<string>((resolve) => {
       chrome.storage.local.get('appUrl', (result) => {
@@ -304,20 +323,18 @@ async function loadTemplates(): Promise<void> {
       });
     });
 
-    const response = await fetch(`${appUrl}/api/outreach/templates`, {
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.templates && data.templates.length > 0) {
-        loadedTemplates = data.templates;
-        updateTemplateSelectorOptions();
-        return;
-      }
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const templates = await fetchOutreachTemplates(appUrl, extensionToken);
+    if (templates.length > 0) {
+      loadedTemplates = templates;
+      templatesFromServer = true;
+      updateTemplateSelectorOptions();
+      return;
     }
-  } catch {
-    // API unavailable, use defaults
+  } catch (error) {
+    if (error instanceof ExtensionAuthError && error.status === 401) {
+      await showPopupReauth('Token expired or revoked. Enter a new full token to reconnect.');
+    }
   }
 
   loadedTemplates = DEFAULT_TEMPLATES;
@@ -326,6 +343,9 @@ async function loadTemplates(): Promise<void> {
 
 function updateTemplateSelectorOptions(): void {
   templateSelector.innerHTML = '<option value="">Select a template...</option>';
+  templatePreview.style.display = 'none';
+  templateActions.style.display = 'none';
+  personalizeBtn.setAttribute('disabled', 'true');
   for (const tpl of loadedTemplates) {
     const opt = document.createElement('option');
     opt.value = tpl.id;
@@ -346,6 +366,7 @@ templateSelector.addEventListener('change', () => {
   if (!selectedId) {
     templatePreview.style.display = 'none';
     templateActions.style.display = 'none';
+    personalizeBtn.setAttribute('disabled', 'true');
     return;
   }
   const template = loadedTemplates.find((t) => t.id === selectedId);
@@ -353,6 +374,8 @@ templateSelector.addEventListener('change', () => {
     templatePreviewText.textContent = template.body;
     templatePreview.style.display = 'block';
     templateActions.style.display = 'flex';
+    personalizeBtn.toggleAttribute('disabled', !templatesFromServer);
+    personalizeBtn.title = templatesFromServer ? '' : 'Personalization requires a saved template';
   }
 });
 
@@ -371,6 +394,7 @@ copyTemplateBtn.addEventListener('click', async () => {
 });
 
 personalizeBtn.addEventListener('click', async () => {
+  if (!templatesFromServer) return;
   const selectedId = templateSelector.value;
   if (!selectedId) return;
 
@@ -387,21 +411,17 @@ personalizeBtn.addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const contactUrl = tabs[0]?.url || '';
 
-    const response = await fetch(`${appUrl}/api/claude/personalize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ templateId: selectedId, contactUrl }),
-    });
-
-    if (!response.ok) throw new Error('Personalization failed');
-
-    const data = await response.json();
-    templatePreviewText.textContent = data.personalizedText;
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const content = await personalizeOutreachTemplate(appUrl, extensionToken, selectedId, contactUrl);
+    templatePreviewText.textContent = content;
     showTemplateStatus('Template personalized', 'success');
-  } catch {
+  } catch (error) {
+    if (error instanceof ExtensionAuthError && error.status === 401) {
+      await showPopupReauth('Token expired or revoked. Enter a new full token to reconnect.');
+    }
     showTemplateStatus('Could not personalize. Check app connection.', 'error');
   } finally {
-    personalizeBtn.removeAttribute('disabled');
+    personalizeBtn.toggleAttribute('disabled', !templatesFromServer);
     personalizeBtn.textContent = 'Personalize';
   }
 });

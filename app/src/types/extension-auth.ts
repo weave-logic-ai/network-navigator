@@ -12,13 +12,14 @@ export interface ExtensionToken {
 export interface TokenValidationResult {
   valid: boolean;
   extensionId?: string;
-  error?: 'INVALID_TOKEN' | 'REVOKED_TOKEN' | 'INVALID_ORIGIN';
+  expiresAt?: number;
+  error?: 'INVALID_TOKEN' | 'REVOKED_TOKEN' | 'EXPIRED_TOKEN' | 'INVALID_ORIGIN';
 }
 
 export interface TokenGenerationResult {
   token: string;
   extensionId: string;
-  displayToken: string; // First 8 chars for UI display
+  displayToken: string; // First 12 chars for UI display; never authenticates
 }
 
 export interface ExtensionSettings {

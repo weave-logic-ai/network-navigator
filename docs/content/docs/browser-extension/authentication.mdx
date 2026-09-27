@@ -10,62 +10,25 @@ The extension authenticates with the NetworkNav app using a token-based system. 
 
 ## How Token Auth Works
 
-The authentication flow uses a display token system:
+The authentication flow uses a full bearer token:
 
-1. An admin generates a token in the app (or inserts one directly in the database)
+1. The local operator unlocks the app and generates a token on the Extension page
 2. The token has the format `ext_` followed by 32 random bytes encoded as base64url
 3. A SHA-256 hash of the token is stored in the `extension_tokens` database table
-4. The user enters the full display token in the extension popup
-5. The extension sends the display token to `POST /api/extension/register`
+4. The user enters the full token in the extension popup or sidepanel
+5. The extension sends the full token to `POST /api/extension/register`
 6. The server hashes it, looks up the matching row, and returns an `extensionId` and default settings
 7. The extension stores the token in `chrome.storage.local` and includes it in all subsequent API requests via the `X-Extension-Token` header
 
 <Callout type="warn">
-The full token is stored in the extension's local storage and sent with every API request. It is never persisted on the server after the initial hash is created. If you need to revoke access, mark the token as revoked in the database.
+The full token is stored in the extension's local storage and sent with authenticated requests. Only its hash is stored on the server. The 12-character display prefix shown in the app cannot authenticate. Revoke or replace tokens on the operator's Extension page.
 </Callout>
 
 ## Generating a Token
 
 <Steps>
 
-### Option A: Admin UI
-
-If the admin panel is set up, navigate to the Admin page in the NetworkNav app and use the token management interface to generate a new extension token. Copy the displayed token before closing the dialog -- it will not be shown again.
-
-### Option B: Manual database insert
-
-If the admin UI is not available, insert a token directly using SQL:
-
-```sql
-INSERT INTO extension_tokens (
-  extension_id, token_hash, display_prefix, created_at
-) VALUES (
-  'ext-my-browser-001',
-  encode(sha256('ext_your-secret-token-value-here'::bytea), 'hex'),
-  'ext_your-sec',
-  now()
-);
-```
-
-Replace `ext_your-secret-token-value-here` with any string you choose. The `display_prefix` is the first 12 characters of the token (e.g., `ext_your-sec`), shown in admin listings for identification without revealing the full token.
-
-If using Docker, run the command via `docker exec`:
-
-```bash
-docker exec ctox-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
-  INSERT INTO extension_tokens (
-    extension_id, token_hash, display_prefix, created_at
-  ) VALUES (
-    'ext-my-browser-001',
-    encode(sha256('ext_my-token-12345'::bytea), 'hex'),
-    'ext_my-token',
-    now()
-  )
-  ON CONFLICT DO NOTHING;
-"
-```
-
-In this example, the display token you will enter in the extension is `ext_my-token-12345`.
+Open the local app's `/operator/unlock` page and enter the operator secret from your ignored local environment. On the Extension page, select **Generate New Token**. Copy the full token before closing the dialog; it is displayed only once. Tokens expire one year after creation. Generate a replacement before expiry and revoke the previous token after reconnecting.
 
 </Steps>
 
@@ -77,9 +40,9 @@ In this example, the display token you will enter in the extension is `ext_my-to
 
 Click the extension icon in the Chrome toolbar. Since this is the first launch, you will see the "Connect to App" registration form.
 
-### Enter the display token
+### Enter the full token
 
-Type or paste the full display token (e.g., `ext_my-token-12345`) into the text input field.
+Paste the complete value beginning with `ext_` into the text input field. A listed display prefix will be rejected.
 
 ### Click Connect
 
@@ -104,21 +67,21 @@ After registration, the extension stores two values in `chrome.storage.local`:
 
 | Key | Value | Purpose |
 |-----|-------|---------|
-| `extensionToken` | The full display token string | Sent as `X-Extension-Token` header on every API request |
-| `extensionId` | The server-assigned extension ID (e.g., `ext-my-browser-001`) | Identifies this extension instance for rate limiting and logging |
+| `extensionToken` | The full token string | Sent as `X-Extension-Token` on authenticated HTTP requests |
+| `extensionId` | The server-assigned extension ID | Identifies this extension instance for rate limiting and logging |
 
 The server-side `withExtensionAuth()` middleware validates every incoming request by:
 
 1. Reading the `X-Extension-Token` header
 2. Computing its SHA-256 hash
 3. Looking up the hash in `extension_tokens`
-4. Checking `is_revoked` is `false`
-5. Validating the request origin (`chrome-extension://` or `localhost` in development)
+4. Checking revocation and one-year expiry
+5. Validating the exact configured Chrome extension origin and loopback Host
 
 ## Token Security
 
 - The server never stores the raw token. Only the SHA-256 hash is persisted in the database.
-- Token validation includes origin checking -- requests must come from a `chrome-extension://` origin or `localhost` (for development).
+- Token validation includes an explicit `EXTENSION_ALLOWED_ORIGINS` allowlist; an arbitrary extension origin is rejected.
 - The server enforces per-extension rate limiting. Exceeding the rate limit returns HTTP 429 with a `Retry-After` header.
 - Failed authentication returns HTTP 401 with a structured JSON error body.
 
@@ -126,21 +89,12 @@ The server-side `withExtensionAuth()` middleware validates every incoming reques
 
 You need to re-register the extension when:
 
-- **The token is revoked.** An admin sets `is_revoked = true` on the token row. The extension will receive 401 errors on all API calls.
+- **The token is revoked or expires.** The extension will receive 401 errors on authenticated API calls.
 - **The token is deleted.** The token row is removed from the database.
 - **The extension storage is cleared.** If `chrome.storage.local` is wiped (e.g., reinstalling the extension), the stored token is lost.
 
-To re-register, clear the extension's stored data by removing it from `chrome://extensions` and reloading it, then follow the registration steps above with a valid token.
+Mint a new full token on the operator's Extension page, then enter it in the popup or sidepanel reconnect form. The popup also checks a saved token when opened and offers reconnection if it was revoked or expired.
 
 ## Verifying Token Status
 
-Check whether a token is active in the database:
-
-```bash
-docker exec ctox-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
-  SELECT extension_id, display_prefix, is_revoked, last_used_at
-  FROM extension_tokens;
-"
-```
-
-Confirm `is_revoked` is `false` for your token. The `last_used_at` column updates each time the extension makes an authenticated API call.
+The operator's Extension page lists active tokens by masked prefix and lets the operator revoke them. If a token is no longer accepted, mint a replacement and reconnect with its full value.

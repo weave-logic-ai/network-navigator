@@ -21,6 +21,7 @@ import {
 } from '../shared/snippet-queue';
 import { addApprovedOrigins, revokeOrigin } from '../shared/approved-origins';
 import { getSnipModeActive, setSnipModeActive } from '../shared/snip-mode';
+import { ExtensionAuthError, fetchOutreachTemplates, isFullExtensionToken, personalizeOutreachTemplate, registerFullExtensionToken } from '../shared/outreach-api';
 
 // ============================================================
 // DOM References
@@ -55,6 +56,10 @@ const spCopyTemplateBtn = document.getElementById('sp-copy-template-btn')!;
 const spPersonalizeBtn = document.getElementById('sp-personalize-btn')!;
 const spPersonalizeContactName = document.getElementById('sp-personalize-contact-name')!;
 const spTemplateStatus = document.getElementById('sp-template-status')!;
+const spReauth = document.getElementById('sp-reauth')!;
+const spReauthMessage = document.getElementById('sp-reauth-message')!;
+const spReauthToken = document.getElementById('sp-reauth-token') as HTMLInputElement;
+const spReauthSubmit = document.getElementById('sp-reauth-submit') as HTMLButtonElement;
 
 // ============================================================
 // Status Update
@@ -210,6 +215,7 @@ function renderGoals(goals: Goal[]): void {
 // ============================================================
 
 let spLoadedTemplates: OutreachTemplate[] = [];
+let spTemplatesFromServer = false;
 let spSelectedTemplate: OutreachTemplate | null = null;
 let spCurrentContactName: string = 'contact';
 let spCurrentContactUrl: string = '';
@@ -249,7 +255,40 @@ function formatCategoryLabel(category: string): string {
   return category.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function showSidepanelReauth(message: string): void {
+  spTemplatesFromServer = false;
+  spPersonalizeBtn.setAttribute('disabled', 'true');
+  spReauthMessage.textContent = message;
+  spReauth.style.display = 'block';
+}
+
+spReauthSubmit.addEventListener('click', async () => {
+  const token = spReauthToken.value.trim();
+  if (!isFullExtensionToken(token)) {
+    showSidepanelReauth('Enter the full extension token, not its display prefix.');
+    return;
+  }
+  spReauthSubmit.disabled = true;
+  try {
+    const { appUrl } = await chrome.storage.local.get('appUrl');
+    const data = await registerFullExtensionToken((appUrl as string) || 'http://localhost:3750', token);
+    await chrome.storage.local.set({ extensionToken: token,
+      extensionId: data.extensionId, settings: data.settings });
+    spReauthToken.value = '';
+    spReauth.style.display = 'none';
+    await loadSidepanelTemplates();
+    await updateStatus();
+  } catch {
+    showSidepanelReauth('Registration failed. Check the full token and local app connection.');
+  } finally {
+    spReauthSubmit.disabled = false;
+  }
+});
+
 async function loadSidepanelTemplates(): Promise<void> {
+  spTemplatesFromServer = false;
+  spSelectedTemplate = null;
+  templatePreviewPanel.style.display = 'none';
   try {
     const appUrl = await new Promise<string>((resolve) => {
       chrome.storage.local.get('appUrl', (result) => {
@@ -257,20 +296,23 @@ async function loadSidepanelTemplates(): Promise<void> {
       });
     });
 
-    const response = await fetch(`${appUrl}/api/outreach/templates`, {
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.templates && data.templates.length > 0) {
-        spLoadedTemplates = data.templates;
-        renderTemplateCards();
-        return;
-      }
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const templates = await fetchOutreachTemplates(appUrl, extensionToken);
+    if (templates.length > 0) {
+      spLoadedTemplates = templates;
+      spTemplatesFromServer = true;
+      spReauth.style.display = 'none';
+      renderTemplateCards();
+      return;
     }
-  } catch {
-    // API unavailable, use defaults
+  } catch (error) {
+    if (error instanceof ExtensionAuthError) {
+      showSidepanelReauth(error.status === 401
+        ? 'Token expired or revoked. Enter a new full token to reconnect.'
+        : 'Extension origin is not allowed. Check local app configuration.');
+    } else if (error instanceof Error && /Full extension token/.test(error.message)) {
+      showSidepanelReauth('Enter a full extension token to reconnect.');
+    }
   }
 
   spLoadedTemplates = SP_DEFAULT_TEMPLATES;
@@ -354,6 +396,8 @@ function openTemplatePreview(templateId: string): void {
   previewTemplateName.textContent = tpl.name;
   templateFullPreview.innerHTML = highlightVariables(tpl.body);
   spPersonalizeContactName.textContent = spCurrentContactName;
+  spPersonalizeBtn.toggleAttribute('disabled', !spTemplatesFromServer);
+  spPersonalizeBtn.title = spTemplatesFromServer ? '' : 'Personalization requires a saved template';
   templatePreviewPanel.style.display = 'block';
 }
 
@@ -384,7 +428,7 @@ spCopyTemplateBtn.addEventListener('click', async () => {
 });
 
 spPersonalizeBtn.addEventListener('click', async () => {
-  if (!spSelectedTemplate) return;
+  if (!spSelectedTemplate || !spTemplatesFromServer) return;
 
   spPersonalizeBtn.setAttribute('disabled', 'true');
   spPersonalizeBtn.textContent = 'Personalizing...';
@@ -399,21 +443,17 @@ spPersonalizeBtn.addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const contactUrl = tabs[0]?.url || spCurrentContactUrl;
 
-    const response = await fetch(`${appUrl}/api/claude/personalize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ templateId: spSelectedTemplate.id, contactUrl }),
-    });
-
-    if (!response.ok) throw new Error('Personalization failed');
-
-    const data = await response.json();
-    templateFullPreview.innerHTML = escapeHtml(data.personalizedText);
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const content = await personalizeOutreachTemplate(appUrl, extensionToken, spSelectedTemplate.id, contactUrl);
+    templateFullPreview.innerHTML = escapeHtml(content);
     showSpTemplateStatus('Template personalized', 'success');
-  } catch {
+  } catch (error) {
+    if (error instanceof ExtensionAuthError) {
+      showSidepanelReauth('Token expired or revoked. Enter a new full token to reconnect.');
+    }
     showSpTemplateStatus('Could not personalize. Check app connection.', 'error');
   } finally {
-    spPersonalizeBtn.removeAttribute('disabled');
+    spPersonalizeBtn.toggleAttribute('disabled', !spTemplatesFromServer);
     spPersonalizeBtn.innerHTML = `Personalize for <span id="sp-personalize-contact-name">${escapeHtml(spCurrentContactName)}</span>`;
   }
 });
@@ -494,7 +534,7 @@ async function fetchWithAuth(path: string): Promise<Response | null> {
     );
     const res = await fetch(`${appUrl}${path}`, {
       headers: extensionToken
-        ? { Authorization: `Bearer ${extensionToken}` }
+        ? { 'X-Extension-Token': extensionToken }
         : {},
     });
     return res;
@@ -761,6 +801,9 @@ captureBtn.addEventListener('click', () => {
 // ============================================================
 
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes.extensionToken || changes.appUrl) {
+    void loadSidepanelTemplates();
+  }
   if (changes.connectionState) {
     updateConnectionStatus(changes.connectionState.newValue);
   }
@@ -2219,11 +2262,12 @@ function emitAnalytics(event: string, properties: Record<string, unknown> = {}):
       const { extensionToken } = await new Promise<{ extensionToken?: string }>(
         (r) => chrome.storage.local.get('extensionToken', (v) => r(v)),
       );
+      if (!extensionToken) return;
       await fetch(`${appUrl}/api/extension/analytics`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+          'X-Extension-Token': extensionToken,
         },
         body: JSON.stringify({ event, properties }),
       });
@@ -2236,14 +2280,14 @@ function emitAnalytics(event: string, properties: Record<string, unknown> = {}):
 async function probeVisibilityFlag(): Promise<boolean> {
   try {
     const appUrl = await getAppUrlBase();
+    const { extensionToken } = await new Promise<{ extensionToken?: string }>(
+      (r) => chrome.storage.local.get('extensionToken', (v) => r(v)),
+    );
+    if (!extensionToken) return false;
     const res = await fetch(`${appUrl}/api/extension/analytics`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'parse_panel_viewed' }),
+      headers: { 'X-Extension-Token': extensionToken },
     });
-    // 404 means the flag is off. 200 / 400 / 401 all mean the endpoint is
-    // live so the flag is on (auth / validation live downstream).
-    return res.status !== 404;
+    return res.ok;
   } catch {
     return false;
   }
@@ -2325,7 +2369,7 @@ async function refreshCaptureDiffPanel(): Promise<void> {
     const res = await fetch(
       `${appUrl}/api/extension/entity-diff?${params.toString()}`,
       {
-        headers: extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {},
+        headers: extensionToken ? { 'X-Extension-Token': extensionToken } : {},
       },
     );
     if (!res.ok) {
@@ -2400,7 +2444,7 @@ async function flagUnmatchedRegion(region: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+        ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
       },
       body: JSON.stringify({
         captureId: visibilityLastCaptureId,
@@ -2485,7 +2529,7 @@ async function runRegressionReport(): Promise<void> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+        ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
       },
       body: JSON.stringify({
         pageType: visibilityLastPageType,

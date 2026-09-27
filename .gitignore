@@ -23,6 +23,11 @@ data/config/extension-settings.json
 *.credentials.json
 *-credentials.json
 **/tokens/
+# The operator-only extension token API is source code, not a token store.
+!app/src/app/api/extension/tokens/
+!app/src/app/api/extension/tokens/route.ts
+!app/src/app/api/extension/tokens/[extensionId]/
+!app/src/app/api/extension/tokens/[extensionId]/route.ts
 *-token.json
 .env
 .env.local

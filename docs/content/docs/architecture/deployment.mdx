@@ -21,6 +21,31 @@ docker compose ps
 curl http://localhost:3750/api/health
 ```
 
+## Local operator unlock
+
+This Compose setup is a local-only demo: the app on port 3750 and database on
+port 5432 bind to `127.0.0.1`. Before starting, set `POSTGRES_PASSWORD` and
+`LOCAL_OPERATOR_SECRET` in your ignored local `.env`. Generate a fresh operator
+secret with `openssl rand -hex 32` (64 hex characters), keep it out of source
+and `NEXT_PUBLIC_*` variables, and do not commit `.env`.
+
+Run `docker compose up -d`, then open
+`http://localhost:3750/operator/unlock` and enter that operator secret. The
+server issues an eight-hour HttpOnly, SameSite=Strict session cookie. Without
+`LOCAL_OPERATOR_SECRET`, Compose refuses to start; a directly run app instead
+leaves protected pages locked and returns 503 from the unlock API. The health
+probe remains available.
+
+For the Chrome extension, also set `EXTENSION_ALLOWED_ORIGINS` to the exact
+installed origin, such as `chrome-extension://<32-character-extension-id>`.
+Separate multiple origins with commas. An empty value denies extension-origin
+requests. Extension tokens are separate from the operator session; enter the
+full extension token during registration for visibility endpoints.
+After unlocking, mint that token on the app's Extension page and copy it into
+the extension popup. The full value is shown once; listed prefixes cannot
+reconnect. Tokens expire one year after creation, so mint a replacement before
+then and revoke the old token from the same page.
+
 ## Docker Compose Configuration
 
 The `docker-compose.yml` defines two services:
@@ -33,7 +58,7 @@ services:
     image: ruvnet/ruvector-postgres:latest
     container_name: ctox-db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ctox}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -67,7 +92,7 @@ Key points:
       target: runner
     container_name: ctox-app
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3750:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ctox}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ctox}
       NODE_ENV: production
@@ -76,6 +101,8 @@ Key points:
       LUSHA_API_KEY: ${LUSHA_API_KEY:-}
       THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOCAL_OPERATOR_SECRET: ${LOCAL_OPERATOR_SECRET:?LOCAL_OPERATOR_SECRET is required}
+      EXTENSION_ALLOWED_ORIGINS: ${EXTENSION_ALLOWED_ORIGINS}
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +130,7 @@ Key points:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `POSTGRES_PASSWORD` | PostgreSQL password | `your-strong-password-here` |
+| `LOCAL_OPERATOR_SECRET` | Local operator unlock secret, at least 32 characters | Generate locally with `openssl rand -hex 32` |
 
 ### Optional (with defaults)
 
@@ -111,6 +139,7 @@ Key points:
 | `POSTGRES_USER` | `ctox` | PostgreSQL username |
 | `POSTGRES_DB` | `ctox` | PostgreSQL database name |
 | `NODE_ENV` | `production` | Node.js environment |
+| `EXTENSION_ALLOWED_ORIGINS` | empty | Comma-separated, exact Chrome extension origins; empty denies extension requests |
 
 ### Optional (API keys)
 
@@ -131,6 +160,13 @@ Key points:
 POSTGRES_PASSWORD=change-me-to-something-strong
 POSTGRES_USER=ctox
 POSTGRES_DB=ctox
+
+# Required: generate locally with `openssl rand -hex 32`, then fill this in.
+# Compose refuses to start while it is empty.
+LOCAL_OPERATOR_SECRET=
+
+# Set to the exact installed Chrome extension origin when using the extension.
+EXTENSION_ALLOWED_ORIGINS=
 
 # Enrichment providers (set the ones you have)
 PDL_API_KEY=

@@ -2,8 +2,10 @@
 // Provides push events from server to connected extensions
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { createHash } from 'crypto';
 import type { IncomingMessage } from 'http';
 import { validateExtensionToken } from '@/lib/auth/extension-auth';
+import { isAllowedExtensionOrigin, trustedLoopbackHost } from '@/lib/auth/local-request-boundary';
 
 export interface WsPushEvent {
   type:
@@ -28,6 +30,7 @@ export interface AuthenticatedSocket extends WebSocket {
   extensionId: string;
   isAlive: boolean;
   connectedAt: Date;
+  expiresAt: number;
   /** Timestamp (ms) of the last ping we sent and are awaiting a pong for. */
   lastPingAt?: number;
 }
@@ -42,6 +45,10 @@ const PONG_TIMEOUT_MS = 10_000;
 class ExtensionWebSocketServer {
   private wss: WebSocketServer | null = null;
   private clients: Map<string, AuthenticatedSocket> = new Map();
+  // A snapshot taken before a DELETE must never install a socket afterward.
+  // Keep generations for this process lifetime because an in-flight DB lookup
+  // can return a pre-revocation row after DELETE has committed.
+  private tokenGenerations = new Map<string, number>();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private _isRunning = false;
 
@@ -57,7 +64,19 @@ class ExtensionWebSocketServer {
     this.wss = new WebSocketServer({ noServer: true });
 
     server.on('upgrade', async (request, socket, head) => {
-      const url = new URL(request.url ?? '', `http://${request.headers.host}`);
+      const localOrigin = trustedLoopbackHost(request.headers.host);
+      if (!localOrigin || !request.headers.origin || !isAllowedExtensionOrigin(request.headers.origin)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      let url: URL;
+      try {
+        url = new URL(request.url ?? '', localOrigin);
+      } catch {
+        socket.destroy();
+        return;
+      }
 
       if (url.pathname !== '/ws/extension') {
         socket.destroy();
@@ -71,9 +90,13 @@ class ExtensionWebSocketServer {
         return;
       }
 
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      const generation = this.tokenGenerations.get(tokenHash) ?? 0;
+
       try {
         const validation = await validateExtensionToken(token);
-        if (!validation.valid || !validation.extensionId) {
+        if (!validation.valid || !validation.extensionId || generation !== 0 ||
+          (this.tokenGenerations.get(tokenHash) ?? 0) !== generation) {
           const code = validation.error === 'REVOKED_TOKEN' ? 4002 : 4001;
           socket.write(`HTTP/1.1 401 Unauthorized\r\nX-Close-Code: ${code}\r\n\r\n`);
           socket.destroy();
@@ -81,11 +104,21 @@ class ExtensionWebSocketServer {
         }
 
         this.wss!.handleUpgrade(request, socket, head, (ws) => {
-          const authWs = ws as AuthenticatedSocket;
-          authWs.extensionId = validation.extensionId!;
-          authWs.isAlive = true;
-          authWs.connectedAt = new Date();
-          this.wss!.emit('connection', authWs, request);
+          // The operator may revoke between the first DB check and handshake.
+          // Recheck before installing the socket; no await follows that check.
+          void validateExtensionToken(token).then((latest) => {
+            if (!latest.valid || !latest.extensionId || !latest.expiresAt || generation !== 0 ||
+              (this.tokenGenerations.get(tokenHash) ?? 0) !== generation) {
+              ws.close(4002, 'Token revoked or expired');
+              return;
+            }
+            const authWs = ws as AuthenticatedSocket;
+            authWs.extensionId = latest.extensionId;
+            authWs.expiresAt = latest.expiresAt;
+            authWs.isAlive = true;
+            authWs.connectedAt = new Date();
+            this.wss!.emit('connection', authWs, request);
+          }).catch(() => ws.close(1011, 'Token validation unavailable'));
         });
       } catch {
         socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
@@ -136,6 +169,7 @@ class ExtensionWebSocketServer {
   }
 
   private handleMessage(ws: AuthenticatedSocket, data: string): void {
+    if (this.closeIfExpired(ws)) return;
     try {
       const event = JSON.parse(data) as WsReceiveEvent;
 
@@ -165,7 +199,7 @@ class ExtensionWebSocketServer {
    */
   pushToExtension(extensionId: string, event: WsPushEvent): boolean {
     const client = this.clients.get(extensionId);
-    if (!client || client.readyState !== WebSocket.OPEN) {
+    if (!client || this.closeIfExpired(client) || client.readyState !== WebSocket.OPEN) {
       return false;
     }
     client.send(JSON.stringify(event));
@@ -178,7 +212,7 @@ class ExtensionWebSocketServer {
   pushToAll(event: WsPushEvent): void {
     const message = JSON.stringify(event);
     for (const client of this.clients.values()) {
-      if (client.readyState === WebSocket.OPEN) {
+      if (!this.closeIfExpired(client) && client.readyState === WebSocket.OPEN) {
         client.send(message);
       }
     }
@@ -188,7 +222,9 @@ class ExtensionWebSocketServer {
    * Get list of connected extension IDs.
    */
   getConnectedClients(): string[] {
-    return Array.from(this.clients.keys());
+    return Array.from(this.clients.values())
+      .filter(client => !this.closeIfExpired(client))
+      .map(client => client.extensionId);
   }
 
   /**
@@ -196,13 +232,32 @@ class ExtensionWebSocketServer {
    */
   isClientConnected(extensionId: string): boolean {
     const client = this.clients.get(extensionId);
-    return !!client && client.readyState === WebSocket.OPEN;
+    return !!client && !this.closeIfExpired(client) && client.readyState === WebSocket.OPEN;
+  }
+
+  /** Stop an active session immediately when the operator revokes its token. */
+  disconnectExtension(extensionId: string, tokenHash: string): void {
+    this.tokenGenerations.set(tokenHash, (this.tokenGenerations.get(tokenHash) ?? 0) + 1);
+    const client = this.clients.get(extensionId);
+    if (!client) return;
+    this.clients.delete(extensionId);
+    client.close(4002, 'Token revoked');
+  }
+
+  private closeIfExpired(client: AuthenticatedSocket): boolean {
+    if (Date.now() < client.expiresAt) return false;
+    if (this.clients.get(client.extensionId) === client) {
+      this.clients.delete(client.extensionId);
+    }
+    client.close(4002, 'Token expired');
+    return true;
   }
 
   private startHeartbeat(): void {
     this.heartbeatInterval = setInterval(() => {
       const now = Date.now();
       for (const [id, client] of this.clients) {
+        if (this.closeIfExpired(client)) continue;
         // If a ping is outstanding beyond PONG_TIMEOUT_MS, the peer is gone.
         if (
           client.lastPingAt !== undefined &&

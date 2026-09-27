@@ -3,7 +3,7 @@ services:
     image: ruvnet/ruvector-postgres:latest
     container_name: ctox-db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ctox}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -26,7 +26,7 @@ services:
       target: runner
     container_name: ctox-app
     ports:
-      - "3750:3000"
+      - "127.0.0.1:3750:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ctox}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ctox}
       NODE_ENV: production
@@ -36,6 +36,8 @@ services:
       THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CRON_SECRET: ${CRON_SECRET:-}
+      LOCAL_OPERATOR_SECRET: ${LOCAL_OPERATOR_SECRET:?LOCAL_OPERATOR_SECRET is required}
+      EXTENSION_ALLOWED_ORIGINS: ${EXTENSION_ALLOWED_ORIGINS}
       ECC_CAUSAL_GRAPH: ${ECC_CAUSAL_GRAPH:-false}
       ECC_EXO_CHAIN: ${ECC_EXO_CHAIN:-false}
       ECC_IMPULSES: ${ECC_IMPULSES:-false}

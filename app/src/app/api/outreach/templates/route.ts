@@ -3,13 +3,17 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { listTemplates, createTemplate } from '@/lib/db/queries/outreach';
+import { requireVisibilityPrincipal } from '@/lib/auth/extension-visibility-boundary';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 const VALID_CATEGORIES = [
   'initial_outreach', 'follow_up', 'meeting_request',
   'referral_ask', 'content_share', 'custom',
 ];
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireVisibilityPrincipal(request);
+  if (denied) return denied;
   try {
     const templates = await listTemplates();
     return NextResponse.json({ data: templates });
@@ -22,6 +26,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = await request.json();
 
