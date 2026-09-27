@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { contextController } from "@/lib/targets/context-controller";
 
 interface ContactResult {
   id: string;
@@ -43,6 +44,7 @@ export function TargetPickerModal() {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<PickerResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -125,30 +127,11 @@ export function TargetPickerModal() {
 
   const handleSelect = useCallback(async (result: PickerResult) => {
     try {
-      // Upsert the target row
-      const createRes = await fetch("/api/targets", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: result.kind, id: result.id }),
-      });
-      if (!createRes.ok) return;
-      const createJson = (await createRes.json()) as { data: { id: string } };
-      // Set as secondary
-      const stateRes = await fetch("/api/targets/state", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
-      });
-      if (!stateRes.ok) return;
+      setSelectionError(null);
+      await contextController.createAndFocus(result.kind, result.id);
       closePicker();
-      window.dispatchEvent(new CustomEvent("research-target-changed", {
-        detail: {
-          secondaryTargetId: createJson.data.id,
-          secondaryTargetLabel: result.label,
-        },
-      }));
-    } catch {
-      // Silent — leave modal open so user can retry.
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : "Could not select target");
     }
   }, [closePicker]);
 
@@ -179,6 +162,7 @@ export function TargetPickerModal() {
           className="w-full rounded-t-lg bg-transparent px-4 py-3 outline-none"
         />
         <div className="max-h-80 overflow-auto border-t border-border/60">
+          {selectionError && <div role="alert" className="px-4 py-2 text-xs text-destructive">{selectionError}</div>}
           {loading && (
             <div className="px-4 py-3 text-xs text-muted-foreground">
               Searching...

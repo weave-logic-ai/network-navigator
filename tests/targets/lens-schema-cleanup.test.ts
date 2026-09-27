@@ -13,6 +13,9 @@
 
 import fs from 'fs';
 import path from 'path';
+jest.mock('@/lib/auth/local-request-boundary', () => ({
+  requireLocalDashboardRequest: jest.fn().mockResolvedValue(null),
+}));
 
 const MIGRATION_PATH = path.resolve(
   __dirname,
@@ -106,15 +109,15 @@ describe('lens-service read path after 045', () => {
 
     mockQuery.mockImplementation((sql: unknown) => {
       const text = String(sql);
-      if (text.includes('last_used_lens_id') && text.includes('owner_profiles')) {
+      if (text.includes('last_used_lens_id') && text.includes('FROM research_target_state')) {
         return mockRows<Record<string, unknown>>([
           { last_used_lens_id: 'lens-preferred' },
         ]) as ReturnType<typeof query>;
       }
       if (
         text.includes('FROM research_lenses') &&
-        text.includes('WHERE id = $1') &&
-        text.includes('primary_target_id = $2')
+        text.includes('WHERE lens.id = $1') &&
+        text.includes('lens.primary_target_id = $2')
       ) {
         return mockRows<Record<string, unknown>>([
           {
@@ -135,7 +138,7 @@ describe('lens-service read path after 045', () => {
     });
 
     const svc = await import('@/lib/targets/lens-service');
-    const lens = await svc.getActiveLensForTarget('target-1');
+    const lens = await svc.getActiveLensForTarget('target-1', { tenantId: 't', ownerId: 'owner-1' });
     expect(lens?.id).toBe('lens-preferred');
     expect(lens?.isDefault).toBe(false);
   });
@@ -156,15 +159,15 @@ describe('lens-service read path after 045', () => {
 
     mockQuery.mockImplementation((sql: unknown) => {
       const text = String(sql);
-      if (text.includes('last_used_lens_id') && text.includes('owner_profiles')) {
+      if (text.includes('last_used_lens_id') && text.includes('FROM research_target_state')) {
         return mockRows<Record<string, unknown>>([
           { last_used_lens_id: 'lens-on-other-target' },
         ]) as ReturnType<typeof query>;
       }
       if (
         text.includes('FROM research_lenses') &&
-        text.includes('WHERE id = $1') &&
-        text.includes('primary_target_id = $2')
+        text.includes('WHERE lens.id = $1') &&
+        text.includes('lens.primary_target_id = $2')
       ) {
         stalePointerLookupFired = true;
         // Stale pointer — no row matches.
@@ -172,7 +175,7 @@ describe('lens-service read path after 045', () => {
       }
       if (
         text.includes('FROM research_lenses') &&
-        text.includes('WHERE primary_target_id = $1')
+        text.includes('WHERE lens.primary_target_id = $1')
       ) {
         fallbackListFired = true;
         return mockRows<Record<string, unknown>>([
@@ -194,7 +197,7 @@ describe('lens-service read path after 045', () => {
     });
 
     const svc = await import('@/lib/targets/lens-service');
-    const lens = await svc.getActiveLensForTarget('target-1');
+    const lens = await svc.getActiveLensForTarget('target-1', { tenantId: 't', ownerId: 'owner-1' });
     expect(stalePointerLookupFired).toBe(true);
     expect(fallbackListFired).toBe(true);
     expect(lens?.id).toBe('lens-default');
@@ -212,14 +215,14 @@ describe('lens-service read path after 045', () => {
     const mockQuery = query as jest.MockedFunction<typeof query>;
     mockQuery.mockImplementation((sql: unknown) => {
       const text = String(sql);
-      if (text.includes('last_used_lens_id') && text.includes('owner_profiles')) {
+      if (text.includes('last_used_lens_id') && text.includes('FROM research_target_state')) {
         return mockRows<Record<string, unknown>>([
           { last_used_lens_id: null },
         ]) as ReturnType<typeof query>;
       }
       if (
         text.includes('FROM research_lenses') &&
-        text.includes('WHERE primary_target_id = $1')
+        text.includes('WHERE lens.primary_target_id = $1')
       ) {
         // ORDER BY is_default DESC, created_at ASC — service sorts it on SQL
         // side; here we return already-sorted rows.
@@ -242,141 +245,31 @@ describe('lens-service read path after 045', () => {
     });
 
     const svc = await import('@/lib/targets/lens-service');
-    const lens = await svc.getActiveLensForTarget('target-1');
+    const lens = await svc.getActiveLensForTarget('target-1', { tenantId: 't', ownerId: 'owner-1' });
     expect(lens?.id).toBe('lens-older');
   });
 
-  it('activateLensForTarget writes last_used_lens_id on research_target_state inside a transaction', async () => {
-    jest.doMock('@/lib/db/client', () => ({
-      query: jest.fn(),
-      transaction: jest.fn(),
-      healthCheck: jest.fn(),
-      getPool: jest.fn(),
-      shutdown: jest.fn(),
-    }));
+  it('rejects legacy activation without a revision', async () => {
     const { transaction } = await import('@/lib/db/client');
-    const clientQueries: Array<{ sql: string; params: unknown[] }> = [];
-    const clientStub = {
-      query: (sql: string, params?: unknown[]) => {
-        clientQueries.push({ sql, params: params ?? [] });
-        if (sql.includes('SELECT * FROM research_lenses') && sql.includes('primary_target_id')) {
-          return mockRows<Record<string, unknown>>([
-            {
-              id: 'lens-2',
-              tenant_id: 't',
-              user_id: null,
-              name: 'Target lens',
-              primary_target_id: 'target-1',
-              secondary_target_id: null,
-              config: {},
-              is_default: false,
-              created_at: 'x',
-              updated_at: 'x',
-            },
-          ]);
-        }
-        if (sql.includes('SELECT id FROM research_lenses')) {
-          // No existing default — so the activate call should promote.
-          return mockRows<Record<string, unknown>>([]);
-        }
-        if (sql.includes('UPDATE research_lenses') && sql.includes('is_default = TRUE')) {
-          return mockRows<Record<string, unknown>>([
-            {
-              id: 'lens-2',
-              tenant_id: 't',
-              user_id: null,
-              name: 'Target lens',
-              primary_target_id: 'target-1',
-              secondary_target_id: null,
-              config: {},
-              is_default: true,
-              created_at: 'x',
-              updated_at: 'x',
-            },
-          ]);
-        }
-        return mockRows<Record<string, unknown>>([]);
-      },
-    };
-    (transaction as jest.MockedFunction<typeof transaction>).mockImplementation(
-      async (fn) => fn(clientStub as unknown as Parameters<typeof fn>[0])
-    );
-
     const svc = await import('@/lib/targets/lens-service');
-    const lens = await svc.activateLensForTarget('target-1', 'lens-2');
-    expect(lens?.id).toBe('lens-2');
-
-    // The key new invariant: we must have issued a state-row UPDATE that
-    // writes last_used_lens_id.
-    const stateUpdate = clientQueries.find((q) =>
-      q.sql.includes('UPDATE research_target_state') &&
-      q.sql.includes('last_used_lens_id = $1')
-    );
-    expect(stateUpdate).toBeDefined();
-    expect(stateUpdate?.params[0]).toBe('lens-2');
-  });
-
-  it('activateLensForTarget does NOT clobber an existing is_default sibling (per-user, not per-row semantics)', async () => {
-    jest.doMock('@/lib/db/client', () => ({
-      query: jest.fn(),
-      transaction: jest.fn(),
-      healthCheck: jest.fn(),
-      getPool: jest.fn(),
-      shutdown: jest.fn(),
-    }));
-    const { transaction } = await import('@/lib/db/client');
-    const clientQueries: Array<{ sql: string; params: unknown[] }> = [];
-    const clientStub = {
-      query: (sql: string, params?: unknown[]) => {
-        clientQueries.push({ sql, params: params ?? [] });
-        if (sql.includes('SELECT * FROM research_lenses') && sql.includes('primary_target_id')) {
-          return mockRows<Record<string, unknown>>([
-            {
-              id: 'lens-b',
-              tenant_id: 't',
-              user_id: null,
-              name: 'B',
-              primary_target_id: 'target-1',
-              secondary_target_id: null,
-              config: {},
-              is_default: false,
-              created_at: 'x',
-              updated_at: 'x',
-            },
-          ]);
-        }
-        if (sql.includes('SELECT id FROM research_lenses')) {
-          // An existing default exists — so the activate call must NOT
-          // promote or clear anything.
-          return mockRows<Record<string, unknown>>([{ id: 'lens-a' }]);
-        }
-        return mockRows<Record<string, unknown>>([]);
-      },
-    };
-    (transaction as jest.MockedFunction<typeof transaction>).mockImplementation(
-      async (fn) => fn(clientStub as unknown as Parameters<typeof fn>[0])
-    );
-
-    const svc = await import('@/lib/targets/lens-service');
-    await svc.activateLensForTarget('target-1', 'lens-b');
-
-    // No is_default writes issued.
-    const defaultWrites = clientQueries.filter((q) =>
-      q.sql.includes('UPDATE research_lenses') && q.sql.includes('is_default')
-    );
-    expect(defaultWrites).toEqual([]);
+    await expect(svc.activateLensForTarget('target-1', 'lens-2'))
+      .rejects.toThrow(/revisioned target state/);
+    expect(transaction).not.toHaveBeenCalled();
   });
 });
 
 describe('GET target lenses active state', () => {
   it('returns the resolved active lens even when the default is different', async () => {
     jest.resetModules();
+    const targetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const lenses = [
       { id: 'lens-default', isDefault: true },
       { id: 'lens-preferred', isDefault: false },
     ];
     jest.doMock('@/lib/targets/service', () => ({
-      getTargetById: jest.fn().mockResolvedValue({ id: 'target-1' }),
+      getTargetById: jest.fn().mockResolvedValue({ id: targetId, tenantId: 'tenant', kind: 'contact' }),
+      getCurrentOwnerProfileId: jest.fn().mockResolvedValue('owner'),
+      getResearchTargetState: jest.fn().mockResolvedValue({ tenantId: 'tenant' }),
     }));
     jest.doMock('@/lib/targets/lens-service', () => ({
       listLensesForTarget: jest.fn().mockResolvedValue(lenses),
@@ -386,7 +279,7 @@ describe('GET target lenses active state', () => {
     const { GET } = await import('@/app/api/targets/[id]/lenses/route');
     const response = await GET(
       {} as import('next/server').NextRequest,
-      { params: Promise.resolve({ id: 'target-1' }) }
+      { params: Promise.resolve({ id: targetId }) }
     );
 
     expect(response.status).toBe(200);
@@ -394,5 +287,37 @@ describe('GET target lenses active state', () => {
       data: lenses,
       activeLensId: 'lens-preferred',
     });
+  });
+});
+
+describe('POST target lens associations', () => {
+  it('passes canonical ICP IDs through create and returns them in the DTO', async () => {
+    jest.resetModules();
+    const targetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const icpId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const created = { id: 'lens-new', name: 'Duplicate', config: { color: 'blue' },
+      icpProfileIds: [icpId] };
+    jest.doMock('@/lib/targets/service', () => ({
+      getTargetById: jest.fn().mockResolvedValue({ id: targetId, tenantId: 'tenant', kind: 'contact' }),
+      getCurrentOwnerProfileId: jest.fn().mockResolvedValue('owner'),
+      getResearchTargetState: jest.fn().mockResolvedValue({ tenantId: 'tenant' }),
+    }));
+    const create = jest.fn().mockResolvedValue(created);
+    jest.doMock('@/lib/targets/lens-service', () => ({
+      listLensesForTarget: jest.fn(), getActiveLensForTarget: jest.fn(),
+      createLensForTarget: create,
+    }));
+    const { POST } = await import('@/app/api/targets/[id]/lenses/route');
+    const params = { params: Promise.resolve({ id: targetId }) };
+    const request = (icpProfileIds: unknown) => ({ json: async () => ({
+      name: 'Duplicate', config: { color: 'blue' }, icpProfileIds,
+    }) }) as import('next/server').NextRequest;
+    expect((await POST(request(['invalid']), params)).status).toBe(400);
+    const response = await POST(request([icpId]), params);
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.icpProfileIds).toEqual([icpId]);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      targetId, icpProfileIds: [icpId], configExtras: { color: 'blue' },
+    }));
   });
 });

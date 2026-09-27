@@ -90,33 +90,12 @@ export async function readTargetHistory(
   return entries.slice(0, limit);
 }
 
-/**
- * Append (or refresh) a history entry for the current user. Enforces the
- * HISTORY_LIMIT ring-buffer cap.
- */
+/** Legacy history writes cannot bypass the revisioned state transaction. */
 export async function pushTargetHistory(
   ownerId: string,
   entry: TargetHistoryEntry
 ): Promise<TargetHistoryEntry[]> {
-  const state = await getResearchTargetState(ownerId);
-  if (!state) return [];
-
-  const res = await query<{ history: unknown }>(
-    `SELECT history FROM research_target_state
-     WHERE tenant_id = $1 AND user_id = $2`,
-    [state.tenantId, ownerId]
-  );
-  const raw = res.rows[0]?.history;
-  const existing = Array.isArray(raw)
-    ? (raw.map(coerceEntry).filter((e): e is TargetHistoryEntry => e !== null))
-    : [];
-  const next = applyHistoryEntry(existing, entry);
-
-  await query(
-    `UPDATE research_target_state
-     SET history = $3::jsonb, updated_at = NOW()
-     WHERE tenant_id = $1 AND user_id = $2`,
-    [state.tenantId, ownerId, JSON.stringify(next)]
-  );
-  return next;
+  void ownerId;
+  void entry;
+  throw new Error('Use revisioned target state commands');
 }

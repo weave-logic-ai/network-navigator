@@ -393,6 +393,61 @@ Or connect directly:
 docker exec -it ctox-db psql -U ctox -d ctox
 ```
 
+### Existing-volume context CAS rollout (056 → 057)
+
+Use an integrated checkout that contains both migrations and the S1 local-operator boundary. Confirm the existing volume has all earlier schema changes through 055, including `research_target_state.last_used_lens_id` and the lens foreign keys; init scripts do not replay on a populated volume. Migration 056 repairs and indexes automatic identity tasks and must run before 057. Check its SHA-256 against the proof below before deployment, and rerun the disposable proof if it differs. Build and test the integrated app before this maintenance window. Run these commands from the repository root on the intended Compose project, never on the separate demo project by accident:
+
+```bash
+docker compose build app
+docker compose stop app
+backup="data/drives/pre-context-cas-$(date +%Y%m%d-%H%M%S).dump"
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+docker compose exec -T db pg_restore --list < "$backup" > /dev/null
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS state_rows_before FROM research_target_state;
+SELECT count(*) AS lens_fks_before FROM pg_constraint
+WHERE conrelid = 'research_target_state'::regclass
+  AND confrelid = 'research_lenses'::regclass AND contype = 'f';
+SQL
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < data/db/init/056-pending-identity-repair-unique.sql
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < data/db/init/057-target-state-revision.sql
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS state_rows_after, min(revision), max(revision) FROM research_target_state;
+SELECT count(*) AS revision_triggers FROM pg_trigger
+WHERE tgrelid = 'research_target_state'::regclass
+  AND tgname = 'trg_target_state_revision_context' AND NOT tgisinternal;
+SELECT indexname FROM pg_indexes WHERE indexname IN
+  ('uq_tasks_pending_identity_repair_contact', 'uq_tasks_pending_auto_recommendation');
+SQL
+docker compose up -d --no-deps app
+```
+
+Before starting the CAS app, compare state-row counts, require one lens FK before migration, one revision trigger afterward, and both 056 indexes. The `-1` on 057 rolls its DDL back if any statement fails; 056 contains its own transaction. Keep the old app stopped until verification passes. A pre-CAS app can be restarted against the upgraded schema if application rollback is needed. Do not reverse the 057 foreign-key changes piecemeal.
+
+For a **data/schema rollback**, keep writers stopped and first prove the backup restores into a separate, empty database with the same PostgreSQL major version. The following non-destructive probe leaves the live database untouched; use a unique probe name and keep the backup until cutover or recovery is complete:
+
+```bash
+docker compose exec -T db sh -c 'createdb -U "$POSTGRES_USER" context_cas_restore_probe'
+docker compose exec -T db sh -c 'pg_restore --exit-on-error -U "$POSTGRES_USER" -d context_cas_restore_probe' < "$backup"
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d context_cas_restore_probe -c "SELECT count(*) FROM research_target_state"'
+```
+
+Verify restored state and lens rows against the pre-migration count, then use the verified restored database or volume for recovery. A full restore rewinds every table to backup time, including the task changes made by 056; do not overwrite a live volume while other writers are active. The disposable full-schema proof fixture and assertions live in `tests/targets/context-cas-full-upgrade.sql`.
+
+**Disposable proof, 2026-09-27, integrated at `777ef5c`:** PostgreSQL 17 received every repository init script from 001 through 054, then 055 via `psql -f` (its `\ir` includes need a file path), then the merged 056. The 056 SQL tested had SHA-256 `3ed69a3b3f374730b54fce82e08b82c3268fd7f44ef4ee9afa1e75db08106b1c`; rerun if the deployment checkout differs. The fixture was seeded with `psql -v CAS_SEED_ONLY=1 -f tests/targets/context-cas-full-upgrade.sql`, backed up using server-version `pg_dump -Fc`, then upgraded and asserted with `psql -1 -v CAS_VERIFY_ONLY=1 -f tests/targets/context-cas-full-upgrade.sql`. The script applies 057 twice and checks existing context, lens FKs, lens/contact deletion cleanup, and revision advances. `pg_restore --exit-on-error` restored the pre-057 backup into an empty database; its original state, contact and lens rows reappeared, and 057 reapplied cleanly there. Observed output:
+
+```text
+full existing-schema CAS fixture seeded before 057
+full existing-schema CAS upgrade passed
+pre057=true, state=1, focus=a0000000-0000-4000-8000-000000000006, lens=a0000000-0000-4000-8000-000000000007
+contact=1
+lens=1
+lens_fk=1
+reupgraded_revision=0, focus=a0000000-0000-4000-8000-000000000006, lens=a0000000-0000-4000-8000-000000000007
+```
+
+The opt-in browser scenarios use a separate database named `*_test` or `*_validation` and an isolated loopback app. Set the app's `LOCAL_OPERATOR_SECRET` to a synthetic test secret of at least 32 characters, and pass the same value as `E2E_OPERATOR_SECRET` with `E2E_BASE_URL` and `E2E_DATABASE_URL` to Playwright. The scenario helper unlocks over HTTP and shares the issued cookie with the browser. For the US4 snippet scenario, enable `RESEARCH_SNIPPETS` and set matching synthetic `EXTENSION_ALLOWED_ORIGINS` (app) and `E2E_EXTENSION_ORIGIN` (Playwright); its token request uses the extension principal rather than the operator session.
+
 ### Isolated local demo
 
 The repo's demo override keeps database and app-data volumes separate from the default stack and binds the app to localhost on port 3751:

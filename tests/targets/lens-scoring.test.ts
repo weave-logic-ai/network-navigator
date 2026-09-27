@@ -191,10 +191,15 @@ describe('WS-4 Phase 1.5 — pipeline lens resolution', () => {
       },
     }));
 
+    jest.doMock('@/lib/targets/service', () => ({
+      getCurrentOwnerProfileId: jest.fn(async () => 'owner'),
+      getResearchTargetState: jest.fn(async () => ({ tenantId: 'tenant' })),
+      getTargetById: jest.fn(async () => ({ tenantId: 'tenant', kind: 'contact' })),
+    }));
     const { scoreBatch } = await import('@/lib/scoring/pipeline');
     await scoreBatch([], undefined, 'target-1').catch(() => undefined);
 
-    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1');
+    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1', { tenantId: 'tenant', ownerId: 'owner' });
     // Owner-default must NOT be queried when the lens yields a non-empty set.
     expect(getActiveIcpProfiles).not.toHaveBeenCalled();
   });
@@ -233,10 +238,15 @@ describe('WS-4 Phase 1.5 — pipeline lens resolution', () => {
       },
     }));
 
+    jest.doMock('@/lib/targets/service', () => ({
+      getCurrentOwnerProfileId: jest.fn(async () => 'owner'),
+      getResearchTargetState: jest.fn(async () => ({ tenantId: 'tenant' })),
+      getTargetById: jest.fn(async () => ({ tenantId: 'tenant', kind: 'contact' })),
+    }));
     const { scoreBatch } = await import('@/lib/scoring/pipeline');
     await scoreBatch([], undefined, 'target-1').catch(() => undefined);
 
-    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1');
+    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1', { tenantId: 'tenant', ownerId: 'owner' });
     expect(getActiveIcpProfiles).toHaveBeenCalled(); // fallback fired
   });
 });
