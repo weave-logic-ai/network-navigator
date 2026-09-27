@@ -19,10 +19,35 @@ export async function createLegacyImportScoreJob(
   return jobId;
 }
 
+async function restartAfterOwnerChange(client: PoolClient, jobId: string): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    const successor = await client.query<{ id: string }>(
+      "INSERT INTO score_import_jobs(source) VALUES ('legacy-graph') RETURNING id"
+    );
+    await client.query(
+      `INSERT INTO score_import_job_contacts(job_id, contact_id)
+       SELECT $2, contact_id FROM score_import_job_contacts
+       WHERE job_id = $1 AND skipped_at IS NULL`,
+      [jobId, successor.rows[0].id]
+    );
+    await client.query(
+      `UPDATE score_import_jobs SET failed_at = NOW(),
+         failure_reason = 'Current owner changed since scoring basis capture',
+         restarted_as_job_id = $2 WHERE id = $1`,
+      [jobId, successor.rows[0].id]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
 /** Resume a bounded set of committed import jobs, including after restart. */
 export async function drainPendingImportScoreJobs(maxJobs = 2, maxContacts = 25): Promise<number> {
   const jobs = await query<{ id: string }>(
-    `SELECT id FROM score_import_jobs WHERE completed_at IS NULL
+    `SELECT id FROM score_import_jobs WHERE completed_at IS NULL AND failed_at IS NULL
      ORDER BY COALESCE(last_attempt_at, created_at), id LIMIT $1`,
     [Math.max(1, Math.min(maxJobs, 10))]
   );
@@ -68,6 +93,11 @@ export async function drainPendingImportScoreJobs(maxJobs = 2, maxContacts = 25)
             await scoreContact(contact.contact_id, undefined, undefined, basis, true, job.id);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (message === 'Current owner changed since scoring basis capture') {
+              await restartAfterOwnerChange(client, job.id);
+              console.error('[scoring] Import job restarted after owner change', { jobId: job.id });
+              break;
+            }
             const archived = await client.query(
               `UPDATE score_import_job_contacts jc SET skipped_at = NOW(),
                  skip_reason = 'archived', attempts = attempts + 1, last_error = NULL

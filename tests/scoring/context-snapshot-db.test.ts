@@ -380,6 +380,7 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
     `);
     const migration = readFileSync(resolve(process.cwd(), '../data/db/init/058-owner-score-basis.sql'), 'utf8');
     await pool.query(migration);
+    await pool.query(readFileSync(resolve(process.cwd(), '../data/db/init/064-import-score-job-restart.sql'), 'utf8'));
     const legacy = await getContactScoreBreakdown(contactId);
     expect(legacy?.basisKind).toBe('legacy-unverified');
     expect(legacy?.basisHash).toBeNull();
@@ -948,6 +949,48 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
     await drainPendingImportScoreJobs(10, 25);
     expect((await pool.query('SELECT score_revision FROM contact_scores WHERE contact_id = $1',
       [contactId])).rows).toEqual(after.rows);
+  });
+
+  it('terminals a stale owner job and rescores its cohort in a fresh job', async () => {
+    const nextContact = '550e8400-e29b-41d4-a716-446655440301';
+    const nextOwner = '550e8400-e29b-41d4-a716-000000000302';
+    await pool.query('INSERT INTO contacts(id, title, is_archived) VALUES ($1, $2, FALSE)',
+      [nextContact, 'Engineer']);
+    const client = await pool.connect();
+    let jobId: string | null = null;
+    try {
+      await client.query('BEGIN');
+      jobId = await createLegacyImportScoreJob(client, [contactId, nextContact]);
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    expect(await drainPendingImportScoreJobs(1, 1)).toBe(1);
+    await pool.query('UPDATE owner_profiles SET is_current = FALSE');
+    await pool.query('INSERT INTO owner_profiles VALUES ($1, TRUE)', [nextOwner]);
+    await pool.query('INSERT INTO research_targets VALUES ($1, $2, $3, $4, NULL)',
+      ['550e8400-e29b-41d4-a716-000000000303', tenantA, 'self', nextOwner]);
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await drainPendingImportScoreJobs(1, 25)).toBe(1);
+    } finally {
+      log.mockRestore();
+    }
+    const old = await pool.query<{ failed_at: Date; failure_reason: string; restarted_as_job_id: string; basis_hash: string }>(
+      'SELECT failed_at, failure_reason, restarted_as_job_id, basis_hash FROM score_import_jobs WHERE id = $1', [jobId]);
+    expect(old.rows[0].failed_at).not.toBeNull();
+    expect(old.rows[0].failure_reason).toMatch(/owner changed/);
+    expect(old.rows[0].restarted_as_job_id).toEqual(expect.any(String));
+    expect(await drainPendingImportScoreJobs(1, 25)).toBe(1);
+    const successor = await pool.query<{ completed_at: Date; basis_hash: string }>(
+      'SELECT completed_at, basis_hash FROM score_import_jobs WHERE id = $1',
+      [old.rows[0].restarted_as_job_id]);
+    expect(successor.rows[0].completed_at).not.toBeNull();
+    expect(successor.rows[0].basis_hash).not.toBe(old.rows[0].basis_hash);
+    expect((await getContactScoreBreakdown(nextContact))?.basisHash).toBe(successor.rows[0].basis_hash);
+    expect((await getContactScoreBreakdown(contactId))?.basisHash).toBe(successor.rows[0].basis_hash);
+    expect((await pool.query('SELECT count(*)::int AS count FROM score_import_job_contacts WHERE job_id = $1',
+      [old.rows[0].restarted_as_job_id])).rows[0].count).toBe(2);
   });
 
   it('terminally skips archived import contacts so a later healthy contact is scored', async () => {

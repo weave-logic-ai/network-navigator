@@ -1,6 +1,40 @@
 // API scoring route tests
+import { NextRequest } from '../../app/node_modules/next/server';
+import { POST } from '@/app/api/scoring/run/route';
+import { scoreBatchDetailed } from '@/lib/scoring/pipeline';
+
+jest.mock('@/lib/scoring/pipeline', () => ({ scoreBatchDetailed: jest.fn() }));
+
+async function runBatch() {
+  return POST(new NextRequest('http://localhost/api/scoring/run', {
+    method: 'POST', body: JSON.stringify({ contactIds: ['a', 'b'] }),
+  }));
+}
 
 describe('Scoring API', () => {
+  afterEach(() => jest.resetAllMocks());
+
+  it('reports partial contact failure without a successful HTTP status', async () => {
+    jest.mocked(scoreBatchDetailed).mockResolvedValue({
+      results: [{ contactId: 'a' } as never],
+      failures: [{ contactId: 'b', error: 'Contact not found: b' }], total: 2,
+    });
+    const response = await runBatch();
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body.error).toMatch(/Batch scoring failed/);
+    expect(body.data).toMatchObject({
+      scored: 1, failed: 1, total: 2,
+      failures: [{ contactId: 'b', error: 'Contact not found: b' }],
+    });
+  });
+
+  it('reports complete batch failure as an error', async () => {
+    jest.mocked(scoreBatchDetailed).mockResolvedValue({
+      results: [], failures: [{ contactId: 'a', error: 'failed' }], total: 1,
+    });
+    expect((await runBatch()).status).toBe(500);
+  });
   describe('POST /api/scoring/run request validation', () => {
     it('should accept single contact scoring', () => {
       const body = { contactId: '550e8400-e29b-41d4-a716-446655440000' };

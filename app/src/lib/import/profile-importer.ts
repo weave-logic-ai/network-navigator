@@ -351,6 +351,9 @@ export async function importFullProfile(
     }
   }
 
+  // Version and self-target must become visible together to owner scoring.
+  await client.query('BEGIN');
+  try {
   // Determine version: mark previous versions as non-current
   const prevResult = await client.query<{ max_version: number | null }>(
     'SELECT MAX(version) AS max_version FROM owner_profiles'
@@ -443,6 +446,15 @@ export async function importFullProfile(
 
   const selfName = [profile.firstName, profile.lastName].filter(Boolean).join(' ');
 
+  const selfTarget = await client.query(
+    `INSERT INTO research_targets (tenant_id, kind, owner_id, label)
+     SELECT id, 'self', $1, $2 FROM tenants WHERE slug = 'default'
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [insertResult.rows[0].id, selfName || 'Self']
+  );
+  if (!selfTarget.rows[0]) throw new Error('Full profile import requires a default tenant and new self target');
+  await client.query('COMMIT');
+
   return {
     profileId: insertResult.rows[0].id,
     version: newVersion,
@@ -450,4 +462,8 @@ export async function importFullProfile(
     skippedFiles,
     selfName,
   };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
 }

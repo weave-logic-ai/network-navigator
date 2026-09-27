@@ -487,21 +487,36 @@ export async function scoreBatch(
   profileName?: string,
   targetId?: string
 ): Promise<ScoringRunResult[]> {
+  return (await scoreBatchDetailed(contactIds, profileName, targetId)).results;
+}
+
+export interface BatchScoreFailure {
+  contactId: string;
+  error: string;
+}
+
+export async function scoreBatchDetailed(
+  contactIds?: string[],
+  profileName?: string,
+  targetId?: string
+): Promise<{ results: ScoringRunResult[]; failures: BatchScoreFailure[]; total: number }> {
   assertOwnerBaseline(targetId);
   // If no IDs provided, score all non-archived contacts
   const ids = contactIds ?? await scoringQueries.getAllContactIds();
   const basis = await captureOwnerScoringBasis(profileName);
   const results: ScoringRunResult[] = [];
+  const failures: BatchScoreFailure[] = [];
 
   for (const contactId of ids) {
     try {
       results.push(await scoreContact(contactId, profileName, undefined, basis));
     } catch (err) {
+      failures.push({ contactId, error: err instanceof Error ? err.message : String(err) });
       console.error(`[scoring] Failed to score contact ${contactId}:`, err);
     }
   }
 
-  return results;
+  return { results, failures, total: ids.length };
 }
 
 function getAvailableDimensions(contact: ContactScoringData): string[] {

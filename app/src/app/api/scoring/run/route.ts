@@ -2,7 +2,7 @@
 // Persisted scores are owner baseline only.
 
 import { NextRequest, NextResponse } from 'next/server';
-import { scoreContact, scoreBatch } from '@/lib/scoring/pipeline';
+import { scoreContact, scoreBatchDetailed } from '@/lib/scoring/pipeline';
 import { scoreContactWithProvenance } from '@/lib/ecc/causal-graph/scoring-adapter';
 import { ECC_FLAGS } from '@/lib/ecc/types';
 
@@ -41,13 +41,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ data: result });
     }
 
-    const results = await scoreBatch(contactIds, profileName);
+    const { results, failures, total } = await scoreBatchDetailed(contactIds, profileName);
     return NextResponse.json({
+      ...(failures.length > 0 ? { error: 'Batch scoring failed for one or more contacts' } : {}),
       data: {
         scored: results.length,
+        failed: failures.length,
+        total,
+        failures,
         results: results.slice(0, 100), // Limit response size
       },
-    });
+    }, { status: failures.length > 0 ? 500 : 200 });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to run scoring', details: error instanceof Error ? error.message : undefined },
