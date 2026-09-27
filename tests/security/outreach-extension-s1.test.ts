@@ -45,7 +45,7 @@ beforeEach(() => {
   resetRateLimits();
   process.env.EXTENSION_ALLOWED_ORIGINS = origin;
   process.env.LOCAL_OPERATOR_SECRET = 'synthetic-operator-secret-for-outreach-tests';
-  dbQuery.mockResolvedValue({ rows: [tokenRow] });
+  dbQuery.mockResolvedValue({ rows: [tokenRow], rowCount: 1 });
 });
 afterAll(() => {
   if (priorOrigins === undefined) delete process.env.EXTENSION_ALLOWED_ORIGINS;
@@ -70,14 +70,15 @@ test('middleware admits only extension GET templates and POST personalize', asyn
 });
 
 test('registration accepts a full generated-format token for explicit popup re-auth', async () => {
-  dbQuery.mockResolvedValueOnce({ rows: [tokenRow] });
+  dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
+    .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
   const request = req('/api/extension/register', 'POST', extension,
     JSON.stringify({ displayToken: token }));
   expect((await middleware(request)).status).toBe(200);
   const response = await register(request);
   expect(response.status).toBe(200);
   expect((await response.json()).extensionId).toBe(id);
-  expect(dbQuery).toHaveBeenCalledTimes(1);
+  expect(dbQuery).toHaveBeenCalledTimes(2);
   expect(String(dbQuery.mock.calls[0][0])).toContain('WHERE token_hash = $1');
 });
 
@@ -117,6 +118,7 @@ test('full extension token resolves an exact profile URL before mocked personali
   expect(listed.status).toBe(200);
   expect((await listed.json()).data[0].body_template).toBe('Hello');
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
+    .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 })
     .mockResolvedValueOnce({ rows: [{ id }] });
   const response = await personalize(req('/api/claude/personalize', 'POST', extension,
     JSON.stringify({ templateId: id, contactUrl: 'https://www.linkedin.com/in/synthetic-contact/?trk=ignored' })));
@@ -138,10 +140,12 @@ test('unknown, invalid, and ambiguous profile URLs never call the provider', asy
   expect((await send('https://www.linkedin.com/in/synthetic/other')).status).toBe(400);
   expect(provider).not.toHaveBeenCalled();
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
+    .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 })
     .mockResolvedValueOnce({ rows: [] });
   expect((await send('https://www.linkedin.com/in/synthetic')).status).toBe(404);
   expect(provider).not.toHaveBeenCalled();
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
+    .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 })
     .mockResolvedValueOnce({ rows: [{ id }, { id: '22222222-2222-4222-8222-222222222222' }] });
   expect((await send('https://www.linkedin.com/in/synthetic')).status).toBe(409);
   expect(lookupContact).not.toHaveBeenCalled();

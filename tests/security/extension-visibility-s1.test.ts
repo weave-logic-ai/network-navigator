@@ -52,6 +52,7 @@ beforeEach(() => {
   resetRateLimits();
   process.env.EXTENSION_ALLOWED_ORIGINS = origin;
   process.env.LOCAL_OPERATOR_SECRET = 'synthetic-operator-secret-for-visibility-tests';
+  dbQuery.mockResolvedValue({ rows: [tokenRow], rowCount: 1 });
   event.mockResolvedValue({ written: true });
   webhook.mockResolvedValue({ dispatched: false });
   projection.mockResolvedValue(null);
@@ -109,15 +110,18 @@ test('missing, prefix, revoked, and foreign extension credentials have zero effe
 
 test('full token runs the four guarded handlers against synthetic mocks', async () => {
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] });
+  dbQuery.mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
   expect((await analytics(req('/api/extension/analytics', 'POST', extensionHeaders,
     '{"event":"parse_panel_viewed"}'))).status).toBe(200);
   expect(event).toHaveBeenCalledTimes(1);
 
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] });
+  dbQuery.mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
   expect((await entityDiff(req(`/api/extension/entity-diff?kind=contact&id=${id}`, 'GET', extensionHeaders))).status).toBe(404);
   expect(projection).toHaveBeenCalledWith(id);
 
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
+    .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 })
     .mockResolvedValueOnce({ rows: [{ tid: id }] })
     .mockResolvedValueOnce({ rows: [{ id }] });
   const flag = JSON.stringify({ captureId: id, pageType: 'PROFILE', domPath: 'html>body', domHtmlExcerpt: '<p>synthetic</p>' });
@@ -126,6 +130,7 @@ test('full token runs the four guarded handlers against synthetic mocks', async 
   expect(webhook).toHaveBeenCalledTimes(1);
 
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] });
+  dbQuery.mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
   expect((await regressionReport(req('/api/parser/regression-report', 'POST', extensionHeaders,
     '{"pageType":"INVALID","rawHtml":"<p>synthetic</p>"}'))).status).toBe(400);
 });
@@ -133,6 +138,7 @@ test('full token runs the four guarded handlers against synthetic mocks', async 
 test('authenticated feature probe is read-only and survives exhausted POST rate limit', async () => {
   for (let i = 0; i < 30; i++) checkRateLimit(id, '/api/extension/analytics');
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] });
+  dbQuery.mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
   expect((await middleware(req('/api/extension/analytics', 'GET', extensionHeaders))).status).toBe(200);
   const response = await analyticsProbe(req('/api/extension/analytics', 'GET', extensionHeaders));
   expect(response.status).toBe(200);

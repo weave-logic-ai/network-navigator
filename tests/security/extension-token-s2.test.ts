@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import WebSocket from '../../app/node_modules/ws';
 import { NextRequest, NextResponse } from '../../app/node_modules/next/server';
 import { middleware } from '../../app/src/middleware';
 import { GET as list, POST as mint } from '../../app/src/app/api/extension/tokens/route';
@@ -18,7 +20,7 @@ import { query } from '@/lib/db/client';
 jest.mock('@/lib/db/client', () => ({ query: jest.fn() }));
 
 type Row = { token_hash: string; extension_id: string; display_prefix: string;
-  created_at: Date; last_used_at: null; user_agent: null; is_revoked: boolean };
+  created_at: Date; last_used_at: Date | null; user_agent: null; is_revoked: boolean };
 const rows = new Map<string, Row>();
 const dbQuery = query as jest.Mock;
 const origin = `chrome-extension://${'a'.repeat(32)}`;
@@ -52,6 +54,12 @@ beforeEach(() => {
         display_prefix: displayPrefix, created_at: new Date(), last_used_at: null,
         user_agent: null, is_revoked: false });
       return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes('SET last_used_at = now()')) {
+      const found = rows.get(params?.[0] as string);
+      if (found && !found.is_revoked) found.last_used_at = new Date();
+      return { rows: found && !found.is_revoked ? [{ extension_id: found.extension_id }] : [],
+        rowCount: found && !found.is_revoked ? 1 : 0 };
     }
     if (sql.includes('WHERE token_hash = $1')) {
       const found = rows.get(params?.[0] as string);
@@ -110,6 +118,9 @@ test('operator mints, lists masked token, registers full token, and revokes it',
     origin, 'x-extension-token': token,
   }), async () => NextResponse.json({ ok: true }));
   expect(permitted.status).toBe(200);
+  expect(rows.get(createHash('sha256').update(token).digest('hex'))?.last_used_at).toBeInstanceOf(Date);
+  const usedList = await list(req('/api/extension/tokens', 'GET', auth));
+  expect(new Date((await usedList.json()).data[0].lastUsedAt).getTime()).toBeGreaterThan(0);
 
   const socket = { extensionId, expiresAt: Date.now() + 60_000,
     readyState: 1, close: jest.fn(), send: jest.fn() };
@@ -290,7 +301,7 @@ test('DELETE 200 fences a pending handshake whose second lookup already read an 
   const held = new Promise<void>(resolve => { snapshotHeld = resolve; });
   const release = new Promise<void>(resolve => { releaseSnapshot = resolve; });
   dbQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
-    if (sql.includes('WHERE token_hash = $1') && params?.[0] === hash && ++lookupCount === 2) {
+    if (sql.trimStart().startsWith('SELECT extension_id') && params?.[0] === hash && ++lookupCount === 2) {
       const snapshot = { ...rows.get(hash)! };
       snapshotHeld();
       await release;
@@ -310,9 +321,10 @@ test('DELETE 200 fences a pending handshake whose second lookup already read an 
   jest.spyOn(wss, 'handleUpgrade').mockImplementation((_req, _socket, _head, done) => {
     (done as (socket: typeof upgraded) => void)(upgraded);
   });
+  const pendingSocket = { write: jest.fn(), destroy: jest.fn() };
   server.emit('upgrade', { url: `/ws/extension?token=${token}`,
     headers: { host: 'localhost:3750', origin } },
-  { write: jest.fn(), destroy: jest.fn() }, Buffer.alloc(0));
+  pendingSocket, Buffer.alloc(0));
   await held;
 
   const deleted = await revoke(req(`/api/extension/tokens/${extensionId}`, 'DELETE', auth),
@@ -328,6 +340,42 @@ test('DELETE 200 fences a pending handshake whose second lookup already read an 
   expect(wsServer.getConnectedClients()).toEqual([]);
   wsServer.shutdown();
   log.mockRestore();
+});
+
+test('a real loopback WebSocket listener closes an established socket on revoke', async () => {
+  const auth = await operator();
+  const { token, extensionId } = (await (await mint(req('/api/extension/tokens', 'POST', auth))).json()).data;
+  const server = createServer();
+  const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+  let client: WebSocket | undefined;
+  try {
+    wsServer.init(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    client = new WebSocket(`ws://127.0.0.1:${port}/ws/extension?token=${token}`, { origin });
+    await new Promise<void>((resolve, reject) => {
+      client!.once('open', resolve);
+      client!.once('error', reject);
+    });
+    expect(wsServer.isClientConnected(extensionId)).toBe(true);
+    const closed = new Promise<number>((resolve, reject) => {
+      client!.once('close', code => resolve(code));
+      client!.once('error', reject);
+    });
+    const deleted = await revoke(req(`/api/extension/tokens/${extensionId}`, 'DELETE', auth),
+      { params: Promise.resolve({ extensionId }) });
+    expect(deleted.status).toBe(200);
+    expect(await closed).toBe(4002);
+    expect(wsServer.isClientConnected(extensionId)).toBe(false);
+  } finally {
+    client?.terminate();
+    wsServer.shutdown();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    log.mockRestore();
+  }
 });
 
 test('token route files are visible to git and will survive checkout when integrated', () => {

@@ -83,6 +83,18 @@ export async function validateExtensionToken(
     return { valid: false, error: 'EXPIRED_TOKEN' };
   }
 
+  // Record successful use, and reject a token revoked between the read and
+  // this write. A failed audit write must not authenticate a stale row.
+  const used = await query<{ extension_id: string }>(
+    `UPDATE extension_tokens SET last_used_at = now(), updated_at = now()
+     WHERE token_hash = $1 AND is_revoked = false
+     RETURNING extension_id`,
+    [tokenHash]
+  );
+  if (used.rowCount !== 1) {
+    return { valid: false, error: 'REVOKED_TOKEN' };
+  }
+
   return { valid: true, extensionId: row.extension_id,
     expiresAt: created + EXTENSION_TOKEN_LIFETIME_MS };
 }
