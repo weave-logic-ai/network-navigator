@@ -18,7 +18,10 @@ import {
 import {
   getSnippetQueue,
   SNIPPET_QUEUE_KEY,
+  draftSnippetDestination, snippetTargetFromLock,
+  type SnippetDestination,
 } from '../shared/snippet-queue';
+import { createSnippetQueuePanel, queueSnippetAndReset } from './snippet-queue-panel';
 import { listApprovedOriginsFromChrome, revokeOrigin } from '../shared/approved-origins';
 import { getSnipModeActive, setSnipModeActive } from '../shared/snip-mode';
 import { ExtensionAuthError, fetchOutreachTemplates, isFullExtensionToken, personalizeOutreachTemplate, registerFullExtensionToken } from '../shared/outreach-api';
@@ -517,6 +520,9 @@ interface LockedTarget {
 
 // Cache of the currently rendered target to avoid redundant fetches
 let lastRenderedLock: string = '';
+let targetResolution = 0;
+let snippetConfigRevision = 0;
+let currentTargetTabId: number | undefined;
 
 async function getAppUrlBase(): Promise<string> {
   return new Promise((resolve) => {
@@ -690,9 +696,13 @@ function renderTarget(lock: LockedTarget | null): void {
 let taskLockCleared = false;
 
 async function updateTargetPanel(): Promise<void> {
+  const resolution = ++targetResolution;
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (resolution !== targetResolution) return;
   const tab = tabs[0];
+  currentTargetTabId = tab?.id;
   if (!tab?.url) {
+    lastRenderedLock = 'none';
     renderTarget(null);
     return;
   }
@@ -717,6 +727,10 @@ async function updateTargetPanel(): Promise<void> {
       if (company) lock = { target: company, source: 'page' };
     }
   }
+
+  if (resolution !== targetResolution) return;
+  const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (resolution !== targetResolution || activeTabs[0]?.id !== tab.id || activeTabs[0]?.url !== url) return;
 
   const cacheKey = lock
     ? `${lock.source}:${lock.target.kind}:${lock.target.id}`
@@ -762,14 +776,19 @@ targetClearBtn.addEventListener('click', () => {
 });
 
 // Reset task-lock clear when the tab URL changes (new page, fresh decision)
-chrome.tabs.onActivated.addListener(() => {
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  currentTargetTabId = tabId;
+  targetResolution++;
   taskLockCleared = false;
   lastRenderedLock = '';
+  void updateTargetPanel();
 });
-chrome.tabs.onUpdated.addListener((_id, info) => {
-  if (info.status === 'complete' || info.url) {
+chrome.tabs.onUpdated.addListener((id, info) => {
+  if (id === currentTargetTabId && (info.status === 'complete' || info.url)) {
+    targetResolution++;
     taskLockCleared = false;
     lastRenderedLock = '';
+    void updateTargetPanel();
   }
 });
 
@@ -802,6 +821,14 @@ captureBtn.addEventListener('click', () => {
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.extensionToken || changes.appUrl) {
+    snippetConfigRevision++;
+    targetResolution++;
+    lastRenderedLock = '';
+    renderTarget(null);
+    snippetEnabled = false;
+    if (snippetSection) snippetSection.style.display = 'none';
+    void updateTargetPanel();
+    void loadSnippetTags();
     void loadSidepanelTemplates();
   }
   if (changes.connectionState) {
@@ -1047,19 +1074,39 @@ const snippetLinkPrepBtn = document.getElementById('sp-snippet-link-prep-btn');
 // WS-3 Phase 6 §9/§10 additions
 const snippetPiiBanner = document.getElementById('sp-snippet-pii-banner');
 const snippetQueueDepthEl = document.getElementById('sp-snippet-queue-depth');
+const snippetQueueSection = document.getElementById('sp-snippet-queue-section');
+const snippetQueueList = document.getElementById('sp-snippet-queue-list');
+const snippetQueueError = document.getElementById('sp-snippet-queue-error');
+const snippetQueueReadRetry = document.getElementById('sp-snippet-queue-read-retry') as HTMLButtonElement | null;
 
 function changeSnippetQueue(action: 'QUEUE_SNIPPET' | 'RETRY_SNIPPET' | 'DISCARD_SNIPPET', payload: Record<string, unknown>): Promise<void> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type: action, payload }, (response: { status?: string; message?: string } | undefined) => {
       const error = chrome.runtime.lastError?.message || response?.message;
-      if (response?.status !== 'ok') reject(new Error(error || 'Snippet queue unavailable'));
-      else resolve();
+      if (response?.status !== 'ok') {
+        const failure = new Error(error || 'Snippet queue unavailable');
+        if (action === 'QUEUE_SNIPPET') snippetQueuePanel?.showEnqueueFailure(failure);
+        reject(failure);
+      } else {
+        if (action === 'QUEUE_SNIPPET') snippetQueuePanel?.enqueueSucceeded();
+        resolve();
+      }
     });
   });
 }
 
 let availableTags: SidebarTagRow[] = [];
 let currentSnippet: SidebarSnippetPayload | null = null;
+const snippetRequestIds = new WeakMap<SidebarSnippetPayload, string>();
+let snippetDraftConfigRevision = 0;
+let snippetDraftDestination: SnippetDestination | null = null;
+let snippetDraftTarget: ReturnType<typeof snippetTargetFromLock> = null;
+
+function markFreshSnippet(target = snippetTargetFromLock(lastRenderedLock)): void {
+  snippetDraftConfigRevision = snippetConfigRevision;
+  snippetDraftDestination = null;
+  snippetDraftTarget = target;
+}
 let snippetEnabled = false;
 // ADR-028 clause 4 — Snip mode is off by default every session; capturing is
 // a deliberate act, not an ambient one. Backed by chrome.storage.session so
@@ -1557,6 +1604,8 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
 
 function resetSnippetCard(): void {
   currentSnippet = null;
+  snippetDraftDestination = null;
+  snippetDraftTarget = null;
   if (snippetCard) snippetCard.style.display = 'none';
   if (snippetErrorEl) snippetErrorEl.style.display = 'none';
   if (snippetStatus) snippetStatus.textContent = 'Select text on the page, then click capture.';
@@ -1606,66 +1655,23 @@ function showPiiBannerForText(text: string): void {
   snippetPiiBanner.style.display = '';
 }
 
-/**
- * Render local snippet work and recovery controls beside the queue badge.
- */
-async function refreshSnippetQueueDepth(): Promise<void> {
-  if (!snippetQueueDepthEl) return;
-  try {
-    const queue = await getSnippetQueue();
-    const depth = queue.length;
-    let list = document.getElementById('sp-snippet-queue-list');
-    if (!list) {
-      list = document.createElement('div');
-      list.id = 'sp-snippet-queue-list';
-      snippetQueueDepthEl.parentElement?.insertAdjacentElement('afterend', list);
-    }
-    list.replaceChildren();
-    for (const item of queue) {
-      const row = document.createElement('div');
-      const label = document.createElement('span');
-      const kind = typeof item.body === 'object' && item.body !== null && 'kind' in item.body ? String(item.body.kind) : 'snippet';
-      label.textContent = `${kind}: ${item.state === 'failed' || item.retryCount >= 5 ? 'Failed' : 'Queued'}${item.lastError ? ` — ${item.lastError}` : ''}`;
-      row.append(label);
-      const retry = document.createElement('button');
-      retry.type = 'button';
-      retry.textContent = 'Retry';
-      retry.addEventListener('click', () => { void changeSnippetQueue('RETRY_SNIPPET', { id: item.id }).then(refreshSnippetQueueDepth).catch(showSnippetQueueError); });
-      const discard = document.createElement('button');
-      discard.type = 'button';
-      discard.textContent = 'Discard';
-      discard.addEventListener('click', () => { void changeSnippetQueue('DISCARD_SNIPPET', { id: item.id }).then(refreshSnippetQueueDepth).catch(showSnippetQueueError); });
-      row.append(retry, discard);
-      if (item.state === 'failed' || item.retryCount >= 5) {
-        const restore = document.createElement('button');
-        restore.type = 'button';
-        restore.textContent = 'Restore draft';
-        restore.addEventListener('click', () => {
-          try { restoreQueuedSnippet(item.body); } catch (error) { showSnippetQueueError(error as Error); }
-        });
-        row.append(restore);
-      }
-      list.append(row);
-    }
-    if (depth <= 0) {
-      snippetQueueDepthEl.style.display = 'none';
-      snippetQueueDepthEl.textContent = '';
-      return;
-    }
-    snippetQueueDepthEl.style.display = '';
-    const failed = queue.filter((item) => item.state === 'failed' || item.retryCount >= 5).length;
-    snippetQueueDepthEl.textContent = failed ? `${depth} local (${failed} failed)` : `${depth} queued`;
-    snippetQueueDepthEl.title = `${depth} local snippet${depth === 1 ? '' : 's'}; review errors below.`;
-  } catch {
-    snippetQueueDepthEl.style.display = 'none';
-  }
-}
+const snippetQueuePanel = snippetQueueDepthEl && snippetQueueSection && snippetQueueList && snippetQueueError && snippetQueueReadRetry
+  ? createSnippetQueuePanel({
+      section: snippetQueueSection,
+      depth: snippetQueueDepthEl,
+      list: snippetQueueList,
+      error: snippetQueueError,
+      readRetry: snippetQueueReadRetry,
+    }, {
+      document,
+      readQueue: getSnippetQueue,
+      change: (action, id) => changeSnippetQueue(action, { id }),
+      restore: restoreQueuedSnippet,
+    })
+  : null;
 
-function showSnippetQueueError(error: Error): void {
-  if (snippetErrorEl) {
-    snippetErrorEl.style.display = '';
-    snippetErrorEl.textContent = error.message;
-  }
+function refreshSnippetQueueDepth(): Promise<void> {
+  return snippetQueuePanel?.refresh() ?? Promise.resolve();
 }
 
 // Re-render queue depth whenever the queue key changes (the service worker
@@ -1699,7 +1705,7 @@ function activateSnippetTab(kind: 'text' | 'image' | 'link'): void {
   resetSnippetCard();
 }
 
-function restoreQueuedSnippet(raw: unknown): void {
+function restoreQueuedSnippet(raw: unknown, destination?: SnippetDestination): void {
   if (!snippetEnabled || !snipModeActive) throw new Error('Enable Snip mode to restore this draft.');
   if (!raw || typeof raw !== 'object') throw new Error('Stored snippet is invalid.');
   const body = raw as Record<string, unknown>;
@@ -1745,6 +1751,10 @@ function restoreQueuedSnippet(raw: unknown): void {
   } else {
     throw new Error('Stored snippet payload is incomplete.');
   }
+  if (currentSnippet && typeof body.requestId === 'string') snippetRequestIds.set(currentSnippet, body.requestId);
+  snippetDraftConfigRevision = snippetConfigRevision;
+  snippetDraftDestination = destination ?? { appUrl: '', tokenFingerprint: '' };
+  snippetDraftTarget = { targetKind: body.targetKind as 'contact' | 'company', targetId: body.targetId as string };
   if (snippetNoteEl) snippetNoteEl.value = note;
   if (snippetTagsContainer) renderTagChips(snippetTagsContainer, tags);
   if (snippetCard) snippetCard.style.display = '';
@@ -1761,6 +1771,7 @@ if (snippetCaptureBtn) {
     // ADR-028 clause 4 — belt-and-braces guard alongside the hidden widget
     // body; a stale DOM reference shouldn't be able to fire a capture.
     if (!snipModeActive) return;
+    const captureTarget = snippetTargetFromLock(lastRenderedLock);
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
     if (!tab?.url || !tab.id) return;
@@ -1791,6 +1802,7 @@ if (snippetCaptureBtn) {
       mentionCandidates: candidates,
       note: '',
     };
+    markFreshSnippet(captureTarget);
     if (snippetPreview) {
       snippetPreview.style.display = '';
       snippetPreview.textContent = selection.text.slice(0, 400);
@@ -1866,7 +1878,7 @@ async function presentImagePayload(payload: {
   sourceUrl: string;
   pageUrl: string;
   pageTitle: string;
-}): Promise<void> {
+}, captureTarget = snippetTargetFromLock(lastRenderedLock)): Promise<void> {
   const imageSuggested = suggestTagSlugsForUrl(
     payload.pageUrl || payload.sourceUrl,
     availableTags.map((t) => t.slug)
@@ -1885,6 +1897,7 @@ async function presentImagePayload(payload: {
     selectedTags: new Set<string>(imageSuggested),
     note: '',
   };
+  markFreshSnippet(captureTarget);
 
   if (snippetPreview) snippetPreview.style.display = 'none';
   if (snippetImagePreviewWrap) snippetImagePreviewWrap.style.display = '';
@@ -1910,6 +1923,7 @@ async function ingestImageFile(file: File): Promise<void> {
   // paste/drop are global listeners that don't check inline child styles, so
   // guard explicitly here rather than relying on visibility alone.
   if (!snipModeActive) return;
+  const captureTarget = snippetTargetFromLock(lastRenderedLock);
   if (!ALLOWED_IMAGE_MIMES.has(file.type)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = `Unsupported type "${file.type || 'unknown'}". Use PNG, JPEG, or WebP.`;
@@ -1936,12 +1950,13 @@ async function ingestImageFile(file: File): Promise<void> {
     sourceUrl: pageUrl,
     pageUrl,
     pageTitle,
-  });
+  }, captureTarget);
 }
 
 async function ingestImageFromUrl(imageUrl: string): Promise<void> {
   // ADR-028 clause 4 — see ingestImageFile.
   if (!snipModeActive) return;
+  const captureTarget = snippetTargetFromLock(lastRenderedLock);
   if (!/^https?:\/\//.test(imageUrl)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = 'URL must start with http:// or https://';
@@ -1994,7 +2009,7 @@ async function ingestImageFromUrl(imageUrl: string): Promise<void> {
     sourceUrl: response.sourceUrl ?? imageUrl,
     pageUrl: response.pageUrl ?? tab.url ?? '',
     pageTitle: response.pageTitle ?? tab.title ?? '',
-  });
+  }, captureTarget);
 }
 
 // Drag-and-drop binding
@@ -2058,6 +2073,7 @@ if (snippetImageFetchBtn && snippetImageUrlInput) {
 if (snippetLinkPrepBtn) {
   snippetLinkPrepBtn.addEventListener('click', async () => {
     if (!snippetEnabled) return;
+    const captureTarget = snippetTargetFromLock(lastRenderedLock);
     // ADR-028 clause 4 — see the capture-selection handler above.
     if (!snipModeActive) return;
     const href = snippetLinkHrefInput?.value.trim() ?? '';
@@ -2081,6 +2097,7 @@ if (snippetLinkPrepBtn) {
       selectedTags: new Set<string>(suggested),
       note: '',
     };
+    markFreshSnippet(captureTarget);
     if (snippetPreview) {
       snippetPreview.style.display = '';
       snippetPreview.textContent = linkText ? `${linkText} — ${href}` : href;
@@ -2101,13 +2118,9 @@ if (snippetSaveBtn) {
     (snippetSaveBtn as HTMLButtonElement).setAttribute('disabled', 'true');
     (snippetSaveBtn as HTMLElement).textContent = 'Saving…';
     try {
-      // Determine the currently-locked target from the Target Panel.
-      if (!lastRenderedLock || lastRenderedLock === 'none') {
-        throw new Error('No active research target. Open a profile or task first.');
-      }
-      const [source, kind, id] = lastRenderedLock.split(':');
-      void source;
-      const targetKind = kind === 'person' ? 'contact' : kind;
+      // Keep the target selected when capture began across later navigation.
+      if (!snippetDraftTarget) throw new Error('No research target at capture. Open a profile or task and capture again.');
+      const { targetKind, targetId: id } = snippetDraftTarget;
 
       // WS-3 Phase 6 §9 — PII scrub for text snippets. The banner shown in
       // `detectPiiAndShowBanner` was advisory; now we actually redact. Image
@@ -2161,40 +2174,67 @@ if (snippetSaveBtn) {
         };
       }
 
-      const appUrl = await getAppUrlBase();
-      const { extensionToken } = await new Promise<{ extensionToken?: string }>((r) =>
-        chrome.storage.local.get('extensionToken', (v) => r(v)),
-      );
+      let requestId = snippetRequestIds.get(currentSnippet);
+      if (!requestId) {
+        requestId = crypto.randomUUID();
+        snippetRequestIds.set(currentSnippet, requestId);
+      }
+      body = { ...body, requestId };
+
+      const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+      const appUrl = (config.appUrl as string) || 'http://localhost:3750';
+      const extensionToken = (config.extensionToken as string) || null;
+      const destination = await draftSnippetDestination(appUrl, extensionToken);
+      if (snippetDraftConfigRevision !== snippetConfigRevision ||
+          (snippetDraftDestination && (snippetDraftDestination.appUrl !== destination.appUrl ||
+            snippetDraftDestination.tokenFingerprint !== destination.tokenFingerprint ||
+            (snippetDraftDestination.tenantId && snippetDraftDestination.tenantId !== destination.tenantId)))) {
+        throw new Error('App or token changed since this draft was captured. Return to its original configuration before saving.');
+      }
+      if (!destination.tenantId) {
+        await queueSnippetAndReset(
+          () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, state: 'pending_verification', error: 'Tenant verification required' }),
+          refreshSnippetQueueDepth,
+          resetSnippetCard,
+        );
+        if (snippetStatus) snippetStatus.textContent = 'Saved locally. Verify the tenant and retry when online.';
+        return;
+      }
       let res: Response;
       try {
-        res = await fetch(`${appUrl}/api/extension/snippet`, {
+        res = await fetch(`${destination.appUrl}/api/extension/snippet`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
+            ...(destination.tenantId ? { 'X-Snippet-Tenant-ID': destination.tenantId } : {}),
           },
           body: JSON.stringify(body),
         });
       } catch (networkErr) {
         // WS-3 Phase 6 §10 — server unreachable → queue for later replay.
-        await changeSnippetQueue('QUEUE_SNIPPET', { body, error: (networkErr as Error).message ?? 'network' });
-        await refreshSnippetQueueDepth();
-        resetSnippetCard();
+        await queueSnippetAndReset(
+          () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: (networkErr as Error).message ?? 'network' }),
+          refreshSnippetQueueDepth,
+          resetSnippetCard,
+        );
         if (snippetStatus) snippetStatus.textContent = 'Queued locally — will retry.';
         return;
       }
       if (!res.ok) {
         // Keep transient failures locally; preserve validation errors in the editor.
         if (res.status === 429 || res.status >= 500) {
-          await changeSnippetQueue('QUEUE_SNIPPET', { body, error: `HTTP ${res.status}` });
-          await refreshSnippetQueueDepth();
-          resetSnippetCard();
+          await queueSnippetAndReset(
+            () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: `HTTP ${res.status}` }),
+            refreshSnippetQueueDepth,
+            resetSnippetCard,
+          );
           if (snippetStatus) snippetStatus.textContent = `Queued locally (HTTP ${res.status}) — will retry.`;
           return;
         }
         const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
         const message = (err as { message?: string }).message ?? `HTTP ${res.status}`;
-        await changeSnippetQueue('QUEUE_SNIPPET', { body, error: `HTTP ${res.status}: ${message}`, state: 'failed' });
+        await changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: `HTTP ${res.status}: ${message}`, state: 'failed' });
         await refreshSnippetQueueDepth();
         if (snippetStatus) snippetStatus.textContent = `Validation failed (HTTP ${res.status}) — correct this draft and save; a failed copy is retained locally.`;
         return;

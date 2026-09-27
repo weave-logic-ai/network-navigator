@@ -34,6 +34,7 @@ import {
   removeSnippetFromQueue,
   SNIPPET_QUEUE_FLUSH_ALARM,
   SNIPPET_QUEUE_FLUSH_INTERVAL_MIN,
+  type SnippetDestination,
 } from './shared/snippet-queue';
 import { syncApprovedOriginsFromChrome } from './shared/approved-origins';
 
@@ -511,12 +512,19 @@ chrome.runtime.onMessage.addListener(
   (message: ExtensionMessage, sender, sendResponse) => {
     const action = message.type as string;
     if (action === 'QUEUE_SNIPPET' || action === 'RETRY_SNIPPET' || action === 'DISCARD_SNIPPET') {
-      const payload = message.payload as { body?: unknown; error?: string; state?: 'queued' | 'failed'; id?: string } | undefined;
+      const payload = message.payload as { body?: unknown; destination?: SnippetDestination; error?: string; state?: 'queued' | 'failed' | 'pending_verification'; id?: string } | undefined;
       const pending: Promise<void> = snippetFlushPromise ?? Promise.resolve();
       const operation = pending.then(async () => {
-        if (action === 'QUEUE_SNIPPET') return enqueueSnippet(payload?.body, payload?.error, payload?.state);
+        if (action === 'QUEUE_SNIPPET') {
+          if (!payload?.destination) throw new Error('Missing snippet destination');
+          return enqueueSnippet(payload.body, payload.destination, payload.error, payload.state);
+        }
         if (!payload?.id) throw new Error('Missing snippet queue item ID');
-        if (action === 'RETRY_SNIPPET') return retrySnippet(payload.id);
+        if (action === 'RETRY_SNIPPET') {
+          const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+          return retrySnippet(payload.id, (config.appUrl as string) || DEFAULT_APP_URL,
+            (config.extensionToken as string) || null);
+        }
         return removeSnippetFromQueue(payload.id);
       });
       void operation.then(() => {
@@ -698,14 +706,13 @@ async function processSnippetQueue(): Promise<void> {
 async function flushSnippetQueueOnce(): Promise<void> {
   const depth = await getSnippetQueueDepth();
   if (depth === 0) return;
-  const [appUrl, token] = await Promise.all([
-    getStorage('appUrl'),
-    getStorage('extensionToken'),
-  ]);
+  const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+  const appUrl = config.appUrl as string | undefined;
+  const token = config.extensionToken as string | undefined;
   try {
     const result = await flushSnippetQueue({
       appUrl: appUrl || DEFAULT_APP_URL,
-      extensionToken: token,
+      extensionToken: token || null,
     });
     if (result.processed > 0) {
       logger.info(

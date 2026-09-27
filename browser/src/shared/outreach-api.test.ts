@@ -119,6 +119,6 @@ test('fallback templates remain copy-only in both extension surfaces', () => {
   assert.match(popup, /if \(!templatesFromServer\) return;/);
   assert.match(sidepanel, /if \(!spSelectedTemplate \|\| !spTemplatesFromServer\) return;/);
   assert.match(popup, /await loadTemplates\(\);/);
-  assert.match(sidepanel, /if \(changes\.extensionToken \|\| changes\.appUrl\) \{\s*void loadSidepanelTemplates\(\);/);
+  assert.match(sidepanel, /if \(changes\.extensionToken \|\| changes\.appUrl\) \{[\s\S]*?void loadSidepanelTemplates\(\);/);
   assert.match(sidepanel, /spReauthSubmit\.addEventListener\('click'/);
 });

@@ -930,6 +930,24 @@ body {
   font-weight: 500;
   border: 1px solid #fcd34d;
 }
+.snippet-queue-list {
+  display: grid;
+  gap: 8px;
+}
+.snippet-queue-error {
+  color: #9a3412;
+  overflow-wrap: anywhere;
+}
+.snippet-queue-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.snippet-queue-row span {
+  flex-basis: 100%;
+}
 .snippet-pii-banner {
   background: #fff7ed;
   color: #9a3412;
