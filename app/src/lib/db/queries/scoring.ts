@@ -1,6 +1,7 @@
 // Scoring engine DB queries
 
 import { query, transaction } from '../client';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import {
   WeightProfile,
   ContactScoringData,
@@ -10,25 +11,29 @@ import {
   ScoringRunStatus,
 } from '../../scoring/types';
 
+function readQuery<T extends QueryResultRow>(client: PoolClient | undefined, sql: string, params?: unknown[]): Promise<QueryResult<T>> {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
+}
+
 // Weight profiles
 
-export async function getDefaultWeightProfile(): Promise<WeightProfile | null> {
-  const result = await query<{
+export async function getDefaultWeightProfile(client?: PoolClient): Promise<WeightProfile | null> {
+  const result = await readQuery<{
     id: string; name: string; description: string | null;
     weights: Record<string, number>; is_default: boolean;
     created_at: Date; updated_at: Date;
-  }>(
+  }>(client,
     'SELECT * FROM scoring_weight_profiles WHERE is_default = TRUE LIMIT 1'
   );
   return result.rows[0] ? mapWeightProfile(result.rows[0]) : null;
 }
 
-export async function getWeightProfileByName(name: string): Promise<WeightProfile | null> {
-  const result = await query<{
+export async function getWeightProfileByName(name: string, client?: PoolClient): Promise<WeightProfile | null> {
+  const result = await readQuery<{
     id: string; name: string; description: string | null;
     weights: Record<string, number>; is_default: boolean;
     created_at: Date; updated_at: Date;
-  }>(
+  }>(client,
     'SELECT * FROM scoring_weight_profiles WHERE name = $1 LIMIT 1',
     [name]
   );
@@ -66,8 +71,8 @@ export async function upsertWeightProfile(
 
 // Contact scoring data (aggregated view for scoring)
 
-export async function getContactScoringData(contactId: string): Promise<ContactScoringData | null> {
-  const result = await query<{
+export async function getContactScoringData(contactId: string, client?: PoolClient): Promise<ContactScoringData | null> {
+  const result = await readQuery<{
     id: string; degree: number; title: string | null; headline: string | null;
     about: string | null; current_company: string | null;
     connections_count: number | null; tags: string[]; location: string | null;
@@ -81,7 +86,7 @@ export async function getContactScoringData(contactId: string): Promise<ContactS
     connection_count_raw: string | null;  // same as connections_count
     discovered_via: string[] | null;
     cluster_ids: string[] | null;
-  }>(
+  }>(client,
     `SELECT
       c.id, c.degree, c.title, c.headline, c.about,
       c.current_company, c.connections_count, c.tags, c.location,
@@ -144,25 +149,60 @@ export async function getContactScoringData(contactId: string): Promise<ContactS
   };
 }
 
+// Contacts predate tenants and have no tenant_id. A contact with an explicit
+// target belongs to the default operator only if that tenant has a contact
+// target for it. Untargeted legacy contacts remain in the default tenant's
+// scoring set; a contact targeted only by another tenant is never scored here.
+const ownerScorableContactPredicate = `EXISTS (
+  SELECT 1 FROM tenants tenant
+  JOIN owner_profiles owner ON owner.is_current = TRUE
+  JOIN research_targets self_target
+    ON self_target.tenant_id = tenant.id AND self_target.kind = 'self'
+   AND self_target.owner_id = owner.id
+  WHERE tenant.slug = 'default'
+    AND (SELECT COUNT(*) FROM tenants) = 1
+    AND (SELECT COUNT(*) FROM owner_profiles WHERE is_current = TRUE) = 1
+    AND (
+      EXISTS (SELECT 1 FROM research_targets scoped_target
+        WHERE scoped_target.kind = 'contact'
+          AND scoped_target.contact_id = contact.id
+          AND scoped_target.tenant_id = tenant.id)
+      OR NOT EXISTS (SELECT 1 FROM research_targets any_target
+        WHERE any_target.kind = 'contact'
+          AND any_target.contact_id = contact.id)
+    )
+)`;
+
+export async function isOwnerScorableContact(contactId: string, client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ allowed: boolean }>(
+    `SELECT ${ownerScorableContactPredicate} AS allowed
+     FROM contacts contact WHERE contact.id = $1`,
+    [contactId]
+  );
+  return result.rows[0]?.allowed === true;
+}
+
 export async function getAllContactIds(): Promise<string[]> {
   const result = await query<{ id: string }>(
-    'SELECT id FROM contacts WHERE is_archived = FALSE ORDER BY created_at'
+    `SELECT contact.id FROM contacts contact
+     WHERE contact.is_archived = FALSE AND ${ownerScorableContactPredicate}
+     ORDER BY contact.created_at`
   );
   return result.rows.map(r => r.id);
 }
 
 // Scoring baselines (percentiles for normalization)
 
-export async function getScoringBaselines(): Promise<{
+export async function getScoringBaselines(client?: PoolClient): Promise<{
   p90Mutuals: number;
   p90Edges: number;
   totalClusters: number;
 }> {
-  const result = await query<{
+  const result = await readQuery<{
     p90_mutuals: string;
     p90_edges: string;
     total_clusters: string;
-  }>(`
+  }>(client, `
     WITH mutual_counts AS (
       SELECT source_contact_id, COUNT(*)::int AS cnt
       FROM edges WHERE edge_type = 'mutual' AND target_contact_id IS NOT NULL
@@ -193,25 +233,112 @@ export async function getScoringBaselines(): Promise<{
 
 // Score storage
 
+export interface ContactScoreWriteResult {
+  /** False when the replaced row had unverified or different owner context. */
+  comparable: boolean;
+  previous: CompositeScore | null;
+  revision: number;
+}
+
 export async function upsertContactScore(
   contactId: string,
-  score: CompositeScore
-): Promise<void> {
-  await transaction(async (client) => {
+  score: CompositeScore,
+  basisHash: string,
+  client?: PoolClient
+): Promise<ContactScoreWriteResult> {
+  if (!/^[0-9a-f]{64}$/.test(basisHash)) throw new Error('Invalid owner scoring basis hash');
+  const write = async (writer: PoolClient): Promise<ContactScoreWriteResult> => {
+    // Lock the parent first so two scorers cannot both observe a missing row.
+    const parent = await writer.query('SELECT id FROM contacts WHERE id = $1 FOR UPDATE', [contactId]);
+    if (parent.rows.length === 0) throw new Error(`Contact not found: ${contactId}`);
+    const prior = await writer.query<{
+      composite_score: number; tier: string; persona: string | null;
+      behavioral_persona: string | null; scoring_version: number | null;
+      referral_likelihood: number | null; referral_tier: string | null;
+      referral_persona: string | null; basis_kind: string; basis_hash: string | null;
+      behavioral_signals: CompositeScore['behavioralSignals'];
+      referral_signals: CompositeScore['referralSignals'];
+      score_revision: string;
+      id: string;
+    }>(
+      `SELECT id, composite_score, tier, persona, behavioral_persona, scoring_version,
+              referral_likelihood, referral_tier, referral_persona, behavioral_signals,
+              referral_signals, basis_kind, basis_hash, score_revision
+       FROM contact_scores WHERE contact_id = $1 FOR UPDATE`, [contactId]
+    );
+    const old = prior.rows[0];
+    const counter = await writer.query<{ last_revision: string }>(
+      `INSERT INTO score_contact_revisions(contact_id, last_revision)
+       SELECT $1, GREATEST($2::bigint, COALESCE((
+         SELECT MAX(score_revision) FROM impulses
+         WHERE source_entity_type = 'contact' AND source_entity_id = $1
+       ), 0))
+       ON CONFLICT (contact_id) DO UPDATE SET last_revision =
+         GREATEST(score_contact_revisions.last_revision, EXCLUDED.last_revision)
+       RETURNING last_revision`, [contactId, old?.score_revision ?? 0]
+    );
+    const revision = Number(counter.rows[0].last_revision) + 1;
+    if (!Number.isSafeInteger(revision)) throw new Error('Contact score revision exceeds safe integer range');
+    const comparable = !old || (old.basis_kind === 'owner' &&
+      old.basis_hash !== null && old.basis_hash === basisHash);
+    const oldDimensions = old && comparable ? await writer.query<{
+      dimension: string; raw_value: number; weighted_value: number; weight: number;
+      metadata: Record<string, unknown>;
+    }>('SELECT dimension, raw_value, weighted_value, weight, metadata FROM score_dimensions WHERE contact_score_id = $1 ORDER BY dimension', [old.id]) : null;
+    const oldReferralDimensions = old && comparable ? await writer.query<{
+      component: string; raw_value: number; weighted_value: number; weight: number;
+      metadata: Record<string, unknown>;
+    }>('SELECT component, raw_value, weighted_value, weight, metadata FROM referral_dimensions WHERE contact_score_id = $1 ORDER BY component', [old.id]) : null;
+    const previous: CompositeScore | null = old && comparable ? {
+      compositeScore: old.composite_score,
+      tier: old.tier as CompositeScore['tier'],
+      persona: (old.persona ?? 'unknown') as CompositeScore['persona'],
+      behavioralPersona: (old.behavioral_persona ?? 'unknown') as CompositeScore['behavioralPersona'],
+      dimensions: (oldDimensions?.rows ?? []).map(dim => ({
+        dimension: dim.dimension, rawValue: dim.raw_value,
+        weightedValue: dim.weighted_value, weight: dim.weight, metadata: dim.metadata,
+      })), scoringVersion: old.scoring_version ?? score.scoringVersion,
+      referralLikelihood: old.referral_likelihood,
+      referralTier: old.referral_tier as CompositeScore['referralTier'],
+      referralPersona: old.referral_persona as CompositeScore['referralPersona'],
+      referralDimensions: (oldReferralDimensions?.rows ?? []).map(dim => ({
+        component: dim.component, rawValue: dim.raw_value,
+        weightedValue: dim.weighted_value, weight: dim.weight, metadata: dim.metadata,
+      })),
+      behavioralSignals: old.behavioral_signals,
+      referralSignals: old.referral_signals,
+    } : null;
+    await writer.query("SELECT set_config('app.score_owner_write', 'true', true)");
+    // Preserve an unverified pre-D2 row exactly once, in the same transaction
+    // that replaces it. A failed score write rolls this backup back too.
+    await writer.query(
+      `INSERT INTO score_context_legacy_backups
+         (contact_id, score_row, dimensions, referral_dimensions)
+       SELECT cs.contact_id, to_jsonb(cs),
+         COALESCE((SELECT jsonb_agg(to_jsonb(d)) FROM score_dimensions d
+                   WHERE d.contact_score_id = cs.id), '[]'::jsonb),
+         COALESCE((SELECT jsonb_agg(to_jsonb(d)) FROM referral_dimensions d
+                   WHERE d.contact_score_id = cs.id), '[]'::jsonb)
+       FROM contact_scores cs
+       WHERE cs.contact_id = $1 AND cs.basis_kind = 'legacy-unverified'
+       ON CONFLICT (contact_id) DO NOTHING`,
+      [contactId]
+    );
     // Upsert contact_scores (including referral fields)
-    const scoreResult = await client.query(
+    const scoreResult = await writer.query(
       `INSERT INTO contact_scores (
         contact_id, composite_score, tier, persona, behavioral_persona,
         scoring_version, scored_at,
         referral_likelihood, referral_tier, referral_persona,
-        behavioral_signals, referral_signals
+        behavioral_signals, referral_signals, basis_kind, basis_hash, score_revision
       )
-      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11, 'owner', $12, $13)
       ON CONFLICT (contact_id) DO UPDATE SET
         composite_score = $2, tier = $3, persona = $4, behavioral_persona = $5,
         scoring_version = $6, scored_at = NOW(),
         referral_likelihood = $7, referral_tier = $8, referral_persona = $9,
-        behavioral_signals = $10, referral_signals = $11
+        behavioral_signals = $10, referral_signals = $11, basis_kind = 'owner', basis_hash = $12,
+        score_revision = $13
       RETURNING id`,
       [
         contactId, score.compositeScore, score.tier, score.persona, score.behavioralPersona,
@@ -219,34 +346,41 @@ export async function upsertContactScore(
         score.referralLikelihood, score.referralTier, score.referralPersona,
         score.behavioralSignals ? JSON.stringify(score.behavioralSignals) : null,
         score.referralSignals ? JSON.stringify(score.referralSignals) : null,
+        basisHash, revision,
       ]
     );
 
     const scoreId = scoreResult.rows[0].id;
+    await writer.query(
+      'UPDATE score_contact_revisions SET last_revision = $2 WHERE contact_id = $1',
+      [contactId, revision]
+    );
 
     // Delete old dimensions and insert new ones
-    await client.query('DELETE FROM score_dimensions WHERE contact_score_id = $1', [scoreId]);
+    await writer.query('DELETE FROM score_dimensions WHERE contact_score_id = $1', [scoreId]);
 
     for (const dim of score.dimensions) {
-      await client.query(
+      await writer.query(
         `INSERT INTO score_dimensions (contact_score_id, dimension, raw_value, weighted_value, weight, metadata)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [scoreId, dim.dimension, dim.rawValue, dim.weightedValue, dim.weight, JSON.stringify(dim.metadata || {})]
       );
     }
 
-    // Store referral dimensions if present
+    // Clear stale referral dimensions even if the new owner score has none.
+    await writer.query('DELETE FROM referral_dimensions WHERE contact_score_id = $1', [scoreId]);
     if (score.referralDimensions && score.referralDimensions.length > 0) {
-      await client.query('DELETE FROM referral_dimensions WHERE contact_score_id = $1', [scoreId]);
       for (const rd of score.referralDimensions) {
-        await client.query(
+        await writer.query(
           `INSERT INTO referral_dimensions (contact_score_id, component, raw_value, weighted_value, weight, metadata)
            VALUES ($1, $2, $3, $4, $5, $6)`,
           [scoreId, rd.component, rd.rawValue, rd.weightedValue, rd.weight, JSON.stringify(rd.metadata || {})]
         );
       }
     }
-  });
+    return { comparable, previous, revision };
+  };
+  return client ? write(client) : transaction(write);
 }
 
 export async function getContactScoreBreakdown(contactId: string): Promise<{
@@ -262,6 +396,8 @@ export async function getContactScoreBreakdown(contactId: string): Promise<{
   referralDimensions: Array<{ component: string; rawValue: number; weightedValue: number; weight: number }>;
   behavioralSignals: Record<string, unknown> | null;
   referralSignals: Record<string, unknown> | null;
+  basisKind: 'owner' | 'legacy-unverified';
+  basisHash: string | null;
 } | null> {
   const scoreResult = await query<{
     id: string; composite_score: number; tier: string;
@@ -270,10 +406,12 @@ export async function getContactScoreBreakdown(contactId: string): Promise<{
     referral_persona: string | null;
     behavioral_signals: Record<string, unknown> | null;
     referral_signals: Record<string, unknown> | null;
+    basis_kind: 'owner' | 'legacy-unverified';
+    basis_hash: string | null;
   }>(
     `SELECT id, composite_score, tier, persona, behavioral_persona, scored_at,
             referral_likelihood, referral_tier, referral_persona,
-            behavioral_signals, referral_signals
+            behavioral_signals, referral_signals, basis_kind, basis_hash
      FROM contact_scores WHERE contact_id = $1`,
     [contactId]
   );
@@ -319,19 +457,21 @@ export async function getContactScoreBreakdown(contactId: string): Promise<{
     })),
     behavioralSignals: score.behavioral_signals,
     referralSignals: score.referral_signals,
+    basisKind: score.basis_kind,
+    basisHash: score.basis_hash,
   };
 }
 
 // ICP profiles
 
-export async function getActiveIcpProfiles(): Promise<IcpProfile[]> {
-  const result = await query<{
+export async function getActiveIcpProfiles(client?: PoolClient): Promise<IcpProfile[]> {
+  const result = await readQuery<{
     id: string; name: string; description: string | null;
     is_active: boolean; criteria: IcpCriteria;
     weight_overrides: Record<string, number>;
     created_at: Date; updated_at: Date;
-  }>(
-    'SELECT * FROM icp_profiles WHERE is_active = TRUE ORDER BY name'
+  }>(client,
+    'SELECT * FROM icp_profiles WHERE is_active = TRUE AND owner_baseline = TRUE ORDER BY name, id'
   );
   return result.rows.map(mapIcpProfile);
 }
@@ -361,8 +501,8 @@ export async function createIcpProfile(data: {
     weight_overrides: Record<string, number>;
     created_at: Date; updated_at: Date;
   }>(
-    `INSERT INTO icp_profiles (name, description, criteria, weight_overrides, niche_id)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    `INSERT INTO icp_profiles (name, description, criteria, weight_overrides, niche_id, owner_baseline)
+     VALUES ($1, $2, $3, $4, $5, TRUE) RETURNING *`,
     [data.name, data.description ?? null, JSON.stringify(data.criteria), JSON.stringify(data.weightOverrides || {}), data.nicheId ?? null]
   );
   return mapIcpProfile(result.rows[0]);
@@ -372,9 +512,10 @@ export async function upsertContactIcpFit(
   contactId: string,
   icpProfileId: string,
   fitScore: number,
-  breakdown: Record<string, unknown>
+  breakdown: Record<string, unknown>,
+  client?: PoolClient
 ): Promise<void> {
-  await query(
+  await readQuery(client,
     `INSERT INTO contact_icp_fits (contact_id, icp_profile_id, fit_score, fit_breakdown, computed_at)
      VALUES ($1, $2, $3, $4, NOW())
      ON CONFLICT (contact_id, icp_profile_id) DO UPDATE SET

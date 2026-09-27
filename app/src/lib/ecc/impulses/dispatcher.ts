@@ -47,6 +47,7 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
     throw new Error(`Impulse not found: ${impulseId}`);
   }
   const impulse = mapImpulse(impulseResult.rows[0]);
+  const durableScoringImpulse = impulseResult.rows[0].score_revision != null;
 
   // Find matching handlers
   const handlersResult = await query<Record<string, unknown>>(
@@ -70,6 +71,12 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
         `impulse_handlers for this tenant and impulse type — see ` +
         `data/db/init/048-seed-impulse-handlers.sql.`
     );
+    if (durableScoringImpulse) {
+      return { impulseId, handlersExecuted: 0, results: [{
+        handlerId: 'unregistered', status: 'failed',
+        result: { error: 'no_enabled_handler' }, durationMs: 0,
+      }] };
+    }
   }
 
   const results: HandlerExecutionResult[] = [];
@@ -77,21 +84,37 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
   for (const handler of handlers) {
     const start = Date.now();
     try {
+      // A committed scoring impulse can be retried after any later handler
+      // fails or the process restarts. Successful acks are the durable per-
+      // handler completion ledger; never repeat their effects.
+      if (durableScoringImpulse) {
+        const completed = await query(
+          `SELECT 1 FROM impulse_acks
+           WHERE impulse_id = $1 AND handler_id = $2 AND status = 'success' LIMIT 1`,
+          [impulseId, handler.id]
+        );
+        if (completed.rows.length > 0) {
+          results.push({ handlerId: handler.id, status: 'skipped',
+            result: { reason: 'already_completed' }, durationMs: 0 });
+          continue;
+        }
+      }
       const result = await withTimeout(
         executeHandler(handler, impulse),
         HANDLER_TIMEOUT_MS,
         'Handler timeout'
       );
+      if (handler.handlerType === 'webhook' && result.dispatched !== true) {
+        throw new Error(`Webhook delivery failed: ${String(result.reason ?? 'unknown')}`);
+      }
 
       const durationMs = Date.now() - start;
-      results.push({ handlerId: handler.id, status: 'success', result, durationMs });
-
-      // Record acknowledgment
       await query(
         `INSERT INTO impulse_acks (impulse_id, handler_id, status, result)
          VALUES ($1, $2, 'success', $3)`,
         [impulseId, handler.id, JSON.stringify(result)]
       );
+      results.push({ handlerId: handler.id, status: 'success', result, durationMs });
     } catch (error) {
       const durationMs = Date.now() - start;
       const errorResult = { error: error instanceof Error ? error.message : 'Unknown error' };
@@ -105,7 +128,9 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
       );
 
       // Check if handler should be auto-disabled (dead letter)
-      await checkDeadLetter(handler.id);
+      // A scored outbox row must remain retryable. Auto-disabling its handler
+      // would make the next drain falsely treat the impulse as dispatched.
+      if (!durableScoringImpulse) await checkDeadLetter(handler.id);
     }
   }
 
@@ -124,7 +149,7 @@ async function executeHandler(
     case 'notification':
       return executeNotification(impulse, handler.config);
     case 'webhook':
-      return executeWebhook(impulse, handler.config);
+      return executeWebhook(impulse, handler.config, `${impulse.id}:${handler.id}`);
     default:
       return { skipped: true, reason: `Unknown handler type: ${handler.handlerType}` };
   }

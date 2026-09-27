@@ -8,6 +8,13 @@ import { isOwnerSender } from '@/lib/import/messages-importer';
 
 jest.mock('fs/promises');
 
+function ownerClient(query: jest.Mock): PoolClient {
+  return { query: jest.fn((sql: string, ...args: unknown[]) =>
+    sql.startsWith('INSERT INTO research_targets')
+      ? Promise.resolve({ rows: [{ id: 'self-target' }] })
+      : query(sql, ...args)) } as unknown as PoolClient;
+}
+
 const historicalProfile = [
   'First Name,Last Name,Birth Date,Websites',
   'Ada,Lovelace,1815-12-10,"Portfolio [https://example.org/work]; https://example.org/about; trusted.example:443 [https://evil.example/]; javascript:alert(1); Unsafe [ftp://example.org/file]"',
@@ -45,11 +52,29 @@ describe('historical owner profile import', () => {
       }
       return { rows: [] };
     });
-    const client = { query } as unknown as PoolClient;
+    const client = ownerClient(query);
 
     expect((await importFullProfile(client, '/export')).version).toBe(1);
     expect((await importFullProfile(client, '/export')).version).toBe(2);
     expect(query).toHaveBeenCalledWith('UPDATE owner_profiles SET is_current = FALSE WHERE is_current = TRUE');
+    const transactionCommands = jest.mocked(client.query).mock.calls
+      .map(([sql]) => sql)
+      .filter(sql => sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK');
+    expect(transactionCommands).toEqual(['BEGIN', 'COMMIT', 'BEGIN', 'COMMIT']);
+  });
+
+  it('rolls back the owner version when self-target publication fails', async () => {
+    const query = jest.fn(async (sql: string) => {
+      if (sql.startsWith('INSERT INTO owner_profiles')) return { rows: [{ id: 'profile-1' }] };
+      if (sql.startsWith('INSERT INTO research_targets')) throw new Error('target insert failed');
+      return { rows: [] };
+    });
+    await expect(importFullProfile({ query } as unknown as PoolClient, '/export'))
+      .rejects.toThrow('target insert failed');
+    const transactionCommands = query.mock.calls
+      .map(([sql]) => sql)
+      .filter(sql => sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK');
+    expect(transactionCommands).toEqual(['BEGIN', 'ROLLBACK']);
   });
 
   it('never turns malformed or non-http legacy entries into links', () => {
@@ -102,7 +127,7 @@ describe('historical owner profile import', () => {
       }
       return { rows: [] };
     });
-    const client = { query } as unknown as PoolClient;
+    const client = ownerClient(query);
     await importFullProfile(client, '/export');
     jest.mocked(readdir).mockResolvedValue(['Profile.csv'] as never);
     jest.mocked(readFile).mockResolvedValue('First Name,Headline\nAda,New headline');
@@ -119,9 +144,9 @@ describe('historical owner profile import', () => {
 
   it('reports Profile Summary.csv as skipped and counts only processed files', async () => {
     jest.mocked(readdir).mockResolvedValue(['Profile.csv', 'Profile Summary.csv'] as never);
-    const client = { query: jest.fn(async (sql: string) =>
+    const client = ownerClient(jest.fn(async (sql: string) =>
       sql.startsWith('INSERT INTO owner_profiles') ? { rows: [{ id: 'profile-1' }] } : { rows: [] }
-    ) } as unknown as PoolClient;
+    ));
     const result = await importFullProfile(client, '/export');
     expect(result.importedFiles).toEqual(['Profile.csv']);
     expect(result.skippedFiles).toEqual(['Profile Summary.csv']);
@@ -138,7 +163,7 @@ describe('historical owner profile import', () => {
       }
       return { rows: [] };
     });
-    const result = await importFullProfile({ query } as unknown as PoolClient, '/export');
+    const result = await importFullProfile(ownerClient(query), '/export');
     expect(result.importedFiles).toEqual(['Profile.csv']);
     expect(result.skippedFiles).toEqual(['Skills.csv']);
   });
@@ -148,7 +173,7 @@ describe('historical owner profile import', () => {
     const query = jest.fn().mockResolvedValue({ rows: [] });
     await expect(importFullProfile({ query } as unknown as PoolClient, '/export'))
       .rejects.toThrow('Profile.csv is required');
-    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO owner_profiles'), expect.anything());
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('skips an unreadable supplemental file and publishes the valid Profile.csv', async () => {
@@ -158,7 +183,7 @@ describe('historical owner profile import', () => {
     });
     const query = jest.fn(async (sql: string) => sql.startsWith('INSERT INTO owner_profiles')
       ? { rows: [{ id: 'profile-1' }] } : { rows: [] });
-    const result = await importFullProfile({ query } as unknown as PoolClient, '/export');
+    const result = await importFullProfile(ownerClient(query), '/export');
     expect(result.importedFiles).toEqual(['Profile.csv']);
     expect(result.skippedFiles).toEqual(['Registration.csv']);
     expect(query.mock.calls.some(([sql]) => String(sql).startsWith('INSERT INTO owner_profiles'))).toBe(true);
@@ -170,7 +195,7 @@ describe('historical owner profile import', () => {
     const query = jest.fn().mockResolvedValue({ rows: [] });
     await expect(importFullProfile({ query } as unknown as PoolClient, '/export'))
       .rejects.toThrow('must contain a readable row');
-    expect(query.mock.calls.some(([sql]) => String(sql).startsWith('INSERT INTO owner_profiles'))).toBe(false);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('does not treat a previous version as proof that the new Profile.csv is complete', async () => {
@@ -179,7 +204,7 @@ describe('historical owner profile import', () => {
     const query = jest.fn(async (sql: string) => ({ rows: sql.startsWith('SELECT *') ? [{ first_name: 'Existing' }] : [] }));
     await expect(importFullProfile({ query } as unknown as PoolClient, '/export'))
       .rejects.toThrow('must contain a readable row');
-    expect(query.mock.calls.some(([sql]) => String(sql).startsWith('UPDATE owner_profiles'))).toBe(false);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('imports captured Profile.csv bytes after the path changes', async () => {
@@ -188,7 +213,7 @@ describe('historical owner profile import', () => {
     const captured = new Map([['Profile.csv', Buffer.from('First Name,Last Name\nAda,Lovelace')]]);
     jest.mocked(readFile).mockRejectedValue(new Error('path swapped'));
     jest.mocked(readFile).mockClear();
-    const result = await importFullProfile({ query } as unknown as PoolClient, '/export', captured);
+    const result = await importFullProfile(ownerClient(query), '/export', captured);
     expect(result.selfName).toBe('Ada Lovelace');
     expect(readFile).not.toHaveBeenCalled();
   });
@@ -206,7 +231,7 @@ describe('historical owner profile import', () => {
       ['Messages.csv', Buffer.from('Conversation ID,From,To,Content\n1,Ada Lovelace,Bob,Hello\n1,Not Ada Lovelace,Ada Lovelace,Reply')],
       ['Profile.csv', Buffer.from('First Name,Last Name\nAda,Lovelace')],
     ]);
-    const result = await importFullProfile({ query } as unknown as PoolClient, '/export', snapshots);
+    const result = await importFullProfile(ownerClient(query), '/export', snapshots);
     expect(result.importedFiles).toEqual(['Profile.csv', 'Messages.csv']);
   });
 
@@ -224,7 +249,7 @@ describe('historical owner profile import', () => {
       ['Profile.csv', Buffer.from('First Name\nAda')],
       ['Messages.csv', Buffer.from('Conversation ID,From,To,Content\n1,Ada Lovelace,Bob,Hello')],
     ]);
-    const result = await importFullProfile({ query } as unknown as PoolClient, '/export', snapshots);
+    const result = await importFullProfile(ownerClient(query), '/export', snapshots);
     expect(result.skippedFiles).toContain('Messages.csv');
     expect(result.diagnostics).toEqual([expect.stringContaining('both owner first and last name')]);
   });

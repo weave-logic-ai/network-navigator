@@ -1,49 +1,43 @@
 // Auto-generate tasks when a contact's score changes significantly.
-// Called from the scoring pipeline after upsertContactScore.
-// NOTE: When ECC_IMPULSES=true, task generation is handled by the impulse system
-// (see lib/ecc/impulses/handlers/task-generator.ts). This file remains as the
-// fallback path when the impulse system is disabled.
-//
-// The handoff to the impulse system is wired in `scoring/pipeline.ts`'s
-// `scoreContact()`: it calls `emitScoringImpulses` (ecc/impulses/scoring-adapter.ts)
-// immediately before calling this function, so the impulse scoring-adapter emits
-// tier_changed/persona_assigned/score_computed impulses and the task-generator
-// handler creates the same tasks from those impulses. That call site is the ONLY
-// thing standing between "ECC_IMPULSES=true" and "task generation is silently
-// disabled" — see the `impulsesEmitterInvoked` guard below, which existed to
-// close exactly that gap once already (`emitScoringImpulses` had zero production
-// callers despite this early-return assuming it did).
+// The owner pipeline passes forceInline and a pg client so tasks commit with
+// the score and ICP fits. ECC task handlers skip scoring impulses carrying
+// scoreTasksCommitted, including retries after a pending task is completed.
+// Other callers retain the legacy impulse handoff guard below.
 
 import { query } from '@/lib/db/client';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import type { CompositeScore } from './types';
 import { CONTACT_RECOMMENDATION_ELIGIBLE_SQL, contactDisplayName, hasLinkedIdentity, identityFromRow, isExternalContact, type ContactIdentityRow } from '@/lib/contacts/identity';
 import { requireIdentityTaskIndexes } from '@/lib/contacts/task-schema';
+
+export interface ScoreTaskWriteOptions {
+  client?: PoolClient;
+  forceInline?: boolean;
+  source?: 'auto-score' | 'impulse';
+  identityOnly?: boolean;
+}
 
 const ECC_IMPULSES_ENABLED = process.env.ECC_IMPULSES === 'true';
 
 /**
  * Check score transitions and generate tasks when thresholds are crossed.
- * Deduplicates by (task_type, contact_id, source='auto-score', status='pending').
+ * Deduplicates by (task_type, contact_id, source, status='pending').
  *
- * @param impulsesEmitterInvoked - Set by the caller to confirm the ECC impulse
- * emitter (`emitScoringImpulses`) was actually invoked for this score change
- * before calling this function. `scoring/pipeline.ts`'s `scoreContact()` always
- * passes `true` here, since it always calls the emitter immediately before this
- * function (the emitter itself no-ops when ECC_IMPULSES is off). Defaults to
- * `false` so any other/future call site that skips the emitter — the exact
- * misconfiguration that shipped once already — is caught below instead of
- * silently doing nothing.
+ * @param impulsesEmitterInvoked - Legacy guard for callers that leave task
+ * creation to ECC. The owner pipeline uses forceInline for atomic writes.
  */
 export async function checkAndGenerateTasks(
   contactId: string,
   oldScore: CompositeScore | null,
   newScore: CompositeScore,
-  impulsesEmitterInvoked: boolean = false
+  impulsesEmitterInvoked: boolean = false,
+  options: ScoreTaskWriteOptions = {}
 ): Promise<void> {
-  // When ECC impulse system is active, task generation is handled by impulse handlers.
-  // The impulse scoring-adapter emits tier_changed/persona_assigned impulses,
-  // and the task-generator handler creates the same tasks.
-  if (ECC_IMPULSES_ENABLED) {
+  const runQuery = <T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<QueryResult<T>> =>
+    options.client ? options.client.query<T>(sql, params) : query<T>(sql, params);
+  const source = options.source ?? 'auto-score';
+  // Legacy callers may still leave task generation to ECC handlers.
+  if (ECC_IMPULSES_ENABLED && !options.forceInline) {
     if (!impulsesEmitterInvoked) {
       // Misconfiguration guard: ECC_IMPULSES is on, but whoever called us did
       // not go through the wired path in scoring/pipeline.ts that dispatches
@@ -52,15 +46,14 @@ export async function checkAndGenerateTasks(
       console.error(
         `[scoring] ECC_IMPULSES is enabled but no impulse emitter ran for contact ${contactId}. ` +
           'Automatic task generation is disabled for this score change and nothing replaced it. ' +
-          "Ensure this path goes through scoring/pipeline.ts's scoreContact(), which dispatches " +
-          'emitScoringImpulses before calling checkAndGenerateTasks.'
+          'Use the owner scoring transaction or emit scoring impulses before calling checkAndGenerateTasks.'
       );
     }
     return;
   }
 
   // Degree zero is the imported owner identity; missing identity is a repair task.
-  const contactResult = await query<ContactIdentityRow>(
+  const contactResult = await runQuery<ContactIdentityRow>(
     `SELECT full_name, first_name, last_name, linkedin_url, degree, is_archived
      FROM contacts WHERE id = $1`,
     [contactId]
@@ -84,7 +77,7 @@ export async function checkAndGenerateTasks(
       taskType: 'REPAIR_IDENTITY',
       priority: 1,
     });
-  } else {
+  } else if (!options.identityOnly) {
     // 1. Contact reaches Gold tier (was not gold before)
     const wasGold = oldScore?.tier === 'gold';
     if (newScore.tier === 'gold' && !wasGold) {
@@ -134,14 +127,14 @@ export async function checkAndGenerateTasks(
     }
   }
 
-  if (tasks.length > 0) await requireIdentityTaskIndexes();
+  if (tasks.length > 0) await requireIdentityTaskIndexes(options.client);
 
   // Both generator sources use database uniqueness for concurrent deduplication.
   for (const task of tasks) {
     if (task.taskType === 'REPAIR_IDENTITY') {
-      await query(
+      await runQuery(
         `INSERT INTO tasks (title, description, task_type, status, priority, contact_id, source, url)
-         SELECT $1, $2, $3, 'pending', $4, $5::uuid, 'auto-score', $6
+         SELECT $1, $2, $3, 'pending', $4, $5::uuid, $7, $6
          FROM contacts c WHERE c.id = $5::uuid AND c.is_archived = FALSE AND c.degree > 0
            AND COALESCE(c.linkedin_url !~* '^self:', TRUE)
            AND NOT COALESCE((${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}), FALSE)
@@ -149,20 +142,20 @@ export async function checkAndGenerateTasks(
          ON CONFLICT (contact_id) WHERE task_type = 'REPAIR_IDENTITY' AND status = 'pending'
            AND source IN ('auto-score', 'impulse')
          DO NOTHING`,
-        [task.title, task.description, task.taskType, task.priority, contactId, `/contacts/${contactId}`]
+        [task.title, task.description, task.taskType, task.priority, contactId, `/contacts/${contactId}`, source]
       );
       continue;
     }
-    await query(
+    await runQuery(
       `INSERT INTO tasks (title, description, task_type, status, priority, contact_id, source, url)
-       SELECT $1, $2, $3, 'pending', $4, $5::uuid, 'auto-score', $6
+       SELECT $1, $2, $3, 'pending', $4, $5::uuid, $7, $6
        FROM contacts c WHERE c.id = $5::uuid AND ${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}
        FOR SHARE OF c
        ON CONFLICT (contact_id, source, task_type)
          WHERE status = 'pending' AND source IN ('auto-score', 'impulse')
            AND task_type IN ('SEND_MESSAGE', 'RESEARCH', 'ENGAGE_CONTENT')
        DO NOTHING`,
-      [task.title, task.description, task.taskType, task.priority, contactId, `/contacts/${contactId}`]
+      [task.title, task.description, task.taskType, task.priority, contactId, `/contacts/${contactId}`, source]
     );
   }
 }

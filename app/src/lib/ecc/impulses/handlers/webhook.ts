@@ -6,11 +6,14 @@
 //     => Promise<Record<string, unknown>>
 //
 // Behavior:
-//   Delivers the impulse envelope to an external HTTP endpoint configured on
-//   the `impulse_handlers` row (config JSONB). Does NOT retry — retry policy
-//   belongs to a future dead-letter worker. Non-2xx responses, network errors,
-//   and timeouts are returned as graceful `{ dispatched: false, ... }` results
-//   so the dispatcher records a clean ack rather than raising.
+//   Delivers the impulse envelope once per call to an external HTTP endpoint
+//   configured on the `impulse_handlers` row (config JSONB). Non-2xx responses,
+//   network errors, and timeouts return `{ dispatched: false, ... }`; the
+//   dispatcher records a failed ack and the scoring recovery worker retries
+//   committed scoring impulses with the same idempotency key. Delivery is
+//   at-least-once: a process can send successfully and crash before writing
+//   the success ack, so a receiver must enforce this key to avoid duplicate
+//   external effects. The sender cannot promise exactly-once delivery.
 //
 // Config shape (from impulse_handlers.config):
 //   - target_url: string   (REQUIRED) — destination URL (http/https only)
@@ -58,7 +61,8 @@ type WebhookConfig = {
 
 export async function executeWebhook(
   impulse: Impulse,
-  config: Record<string, unknown>
+  config: Record<string, unknown>,
+  deliveryKey: string = impulse.id
 ): Promise<Record<string, unknown>> {
   let parsed: WebhookConfig;
   try {
@@ -83,6 +87,7 @@ export async function executeWebhook(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...parsed.headers,
+    'Idempotency-Key': deliveryKey,
   };
   if (parsed.secret) {
     const sig = createHmac('sha256', parsed.secret).update(body).digest('hex');

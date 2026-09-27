@@ -1,44 +1,57 @@
 // POST /api/scoring/run - Trigger scoring run (single or batch)
-//
-// Phase 1.5 — WS-4 per-target ICP plumbing (see
-// `.planning/research-tools-sprint/08-phased-delivery.md` §3.4): the body now
-// accepts an optional `targetId`. When provided (and the targets flag is on),
-// `scoreContact` / `scoreBatch` swap the owner-default ICP list for the ICPs
-// attached to the target's active lens. When omitted the behavior is
-// exactly today's.
+// Persisted scores are owner baseline only.
 
 import { NextRequest, NextResponse } from 'next/server';
-import { scoreContact, scoreBatch } from '@/lib/scoring/pipeline';
+import { scoreContact, scoreBatchDetailed } from '@/lib/scoring/pipeline';
 import { scoreContactWithProvenance } from '@/lib/ecc/causal-graph/scoring-adapter';
 import { ECC_FLAGS } from '@/lib/ecc/types';
 
 export async function POST(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const body = await request.json().catch(() => ({}));
-    const { contactId, contactIds, profileName, targetId } = body as {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ error: 'JSON body must be an object' }, { status: 400 });
+    }
+    if (searchParams.has('targetId') || Object.hasOwn(body, 'targetId')) {
+      return NextResponse.json({ error: 'targetId is only supported by the read-only scoring context preview' }, { status: 422 });
+    }
+    const { contactId, contactIds, profileName } = body as {
       contactId?: string;
       contactIds?: string[];
       profileName?: string;
-      targetId?: string;
     };
-    // Allow ?targetId= as a query param too — cheaper for simple client fetches.
-    const resolvedTargetId = targetId ?? searchParams.get('targetId') ?? undefined;
+    if (Object.keys(body).some(key => !['contactId', 'contactIds', 'profileName'].includes(key)) ||
+        (contactId !== undefined && (typeof contactId !== 'string' || contactId.length === 0)) ||
+        (contactIds !== undefined && (!Array.isArray(contactIds) || contactIds.some(id => typeof id !== 'string' || id.length === 0))) ||
+        (profileName !== undefined && (typeof profileName !== 'string' || profileName.length === 0)) ||
+        (contactId !== undefined && contactIds !== undefined)) {
+      return NextResponse.json({ error: 'Invalid scoring request body' }, { status: 400 });
+    }
 
     if (contactId) {
       const result = ECC_FLAGS.causalGraph
-        ? await scoreContactWithProvenance(contactId, profileName, resolvedTargetId)
-        : await scoreContact(contactId, profileName, resolvedTargetId);
+        ? await scoreContactWithProvenance(contactId, profileName)
+        : await scoreContact(contactId, profileName);
       return NextResponse.json({ data: result });
     }
 
-    const results = await scoreBatch(contactIds, profileName, resolvedTargetId);
+    const { results, failures, total } = await scoreBatchDetailed(contactIds, profileName);
     return NextResponse.json({
+      ...(failures.length > 0 ? { error: 'Batch scoring failed for one or more contacts' } : {}),
       data: {
         scored: results.length,
+        failed: failures.length,
+        total,
+        failures,
         results: results.slice(0, 100), // Limit response size
       },
-    });
+    }, { status: failures.length > 0 ? 500 : 200 });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to run scoring', details: error instanceof Error ? error.message : undefined },

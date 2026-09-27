@@ -1,10 +1,6 @@
 // POST /api/scoring/rescore-all - Trigger a full rescore of all contacts
 // Returns a run ID for status polling
-//
-// Phase 1.5 — WS-4 per-target ICP plumbing: body or query may include a
-// `targetId`. When set (and the targets flag is on), every contact is
-// rescored under the target's active lens. When absent, behavior is today's
-// owner-default rescore.
+// Persisted scores are owner baseline only.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { triggerRescoreAll } from '@/lib/scoring/auto-score';
@@ -12,15 +8,28 @@ import { triggerRescoreAll } from '@/lib/scoring/auto-score';
 export async function POST(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const body = (await request.json().catch(() => ({}))) as { targetId?: string };
-    const targetId = body.targetId ?? searchParams.get('targetId') ?? undefined;
+    let body: unknown;
+    try {
+      const raw = await request.text();
+      body = raw.length === 0 ? {} : JSON.parse(raw);
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ error: 'JSON body must be an object' }, { status: 400 });
+    }
+    if (searchParams.has('targetId') || Object.hasOwn(body, 'targetId')) {
+      return NextResponse.json({ error: 'targetId is only supported by the read-only scoring context preview' }, { status: 422 });
+    }
+    if (Object.keys(body).length > 0) {
+      return NextResponse.json({ error: 'Invalid rescore request body' }, { status: 400 });
+    }
 
-    const runId = await triggerRescoreAll(targetId);
+    const runId = await triggerRescoreAll();
     return NextResponse.json({
       data: {
         runId,
         status: 'running',
-        targetId: targetId ?? null,
         message: 'Rescore started. Poll /api/scoring/status?runId= for progress.',
       },
     });

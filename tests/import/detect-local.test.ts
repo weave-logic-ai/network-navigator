@@ -119,7 +119,9 @@ describe('full profile route supplemental snapshots', () => {
       'Volunteering.csv', 'Projects.csv'];
     jest.mocked(readdir).mockResolvedValue(names as never);
     const client = { query: jest.fn(async (sql: string) =>
-      sql.startsWith('INSERT INTO owner_profiles') ? { rows: [{ id: 'profile-1' }] } : { rows: [] }),
+      sql.startsWith('INSERT INTO owner_profiles') ? { rows: [{ id: 'profile-1' }] }
+        : sql.startsWith('INSERT INTO research_targets') ? { rows: [{ id: 'self-target' }] }
+          : { rows: [] }),
       release: jest.fn() };
     jest.mocked(getPool).mockReturnValue({ connect: async () => client } as never);
     jest.mocked(open).mockImplementation(async path => {
@@ -142,7 +144,9 @@ describe('full profile route supplemental snapshots', () => {
 
   it('imports valid Profile.csv and reports an unreadable supplemental as skipped', async () => {
     const client = { query: jest.fn(async (sql: string) =>
-      sql.startsWith('INSERT INTO owner_profiles') ? { rows: [{ id: 'profile-1' }] } : { rows: [] }),
+      sql.startsWith('INSERT INTO owner_profiles') ? { rows: [{ id: 'profile-1' }] }
+        : sql.startsWith('INSERT INTO research_targets') ? { rows: [{ id: 'self-target' }] }
+          : { rows: [] }),
       release: jest.fn() };
     jest.mocked(getPool).mockReturnValue({ connect: async () => client } as never);
     jest.mocked(open).mockImplementation(async path => {

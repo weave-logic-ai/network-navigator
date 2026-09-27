@@ -54,8 +54,8 @@ export async function saveDiscoveredIcp(
 
   // No duplicates -- create the ICP profile
   const result = await query<{ id: string }>(
-    `INSERT INTO icp_profiles (name, description, criteria, niche_id, is_active)
-     VALUES ($1, $2, $3, $4, true)
+    `INSERT INTO icp_profiles (name, description, criteria, niche_id, is_active, owner_baseline)
+     VALUES ($1, $2, $3, $4, true, TRUE)
      RETURNING id`,
     [
       discovery.suggestedName,

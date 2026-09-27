@@ -253,6 +253,43 @@ export function detectDeepFileType(filename: string): string | null {
 
 export class OwnerProfileImportError extends Error {}
 
+interface ValidatedProfileInput {
+  entries: readonly string[];
+  filename: string;
+  data: Partial<OwnerProfileData>;
+}
+
+async function validateProfileInput(
+  directoryPath: string,
+  snapshots?: ReadonlyMap<string, Buffer>,
+  directoryEntries?: readonly string[],
+): Promise<ValidatedProfileInput> {
+  const entries = directoryEntries ?? (snapshots ? [...snapshots.keys()] : await readdir(directoryPath));
+  const filename = entries.find(name => name.toLowerCase() === 'profile.csv');
+  if (!filename) throw new OwnerProfileImportError('Profile.csv is required to import an owner profile');
+
+  let data: Partial<OwnerProfileData>;
+  try {
+    let content: string;
+    if (snapshots) {
+      const bytes = snapshots.get(filename);
+      if (!bytes) throw new Error('Captured file is unavailable');
+      content = bytes.toString('utf-8');
+    } else {
+      const filePath = join(directoryPath, filename);
+      if (!(await stat(filePath)).isFile()) throw new Error('Not a regular file');
+      content = await readFile(filePath, 'utf-8');
+    }
+    data = await parseProfileCsv(content);
+  } catch (error) {
+    throw new OwnerProfileImportError(`Cannot import ${filename}: ${error instanceof Error ? error.message : 'unreadable file'}`);
+  }
+  if (![data.firstName, data.lastName].some(name => Boolean(name?.trim()))) {
+    throw new OwnerProfileImportError('Profile.csv must contain a readable row with a first or last name');
+  }
+  return { entries, filename, data };
+}
+
 export async function importFullProfile(
   client: PoolClient,
   directoryPath: string,
@@ -266,13 +303,16 @@ export async function importFullProfile(
   diagnostics: string[];
   selfName: string;
 }> {
+  // Reject invalid identity before taking the publication lock. Reuse the
+  // validated data in the transaction so the file cannot change between reads.
+  const validatedProfile = await validateProfileInput(directoryPath, snapshots, directoryEntries);
   await client.query('BEGIN');
   try {
     // Lock before reading the current version so concurrent imports cannot
     // allocate the same version or publish two current rows.
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       ['owner-profile-publication']);
-    const result = await importFullProfileLocked(client, directoryPath, snapshots, directoryEntries);
+    const result = await importFullProfileLocked(client, directoryPath, validatedProfile, snapshots);
     await client.query('COMMIT');
     return result;
   } catch (error) {
@@ -284,8 +324,8 @@ export async function importFullProfile(
 async function importFullProfileLocked(
   client: PoolClient,
   directoryPath: string,
+  validatedProfile: ValidatedProfileInput,
   snapshots?: ReadonlyMap<string, Buffer>,
-  directoryEntries?: readonly string[],
 ): Promise<{
   profileId: string;
   version: number;
@@ -309,12 +349,9 @@ async function importFullProfileLocked(
   let messageOwnerName = '';
 
   // Read directory
-  const entries = directoryEntries ?? (snapshots ? [...snapshots.keys()] : await readdir(directoryPath));
+  const entries = validatedProfile.entries;
   const csvFiles = entries.filter(name => name.toLowerCase().endsWith('.csv'))
     .sort((a, b) => Number(b.toLowerCase() === 'profile.csv') - Number(a.toLowerCase() === 'profile.csv'));
-  if (!csvFiles.some(name => name.toLowerCase() === 'profile.csv')) {
-    throw new OwnerProfileImportError('Profile.csv is required to import an owner profile');
-  }
   if (!csvFiles.some(name => name.toLowerCase() === 'messages.csv')) {
     diagnostics.push('Messages.csv counts unavailable: no Messages.csv was supplied in this import.');
   }
@@ -324,6 +361,17 @@ async function importFullProfileLocked(
     const fileType = detectDeepFileType(filename);
     if (!fileType) {
       skippedFiles.push(filename);
+      continue;
+    }
+
+    if (filename === validatedProfile.filename) {
+      const data = validatedProfile.data;
+      incomingIdentity = true;
+      if (data.firstName?.trim() && data.lastName?.trim()) {
+        messageOwnerName = `${data.firstName.trim()} ${data.lastName.trim()}`;
+      }
+      Object.assign(profile, data);
+      profile.importedFiles.push(filename);
       continue;
     }
 
@@ -346,15 +394,6 @@ async function importFullProfileLocked(
         }
       }
       switch (fileType) {
-        case 'profile': {
-          const data = await parseProfileCsv(content);
-          incomingIdentity = [data.firstName, data.lastName].some(name => Boolean(name?.trim()));
-          if (data.firstName?.trim() && data.lastName?.trim()) {
-            messageOwnerName = `${data.firstName.trim()} ${data.lastName.trim()}`;
-          }
-          Object.assign(profile, data);
-          break;
-        }
         case 'email': {
           const email = await parseEmailsCsv(content);
           if (email) profile.email = email;
@@ -477,6 +516,8 @@ async function importFullProfileLocked(
     throw new OwnerProfileImportError('Profile.csv must contain a readable row with a first or last name');
   }
 
+  // The caller owns the transaction and publication lock. Publish the version
+  // and self-target together in that same transaction.
   // Determine version: mark previous versions as non-current
   const prevResult = await client.query<{ max_version: number | null }>(
     'SELECT MAX(version) AS max_version FROM owner_profiles'
@@ -567,6 +608,13 @@ async function importFullProfileLocked(
 
   const selfName = [profile.firstName, profile.lastName].filter(Boolean).join(' ');
 
+  const selfTarget = await client.query(
+    `INSERT INTO research_targets (tenant_id, kind, owner_id, label)
+     SELECT id, 'self', $1, $2 FROM tenants WHERE slug = 'default'
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [insertResult.rows[0].id, selfName || 'Self']
+  );
+  if (!selfTarget.rows[0]) throw new Error('Full profile import requires a default tenant and new self target');
   return {
     profileId: insertResult.rows[0].id,
     version: newVersion,

@@ -34,11 +34,9 @@ async function resolveTenantId(
  * When ECC_CAUSAL_GRAPH is disabled, falls through to the original pipeline.
  *
  * Signature compatibility: existing callers pass only `(contactId, profileName?)`.
- * The new `targetId` parameter is a passthrough — it is forwarded to the
- * underlying scoring pipeline and used to resolve the tenant id so causal
- * nodes are written under the correct tenant rather than the prior hardcoded
- * `'default'` literal. `tenantIdOverride` is reserved for test setups and
- * internal callers that already know the tenant.
+ * `targetId` is rejected before causal nodes are created because persisted
+ * scores and transition impulses represent only the owner baseline.
+ * `tenantIdOverride` is reserved for test setups and internal callers.
  */
 export async function scoreContactWithProvenance(
   contactId: string,
@@ -46,6 +44,9 @@ export async function scoreContactWithProvenance(
   targetId?: string,
   tenantIdOverride?: string
 ): Promise<ScoringRunResult & { _causal?: CausalGraphTrace }> {
+  if (targetId !== undefined) {
+    throw new Error('targetId is only supported by the read-only scoring context preview');
+  }
   if (!ECC_FLAGS.causalGraph) {
     return originalScoreContact(contactId, profileName, targetId);
   }

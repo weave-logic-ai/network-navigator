@@ -75,6 +75,14 @@ describe('executeTaskGenerator', () => {
     expect(String(inserts[0][0])).toContain('ON CONFLICT (contact_id, source, task_type)');
   });
 
+  it('does not regenerate a task from a replayed scoring impulse after the score transaction committed it', async () => {
+    const result = await executeTaskGenerator(baseImpulse({
+      payload: { from: 'silver', to: 'gold', scoreTasksCommitted: true },
+    }), {});
+    expect(result).toEqual({ tasksCreated: 0, reason: 'committed_with_score' });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
   it('creates RESEARCH task when persona_assigned to buyer', async () => {
     mockQuery.mockReturnValueOnce(mockRows([namedContact('John Buyer')]));
     mockQuery.mockReturnValueOnce(mockRows([{ id: 'created-task' }])); // INSERT ... RETURNING
