@@ -8,6 +8,7 @@
 // the shortcut does not clobber normal typing.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 
 interface ContactResult {
   id: string;
@@ -44,31 +45,35 @@ export function TargetPickerModal() {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+
+  const openPicker = useCallback(() => {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+  }, []);
+
+  const closePicker = useCallback(() => {
+    setOpen(false);
+    setQ("");
+    setResults([]);
+  }, []);
 
   // Global `T` shortcut.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && open) {
-        setOpen(false);
-        return;
-      }
       if (e.key.toLowerCase() !== "t") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (shouldIgnoreKey(e)) return;
       e.preventDefault();
-      setOpen(true);
+      openPicker();
     }
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
-
-  // Focus input when opened.
-  useEffect(() => {
-    if (open) {
-      const id = setTimeout(() => inputRef.current?.focus(), 30);
-      return () => clearTimeout(id);
-    }
-  }, [open]);
+    window.addEventListener("open-target-picker", openPicker);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("open-target-picker", openPicker);
+    };
+  }, [openPicker]);
 
   // Search as you type.
   useEffect(() => {
@@ -135,38 +140,39 @@ export function TargetPickerModal() {
         body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
       });
       if (!stateRes.ok) return;
-      const stateJson = (await stateRes.json()) as {
-        data?: { secondaryTargetId?: string | null } | null;
-      };
-      if (stateJson.data?.secondaryTargetId !== createJson.data.id) return;
-      setOpen(false);
-      setQ("");
+      closePicker();
       window.dispatchEvent(new CustomEvent("research-target-changed", {
         detail: {
-          secondaryTargetId: stateJson.data.secondaryTargetId,
+          secondaryTargetId: createJson.data.id,
           secondaryTargetLabel: result.label,
         },
       }));
     } catch {
       // Silent — leave modal open so user can retry.
     }
-  }, []);
-
-  if (!open) return null;
+  }, [closePicker]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-24"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Target picker"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) setOpen(false);
-      }}
-    >
-      <div className="w-full max-w-xl rounded-lg border border-border bg-background shadow-lg">
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => next ? openPicker() : closePicker()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/40" />
+        <DialogPrimitive.Content
+          aria-modal="true"
+          aria-describedby={undefined}
+          className="fixed left-1/2 top-24 z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-lg border border-border bg-background shadow-lg outline-none"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            inputRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (openerRef.current?.isConnected) openerRef.current.focus();
+          }}
+        >
+        <DialogPrimitive.Title className="sr-only">Target picker</DialogPrimitive.Title>
         <input
           ref={inputRef}
+          aria-label="Search contacts and companies"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search contacts and companies..."
@@ -204,7 +210,8 @@ export function TargetPickerModal() {
             </button>
           ))}
         </div>
-      </div>
-    </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }

@@ -43,9 +43,23 @@ interface GraphData {
   stats: {
     totalNodes: number;
     loadedNodes: number;
+    availableNodes: number;
+    truncatedNodes: number;
     totalEdges: number;
+    availableEdges: number;
+    truncatedEdges: number;
     communities: number;
   };
+}
+
+export function formatGraphCounts(stats: GraphData["stats"]): string {
+  const truncated = [
+    stats.truncatedNodes > 0 ? `${stats.truncatedNodes} ${stats.truncatedNodes === 1 ? "node" : "nodes"}` : null,
+    stats.truncatedEdges > 0 ? `${stats.truncatedEdges} ${stats.truncatedEdges === 1 ? "edge" : "edges"}` : null,
+  ].filter(Boolean);
+  return `${stats.loadedNodes}/${stats.availableNodes} nodes, ` +
+    `${stats.totalEdges}/${stats.availableEdges} edges` +
+    (truncated.length ? ` (${truncated.join(", ")} truncated)` : "");
 }
 
 interface SigmaGraphProps {
@@ -91,6 +105,7 @@ const EDGE_TYPE_OPTIONS = [
   { value: "INVITED_BY", label: "Invited" },
   { value: "ENDORSED", label: "Endorsed" },
   { value: "RECOMMENDED", label: "Recommended" },
+  { value: "company-context", label: "Company links" },
 ];
 
 /** One action from a selected graph node writes only the secondary target. */
@@ -209,7 +224,7 @@ export function SigmaGraph({
       const params = new URLSearchParams();
       params.set("limit", String(limit));
       if (nicheId) params.set("nicheId", nicheId);
-      if (edgeTypes.length > 0) params.set("edgeTypes", edgeTypes.join(","));
+      params.set("edgeTypes", edgeTypes.join(","));
       if (provenanceOn) params.set("includeProvenanceEdges", "true");
       if (activeRootTargetId) params.set("primaryTargetId", activeRootTargetId);
 
@@ -555,7 +570,7 @@ export function SigmaGraph({
         </div>
         {data?.stats && (
           <span className="text-xs text-muted-foreground ml-auto">
-            {data.stats.loadedNodes}/{data.stats.totalNodes} nodes, {data.stats.totalEdges} edges
+            {formatGraphCounts(data.stats)}
           </span>
         )}
       </div>

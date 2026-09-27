@@ -42,22 +42,48 @@ const TIER_COLORS: Record<string, string> = {
   unscored: "#d1d5db",
 };
 
+const DEFAULT_EDGE_TYPES = [
+  "CONNECTED_TO", "MESSAGED", "same-company", "INVITED_BY",
+  "ENDORSED", "RECOMMENDED", "company-context",
+];
+const PROVENANCE_EDGE_TYPES = ["evidence_for", "derived_from"];
+const SUPPORTED_EDGE_TYPES = new Set([...DEFAULT_EDGE_TYPES, ...PROVENANCE_EDGE_TYPES]);
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const limit = Math.min(
-      parseInt(searchParams.get("limit") || "500", 10),
-      6000
-    );
+    const rawLimit = searchParams.get("limit") ?? "500";
+    const rawMinPagerank = searchParams.get("minPagerank") ?? "0";
+    const parsedLimit = Number(rawLimit);
+    const minPagerank = Number(rawMinPagerank);
+    if (!Number.isInteger(parsedLimit) || parsedLimit < 1 ||
+        !Number.isFinite(minPagerank) || minPagerank < 0) {
+      return NextResponse.json({ error: "Invalid graph query parameters" }, { status: 400 });
+    }
+    const limit = Math.min(parsedLimit, 6000);
     const nicheId = searchParams.get("nicheId");
     const edgeTypesParam = searchParams.get("edgeTypes");
-    const minPagerank = parseFloat(searchParams.get("minPagerank") || "0");
     // Phase 4 Track I — provenance edges are opt-in. When the caller passes
     // `includeProvenanceEdges=true`, we pull `evidence_for` / `derived_from`
     // alongside the real edges. Default behaviour is unchanged.
     const includeProvenanceEdges =
       searchParams.get("includeProvenanceEdges") === "true";
     const primaryTargetIdParam = searchParams.get("primaryTargetId");
+
+    // An explicitly present empty value is an all-off selection. Provenance
+    // augments a nonempty selection, but cannot override all-off.
+    const baseEdgeTypes = edgeTypesParam === null
+      ? DEFAULT_EDGE_TYPES
+      : edgeTypesParam === "" ? [] : edgeTypesParam.split(",");
+    if (baseEdgeTypes.some((type) => !SUPPORTED_EDGE_TYPES.has(type))) {
+      return NextResponse.json({ error: "Unsupported edge type" }, { status: 400 });
+    }
+    const edgeTypeFilter = [...new Set(
+      baseEdgeTypes.length && includeProvenanceEdges
+        ? [...baseEdgeTypes, ...PROVENANCE_EDGE_TYPES]
+        : baseEdgeTypes
+    )];
+    const storedEdgeTypes = edgeTypeFilter.filter((type) => type !== "company-context");
 
     // Only a secondary contact or company can re-root the graph. Primary/self
     // continues to use the default listing.
@@ -71,20 +97,6 @@ export async function GET(request: NextRequest) {
         rootCompanyId = getTargetEntityId(target);
       }
     }
-
-    const baseEdgeTypes = edgeTypesParam
-      ? edgeTypesParam.split(",")
-      : [
-          "CONNECTED_TO",
-          "MESSAGED",
-          "same-company",
-          "INVITED_BY",
-          "ENDORSED",
-          "RECOMMENDED",
-        ];
-    const edgeTypeFilter = includeProvenanceEdges
-      ? [...baseEdgeTypes, "evidence_for", "derived_from"]
-      : baseEdgeTypes;
 
     // Build nodes query — top contacts by PageRank, optionally filtered by niche
     let nodesQuery: string;
@@ -102,7 +114,7 @@ export async function GET(request: NextRequest) {
           SELECT cm.cluster_id
           FROM cluster_memberships cm
           WHERE cm.contact_id = c.id
-          ORDER BY cm.membership_score DESC
+          ORDER BY cm.membership_score DESC, cm.cluster_id ASC
           LIMIT 1
         ) top_cluster ON true`;
 
@@ -129,15 +141,16 @@ export async function GET(request: NextRequest) {
         )
         SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
-               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
+               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id,
+               COUNT(*) OVER()::int AS available_nodes
         FROM contacts c
         INNER JOIN neighborhood n ON n.id = c.id
         LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
         ${clusterJoin}
         WHERE c.is_archived = FALSE
-          AND COALESCE(gm.pagerank, 0) >= $2
-        ORDER BY COALESCE(gm.pagerank, 0) DESC
+          AND (COALESCE(gm.pagerank, 0) >= $2 OR c.id = $1)
+        ORDER BY (c.id = $1) DESC, COALESCE(gm.pagerank, 0) DESC, c.id ASC
         LIMIT $3`;
       nodesParams.push(rootContactId, minPagerank, limit);
     } else if (rootCompanyId) {
@@ -154,7 +167,8 @@ export async function GET(request: NextRequest) {
         )
         SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
-               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
+               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id,
+               COUNT(*) OVER()::int AS available_nodes
         FROM contacts c
         INNER JOIN neighborhood n ON n.id = c.id
         LEFT JOIN contact_scores cs ON cs.contact_id = c.id
@@ -162,7 +176,7 @@ export async function GET(request: NextRequest) {
         ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $2
-        ORDER BY COALESCE(gm.pagerank, 0) DESC
+        ORDER BY COALESCE(gm.pagerank, 0) DESC, c.id ASC
         LIMIT $3`;
       nodesParams.push(rootCompanyId, minPagerank, limit);
     } else if (nicheId) {
@@ -170,7 +184,8 @@ export async function GET(request: NextRequest) {
         SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
                gm.pagerank, gm.betweenness_centrality,
-               nm.niche_id, top_cluster.cluster_id
+               nm.niche_id, top_cluster.cluster_id,
+               COUNT(*) OVER()::int AS available_nodes
         FROM contacts c
         LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
@@ -184,21 +199,22 @@ export async function GET(request: NextRequest) {
         ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $${paramIdx + 1}
-        ORDER BY nm.niche_id IS NOT NULL DESC, COALESCE(gm.pagerank, 0) DESC
+        ORDER BY nm.niche_id IS NOT NULL DESC, COALESCE(gm.pagerank, 0) DESC, c.id ASC
         LIMIT $${paramIdx + 2}`;
       nodesParams.push(nicheId, minPagerank, limit);
     } else {
       nodesQuery = `
         SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
                c.current_company, c.title,
-               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
+               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id,
+               COUNT(*) OVER()::int AS available_nodes
         FROM contacts c
         LEFT JOIN contact_scores cs ON cs.contact_id = c.id
         LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
         ${clusterJoin}
         WHERE c.is_archived = FALSE
           AND COALESCE(gm.pagerank, 0) >= $1
-        ORDER BY COALESCE(gm.pagerank, 0) DESC
+        ORDER BY COALESCE(gm.pagerank, 0) DESC, c.id ASC
         LIMIT $2`;
       nodesParams.push(minPagerank, limit);
     }
@@ -215,6 +231,7 @@ export async function GET(request: NextRequest) {
       betweenness_centrality: number | null;
       niche_id?: string | null;
       cluster_id: string | null;
+      available_nodes?: number;
     }>(nodesQuery, nodesParams);
 
     const nodeIds = new Set(nodesRes.rows.map((r) => r.id));
@@ -276,40 +293,41 @@ export async function GET(request: NextRequest) {
     // A focused neighborhood can be arbitrarily far down the global edges
     // table. Filter in SQL before the cap so its real edges are not lost to
     // the first 20,000 unrelated rows.
-    const focused = Boolean(rootContactId || rootCompanyId);
-    const edgesRes = await query<{
+    type EdgeRow = {
       id: string;
       source_contact_id: string;
       target_contact_id: string;
       edge_type: string;
       weight: number;
-    }>(
-      `SELECT id, source_contact_id, target_contact_id, edge_type, weight
+      available_edges: number;
+    };
+    const edgesRes = storedEdgeTypes.length === 0 || nodeIds.size === 0
+      ? { rows: [] as EdgeRow[] }
+      : await query<EdgeRow>(
+      `SELECT id, source_contact_id, target_contact_id, edge_type, weight,
+              COUNT(*) OVER()::int AS available_edges
        FROM edges
        WHERE target_contact_id IS NOT NULL
          AND edge_type = ANY($1)
-         ${focused ? "AND source_contact_id = ANY($2::uuid[]) AND target_contact_id = ANY($2::uuid[])" : ""}
+         AND source_contact_id = ANY($2::uuid[])
+         AND target_contact_id = ANY($2::uuid[])
+       ORDER BY id ASC
        LIMIT 20000`,
-      focused ? [edgeTypeFilter, [...nodeIds]] : [edgeTypeFilter]
+      [storedEdgeTypes, [...nodeIds]]
     );
 
-    // Filter edges to only those between loaded nodes
-    const edges = edgesRes.rows
-      .filter(
-        (e) =>
-          nodeIds.has(e.source_contact_id) && nodeIds.has(e.target_contact_id)
-      )
-      .map((e) => ({
-        key: e.id,
-        source: e.source_contact_id,
-        target: e.target_contact_id,
-        attributes: {
-          type: e.edge_type,
-          weight: e.weight,
-        },
-      }));
+    // The SQL has already restricted both endpoints to loaded contacts.
+    const edges = edgesRes.rows.map((e) => ({
+      key: e.id,
+      source: e.source_contact_id,
+      target: e.target_contact_id,
+      attributes: {
+        type: e.edge_type,
+        weight: e.weight,
+      },
+    }));
 
-    if (rootCompanyId && nodeIds.size > 0 && nodes.some((n) => n.key === rootCompanyId)) {
+    if (edgeTypeFilter.includes("company-context") && rootCompanyId && nodeIds.size > 0 && nodes.some((n) => n.key === rootCompanyId)) {
       for (const contactId of nodeIds) {
         edges.push({
           key: `company-context:${rootCompanyId}:${contactId}`,
@@ -319,6 +337,10 @@ export async function GET(request: NextRequest) {
         });
       }
     }
+
+    const companyLoaded = Boolean(rootCompanyId && nodes.some((n) => n.key === rootCompanyId));
+    const availableNodes = (nodesRes.rows[0]?.available_nodes ?? 0) + (companyLoaded ? 1 : 0);
+    const availableEdges = (edgesRes.rows[0]?.available_edges ?? 0) + (edges.length - edgesRes.rows.length);
 
     // Stats
     const totalRes = await query<{ cnt: string }>(
@@ -335,9 +357,13 @@ export async function GET(request: NextRequest) {
         edges,
         focusNodeId: rootContactId || rootCompanyId,
         stats: {
-          totalNodes: parseInt(totalRes.rows[0]?.cnt || "0", 10),
+          totalNodes: parseInt(totalRes.rows[0]?.cnt || "0", 10) + (companyLoaded ? 1 : 0),
           loadedNodes: nodes.length,
+          availableNodes,
+          truncatedNodes: Math.max(0, availableNodes - nodes.length),
           totalEdges: edges.length,
+          availableEdges,
+          truncatedEdges: Math.max(0, availableEdges - edges.length),
           communities: parseInt(communityRes.rows[0]?.cnt || "0", 10),
         },
       },

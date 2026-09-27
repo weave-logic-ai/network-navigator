@@ -16,10 +16,15 @@ import {
   PanelLeftClose,
   PanelLeft,
   Info,
+  FileText,
+  BookOpen,
+  Activity,
 } from "lucide-react";
+import { usePathname } from "next/navigation";
+import type { ResearchFlags } from "@/lib/config/research-flags";
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -46,10 +51,16 @@ const secondaryNav = [
   { href: "/import", label: "Import", icon: Upload },
 ];
 
-export function SidebarNav() {
+export function SidebarNav({ researchFlags }: { researchFlags: ResearchFlags }) {
   const [collapsed, setCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const pathname = usePathname();
   const { enabled: suggestionsEnabled, toggle: toggleSuggestions } = useSuggestionEngine();
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
 
   useEffect(() => {
     const saved = localStorage.getItem(SIDEBAR_KEY);
@@ -68,6 +79,8 @@ export function SidebarNav() {
       return next;
     });
   }, []);
+
+  const dismissMobile = useCallback(() => setMobileOpen(false), []);
 
   useEffect(() => {
     function handleKeyboard(e: KeyboardEvent) {
@@ -90,6 +103,7 @@ export function SidebarNav() {
           <Button
             variant="ghost"
             size="icon"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             onClick={toggle}
             className={cn("h-8 w-8", collapsed ? "mx-auto" : "ml-auto")}
           >
@@ -103,13 +117,24 @@ export function SidebarNav() {
         <ScrollArea className="flex-1 px-2 py-2">
           <nav className="flex flex-col gap-1">
             {primaryNav.map((item) => (
-              <SidebarNavItem key={item.href} {...item} collapsed={collapsed} />
+              <SidebarNavItem key={item.href} {...item} collapsed={collapsed} onNavigate={dismissMobile} />
             ))}
           </nav>
           <Separator className="my-3" />
+          {(researchFlags.sources || researchFlags.snippets || researchFlags.parserTelemetry) && (
+            <>
+              {!collapsed && <p className="px-3 pb-1 text-xs font-semibold text-muted-foreground">Research</p>}
+              <nav aria-label="Research" className="flex flex-col gap-1">
+                {researchFlags.sources && <SidebarNavItem href="/sources" label="Sources" icon={BookOpen} collapsed={collapsed} onNavigate={dismissMobile} />}
+                {researchFlags.snippets && <SidebarNavItem href="/snippets" label="Snippets" icon={FileText} collapsed={collapsed} onNavigate={dismissMobile} />}
+                {researchFlags.parserTelemetry && <SidebarNavItem href="/admin/parsers" label="Parser health" icon={Activity} collapsed={collapsed} onNavigate={dismissMobile} />}
+              </nav>
+              <Separator className="my-3" />
+            </>
+          )}
           <nav className="flex flex-col gap-1">
             {secondaryNav.map((item) => (
-              <SidebarNavItem key={item.href} {...item} collapsed={collapsed} />
+              <SidebarNavItem key={item.href} {...item} collapsed={collapsed} onNavigate={dismissMobile} />
             ))}
           </nav>
         </ScrollArea>
@@ -119,6 +144,7 @@ export function SidebarNav() {
               <TooltipTrigger asChild>
                 <div className="flex justify-center">
                   <Switch
+                    aria-label="Suggestions"
                     checked={suggestionsEnabled}
                     onCheckedChange={toggleSuggestions}
                     className="scale-125"
@@ -135,6 +161,7 @@ export function SidebarNav() {
           ) : (
             <div className="flex items-center gap-3">
               <Switch
+                aria-label="Suggestions"
                 checked={suggestionsEnabled}
                 onCheckedChange={toggleSuggestions}
                 className="scale-125"
@@ -161,13 +188,14 @@ export function SidebarNav() {
 
   if (isMobile) {
     return (
-      <Sheet>
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetTrigger asChild>
-          <Button variant="ghost" size="icon" className="md:hidden">
+          <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open navigation menu">
             <PanelLeft className="h-5 w-5" />
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="w-[240px] p-0">
+        <SheetContent side="left" className="w-[240px] p-0" aria-describedby={undefined}>
+          <SheetTitle className="sr-only">Navigation menu</SheetTitle>
           {sidebarContent}
         </SheetContent>
       </Sheet>
