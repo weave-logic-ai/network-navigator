@@ -1,7 +1,7 @@
--- 024b-seed-taxonomy.sql
+-- 024z-seed-taxonomy.sql
 -- Seed data: Fractional CTO taxonomy (industries, niches, offerings, ICPs)
--- Safe to re-run: unique seed keys use ON CONFLICT, while offerings (which
--- have no unique name constraint) use a NOT EXISTS guard.
+-- Safe to re-run: unique seed keys use ON CONFLICT, while offerings use a
+-- NOT EXISTS guard by name.
 
 -- ============================================================
 -- Industries
@@ -155,48 +155,49 @@ WHERE NOT EXISTS (SELECT 1 FROM offerings existing WHERE existing.name = seed.na
 
 -- ============================================================
 -- ICPs (one per niche — generic fractional CTO buyer persona)
+-- Resolve each niche within its industry: niche names are only unique there.
 -- ============================================================
 INSERT INTO icp_profiles (name, description, niche_id, criteria) VALUES
   ('Health Tech Founders', 'Non-technical founders building digital health products',
-    (SELECT id FROM niche_profiles WHERE name='Digital Health Startups'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Digital Health Startups' AND i.slug='healthcare'),
     '{"roles":["CEO","Founder","COO","Managing Director"],"industries":["healthcare","digital health","telehealth"],"companySizeRanges":["10-50","51-200"],"signals":["HIPAA","hiring engineers","fundraising","product launch"],"minConnections":100}'),
   ('Healthcare SaaS Leaders', 'Leaders at healthcare SaaS needing tech strategy',
-    (SELECT id FROM niche_profiles WHERE name='Healthcare SaaS'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Healthcare SaaS' AND i.slug='healthcare'),
     '{"roles":["CEO","COO","VP Product","Director of Engineering"],"industries":["healthcare IT","health tech","medical software"],"companySizeRanges":["11-50","51-200"],"signals":["scaling","compliance","interoperability","EHR integration"],"minConnections":50}'),
   ('Fintech Founders', 'Founders building payment, lending, or banking products',
-    (SELECT id FROM niche_profiles WHERE name='Embedded Finance & Payments'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Embedded Finance & Payments' AND i.slug='fintech'),
     '{"roles":["CEO","Founder","COO","CPO"],"industries":["fintech","payments","banking","financial services"],"companySizeRanges":["10-50","51-200"],"signals":["PCI compliance","SOC 2","Series A","open banking","API"],"minConnections":100}'),
   ('Wealthtech Decision Makers', 'Leaders at wealth management and insurance tech companies',
-    (SELECT id FROM niche_profiles WHERE name='Wealthtech & Insurtech'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Wealthtech & Insurtech' AND i.slug='fintech'),
     '{"roles":["CEO","Founder","COO","Head of Technology"],"industries":["wealthtech","insurtech","financial advisory"],"companySizeRanges":["11-50","51-200"],"signals":["regulatory","automation","portfolio management","robo-advisor"],"minConnections":50}'),
   ('Vertical SaaS Founders', 'Founders of industry-specific SaaS platforms',
-    (SELECT id FROM niche_profiles WHERE name='Vertical SaaS'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Vertical SaaS' AND i.slug='saas'),
     '{"roles":["CEO","Founder","COO","VP Engineering"],"industries":["SaaS","software","construction tech","legal tech","logistics"],"companySizeRanges":["10-50","51-200"],"signals":["product-led growth","multi-tenant","scaling","hiring engineers"],"minConnections":100}'),
   ('DevTools Leaders', 'Leaders at developer tools and infrastructure companies',
-    (SELECT id FROM niche_profiles WHERE name='Developer Tools & Infrastructure'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Developer Tools & Infrastructure' AND i.slug='saas'),
     '{"roles":["CEO","Founder","CTO","VP Engineering"],"industries":["developer tools","API","infrastructure","observability"],"companySizeRanges":["10-50","51-200"],"signals":["platform engineering","developer experience","usage-based","open source"],"minConnections":100}'),
   ('E-Commerce Brand Operators', 'D2C brand operators scaling their tech stack',
-    (SELECT id FROM niche_profiles WHERE name='D2C Brands Scaling Tech'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='D2C Brands Scaling Tech' AND i.slug='ecommerce'),
     '{"roles":["CEO","Founder","COO","VP Operations","Head of E-Commerce"],"industries":["e-commerce","DTC","retail","Shopify"],"companySizeRanges":["10-50","51-200"],"signals":["Shopify Plus","headless commerce","migration","scaling","replatforming"],"minConnections":50}'),
   ('Marketplace Founders', 'Founders building two-sided marketplace platforms',
-    (SELECT id FROM niche_profiles WHERE name='Marketplace Platforms'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Marketplace Platforms' AND i.slug='ecommerce'),
     '{"roles":["CEO","Founder","COO","CPO"],"industries":["marketplace","e-commerce","logistics"],"companySizeRanges":["10-50","51-200"],"signals":["matching","fulfillment","trust and safety","Series A","growth"],"minConnections":100}'),
   ('PropTech Founders', 'Founders building property management or construction tech',
-    (SELECT id FROM niche_profiles WHERE name='Property Management Software'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Property Management Software' AND i.slug='proptech'),
     '{"roles":["CEO","Founder","COO","VP Technology"],"industries":["real estate","property management","proptech"],"companySizeRanges":["10-50","51-200"],"signals":["IoT","smart building","tenant portal","automation"],"minConnections":50}'),
   ('EdTech Founders', 'Non-technical founders building education technology',
-    (SELECT id FROM niche_profiles WHERE name='EdTech Startups'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='EdTech Startups' AND i.slug='edtech'),
     '{"roles":["CEO","Founder","COO","Head of Product"],"industries":["education","edtech","e-learning"],"companySizeRanges":["10-50","51-200"],"signals":["adaptive learning","AI tutoring","fundraising","FERPA","accessibility"],"minConnections":50}'),
   ('Content Platform Leaders', 'Leaders at streaming and content platforms',
-    (SELECT id FROM niche_profiles WHERE name='Streaming & Content Platforms'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Streaming & Content Platforms' AND i.slug='media'),
     '{"roles":["CEO","Founder","COO","VP Engineering","CTO"],"industries":["media","streaming","content","publishing"],"companySizeRanges":["10-50","51-200"],"signals":["CDN","DRM","transcoding","recommendation","scaling"],"minConnections":50}'),
   ('Agency Owners Scaling', 'Agency owners transitioning from services to product',
-    (SELECT id FROM niche_profiles WHERE name='Digital Agencies Scaling'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Digital Agencies Scaling' AND i.slug='professional-services'),
     '{"roles":["CEO","Founder","Managing Director","Partner","Owner"],"industries":["digital agency","marketing agency","web development","creative agency"],"companySizeRanges":["10-50","51-200"],"signals":["productization","white-label","scaling","recurring revenue","SaaS"],"minConnections":50}'),
   ('Manufacturing Tech Leaders', 'Leaders digitizing manufacturing and supply chain',
-    (SELECT id FROM niche_profiles WHERE name='Smart Manufacturing & IIoT'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Smart Manufacturing & IIoT' AND i.slug='manufacturing'),
     '{"roles":["CEO","COO","VP Operations","Director of IT","Plant Manager"],"industries":["manufacturing","industrial","supply chain"],"companySizeRanges":["51-200","201-500"],"signals":["digital twin","predictive maintenance","IIoT","edge computing","automation"],"minConnections":50}'),
   ('Nonprofit Tech Leaders', 'Executive directors modernizing nonprofit technology',
-    (SELECT id FROM niche_profiles WHERE name='Nonprofit Tech Modernization'),
+    (SELECT np.id FROM niche_profiles np JOIN industries i ON i.id = np.industry_id WHERE np.name='Nonprofit Tech Modernization' AND i.slug='nonprofit'),
     '{"roles":["Executive Director","CEO","COO","Director of Technology","CTO"],"industries":["nonprofit","social impact","philanthropy"],"companySizeRanges":["10-50","51-200"],"signals":["CRM migration","Salesforce","digital transformation","grant management"],"minConnections":30}')
 ON CONFLICT DO NOTHING;

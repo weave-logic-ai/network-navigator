@@ -75,11 +75,12 @@ export async function seedResearchLensesForCurrentOwner(): Promise<SeedLensesRes
       existing.push(lens.name);
     }
 
-    // Associate with the self-target.
+    // Associate with the self-target as an unscoped legacy ICP. Scoped lens
+    // associations (including soft-deleted lenses) remain untouched.
     await query(
-      `INSERT INTO research_target_icps (target_id, icp_profile_id, is_default)
-       VALUES ($1, $2, FALSE)
-       ON CONFLICT (target_id, icp_profile_id) DO NOTHING`,
+      `INSERT INTO research_target_icps (target_id, icp_profile_id, lens_id, is_default)
+       VALUES ($1, $2, NULL, FALSE)
+       ON CONFLICT (target_id, icp_profile_id) WHERE lens_id IS NULL DO NOTHING`,
       [selfTarget.id, icpId]
     );
   }
