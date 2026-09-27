@@ -59,6 +59,8 @@ const ALL_SCORERS: DimensionScorer[] = [
 ];
 
 export interface OwnerScoringBasis {
+  readonly ownerId: string;
+  readonly tenantId: string;
   readonly weightProfile: WeightProfile;
   readonly icpProfiles: readonly IcpProfile[];
   readonly criteriaByIcpId: Readonly<Record<string, IcpCriteria>>;
@@ -107,6 +109,8 @@ function samePersistedScore(previous: CompositeScore, score: CompositeScore): bo
 }
 
 function ownerBasisHash(
+  ownerId: string,
+  tenantId: string,
   profile: WeightProfile,
   icps: readonly IcpProfile[],
   criteriaByIcpId: Readonly<Record<string, IcpCriteria>>,
@@ -114,11 +118,30 @@ function ownerBasisHash(
 ): string {
   const relevant = {
     algorithmVersion: OWNER_ALGORITHM_VERSION,
+    ownerId,
+    tenantId,
     weights: profile.weights,
     icps: icps.map(icp => ({ id: icp.id, criteria: icp.criteria, effectiveCriteria: criteriaByIcpId[icp.id] })),
     referralBaselines,
   };
   return createHash('sha256').update(stableJson(relevant)).digest('hex');
+}
+
+async function readSoleLocalOwner(client: Parameters<Parameters<typeof transaction>[0]>[0], lock: boolean = false) {
+  const result = await client.query<{ owner_id: string; tenant_id: string }>(
+    `SELECT owner.id AS owner_id, tenant.id AS tenant_id
+     FROM tenants tenant
+     JOIN owner_profiles owner ON owner.is_current = TRUE
+     JOIN research_targets self_target
+       ON self_target.tenant_id = tenant.id AND self_target.kind = 'self'
+      AND self_target.owner_id = owner.id
+     WHERE tenant.slug = 'default'
+       AND (SELECT COUNT(*) FROM tenants) = 1
+       AND (SELECT COUNT(*) FROM owner_profiles WHERE is_current = TRUE) = 1
+     LIMIT 1${lock ? ' FOR SHARE OF owner' : ''}`
+  );
+  if (!result.rows[0]) throw new Error('Owner scoring requires one default tenant and current owner');
+  return result.rows[0];
 }
 
 function deepFreeze<T>(value: T): T {
@@ -136,6 +159,7 @@ export async function captureOwnerScoringBasis(profileName?: string): Promise<Ow
     const snapshot = await client.query<{ snapshot_id: string }>(
       'SELECT txid_current_snapshot()::text AS snapshot_id'
     );
+    const scope = await readSoleLocalOwner(client);
     const weights = new WeightManager();
     const weightProfile = await weights.loadProfile(profileName, client);
     const icpProfiles = await scoringQueries.getActiveIcpProfiles(client);
@@ -150,6 +174,8 @@ export async function captureOwnerScoringBasis(profileName?: string): Promise<Ow
       };
     }
     const captured = {
+      ownerId: scope.owner_id,
+      tenantId: scope.tenant_id,
       weightProfile: { ...weightProfile, weights: structuredClone(weightProfile.weights) },
       icpProfiles: icpProfiles.map(icp => ({
         ...icp,
@@ -162,7 +188,8 @@ export async function captureOwnerScoringBasis(profileName?: string): Promise<Ow
     };
     return deepFreeze({
       ...captured,
-      basisHash: ownerBasisHash(captured.weightProfile, captured.icpProfiles,
+      basisHash: ownerBasisHash(captured.ownerId, captured.tenantId,
+        captured.weightProfile, captured.icpProfiles,
         captured.criteriaByIcpId, captured.referralBaselines),
     });
   });
@@ -172,12 +199,14 @@ export async function captureOwnerScoringBasis(profileName?: string): Promise<Ow
 export function restoreOwnerScoringBasis(raw: unknown): OwnerScoringBasis {
   if (!raw || typeof raw !== 'object') throw new Error('Missing persisted owner basis');
   const basis = raw as OwnerScoringBasis;
-  if (!basis.weightProfile || !Array.isArray(basis.icpProfiles) ||
+  if (typeof basis.ownerId !== 'string' || typeof basis.tenantId !== 'string' ||
+      !basis.weightProfile || !Array.isArray(basis.icpProfiles) ||
       !basis.criteriaByIcpId || !basis.referralBaselines ||
       typeof basis.basisHash !== 'string') {
     throw new Error('Invalid persisted owner basis');
   }
-  const expected = ownerBasisHash(basis.weightProfile, basis.icpProfiles,
+  const expected = ownerBasisHash(basis.ownerId, basis.tenantId,
+    basis.weightProfile, basis.icpProfiles,
     basis.criteriaByIcpId, basis.referralBaselines);
   if (expected !== basis.basisHash) throw new Error('Persisted owner basis hash mismatch');
   return deepFreeze(basis);
@@ -331,6 +360,10 @@ export async function scoreContact(
   }
   const ownerBasis = basis ?? await captureOwnerScoringBasis(profileName);
   const result = await transaction(async client => {
+    const scope = await readSoleLocalOwner(client, true);
+    if (scope.owner_id !== ownerBasis.ownerId || scope.tenant_id !== ownerBasis.tenantId) {
+      throw new Error('Current owner changed since scoring basis capture');
+    }
     // The input read must follow the same per-contact lock as the replacement.
     // A competing scorer cannot compute from an earlier contact state and then
     // replace a newer score after waiting for the write lock.

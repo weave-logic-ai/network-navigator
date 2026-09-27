@@ -160,6 +160,7 @@ const ownerScorableContactPredicate = `EXISTS (
     ON self_target.tenant_id = tenant.id AND self_target.kind = 'self'
    AND self_target.owner_id = owner.id
   WHERE tenant.slug = 'default'
+    AND (SELECT COUNT(*) FROM tenants) = 1
     AND (SELECT COUNT(*) FROM owner_profiles WHERE is_current = TRUE) = 1
     AND (
       EXISTS (SELECT 1 FROM research_targets scoped_target

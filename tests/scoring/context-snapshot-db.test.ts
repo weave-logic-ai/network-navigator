@@ -179,6 +179,7 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
   });
 
   it('isolates preview IDs across two tenants and owners in PostgreSQL', async () => {
+    const basis = await captureOwnerScoringBasis();
     await pool.query(`
       INSERT INTO tenants VALUES ('${foreignTenant}', 'other');
       INSERT INTO owner_profiles VALUES ('${foreignOwner}', false);
@@ -193,10 +194,11 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
       INSERT INTO research_target_icps VALUES ('${foreignTarget}', '${foreignLens}', '${icpA}');
     `);
     try {
-      expect(await getAllContactIds()).not.toContain(foreignContact);
-      const basis = await captureOwnerScoringBasis();
+      expect(await getAllContactIds()).toEqual([]);
+      await expect(captureOwnerScoringBasis())
+        .rejects.toThrow('Owner scoring requires one default tenant and current owner');
       await expect(scoreContact(foreignContact, undefined, undefined, basis))
-        .rejects.toThrow(`Contact not found: ${foreignContact}`);
+        .rejects.toThrow('Owner scoring requires one default tenant and current owner');
       await expect(previewContactForTarget(contactId, foreignTarget)).rejects.toMatchObject({ status: 404 });
       await expect(previewContactForTarget(foreignContact, targetId)).rejects.toMatchObject({ status: 404 });
       await expect(previewContactForTarget(foreignContact, foreignTarget)).rejects.toMatchObject({ status: 404 });
@@ -216,6 +218,28 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
       await pool.query('DELETE FROM contacts WHERE id = $1', [foreignContact]);
       await pool.query('DELETE FROM owner_profiles WHERE id = $1', [foreignOwner]);
       await pool.query('DELETE FROM tenants WHERE id = $1', [foreignTenant]);
+    }
+  });
+
+  it('refuses a captured owner basis after the current profile switches', async () => {
+    const nextOwner = '550e8400-e29b-41d4-a716-446655440032';
+    const nextSelf = '550e8400-e29b-41d4-a716-446655440092';
+    const oldBasis = await captureOwnerScoringBasis();
+    await pool.query('INSERT INTO owner_profiles VALUES ($1, false)', [nextOwner]);
+    await pool.query(`INSERT INTO research_targets VALUES ($1, $2, 'self', $3, NULL)`,
+      [nextSelf, tenantA, nextOwner]);
+    try {
+      await pool.query('UPDATE owner_profiles SET is_current = (id = $1)', [nextOwner]);
+      expect(await getAllContactIds()).toContain(contactId);
+      await expect(scoreContact(contactId, undefined, undefined, oldBasis))
+        .rejects.toThrow('Current owner changed since scoring basis capture');
+      const newBasis = await captureOwnerScoringBasis();
+      expect(newBasis.ownerId).toBe(nextOwner);
+      expect(newBasis.basisHash).not.toBe(oldBasis.basisHash);
+    } finally {
+      await pool.query('UPDATE owner_profiles SET is_current = (id = $1)', [ownerA]);
+      await pool.query('DELETE FROM research_targets WHERE id = $1', [nextSelf]);
+      await pool.query('DELETE FROM owner_profiles WHERE id = $1', [nextOwner]);
     }
   });
 

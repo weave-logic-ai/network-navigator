@@ -161,6 +161,9 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         return mockRows([{ repair_ready: true, recommendation_ready: true }]);
       }
       if (text.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (text.includes('SELECT owner.id AS owner_id')) {
+        return mockRows([{ owner_id: 'owner-1', tenant_id: TENANT_ID }]);
+      }
       if (text.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
 
       if (text.includes(`FROM tenants WHERE slug = 'default'`)) {
@@ -327,6 +330,9 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       }
 
       if (text.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (text.includes('SELECT owner.id AS owner_id')) {
+        return mockRows([{ owner_id: 'owner-1', tenant_id: TENANT_ID }]);
+      }
       if (text.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
 
       if (text.includes('FROM contacts WHERE id = $1')) {
@@ -419,6 +425,9 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         return mockRows([{ repair_ready: true, recommendation_ready: true }]);
       }
       if (statement.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (statement.includes('SELECT owner.id AS owner_id')) {
+        return mockRows([{ owner_id: 'owner-1', tenant_id: TENANT_ID }]);
+      }
       if (statement.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
       if (statement.includes("FROM tenants WHERE slug = 'default'")) return mockRows([{ id: TENANT_ID }]);
       if (statement.includes('INSERT INTO impulses')) {
