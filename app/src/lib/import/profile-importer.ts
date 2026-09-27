@@ -5,6 +5,9 @@ import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import { PoolClient } from 'pg';
 import { parseCsv } from './csv-parser';
+import { OWNER_REQUIRED_COLUMNS } from './mapping-preview';
+import { profileWebsite } from './profile-website';
+import { isOwnerSender } from './messages-importer';
 
 interface OwnerProfileData {
   // Core
@@ -45,9 +48,9 @@ interface OwnerProfileData {
   richMedia: Array<Record<string, string>>;
   receipts: Array<Record<string, string>>;
   // Message stats
-  totalMessagesSent: number;
-  totalMessagesReceived: number;
-  totalConversations: number;
+  totalMessagesSent: number | null;
+  totalMessagesReceived: number | null;
+  totalConversations: number | null;
   // Invitation stats
   invitationsSent: number;
   invitationsReceived: number;
@@ -88,23 +91,52 @@ function emptyProfile(): OwnerProfileData {
   };
 }
 
+function profileFromCurrent(row: Record<string, unknown> | undefined): OwnerProfileData {
+  const profile = emptyProfile();
+  if (!row) return profile;
+  const optionalFields = 'firstName lastName headline summary industry location geoLocation zipCode birthDate email phone registeredAt'.split(' ');
+  for (const field of [...Object.keys(profile), ...optionalFields]) {
+    if (field === 'importedFiles') continue;
+    const column = field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    const value = row[column];
+    if (value !== null && value !== undefined) {
+      (profile as unknown as Record<string, unknown>)[field] = value instanceof Date ? value.toISOString() : value;
+    }
+  }
+  return profile;
+}
+
+export function parseProfileWebsites(value: string): string[] {
+  return value.split(';').flatMap((entry) => {
+    const website = profileWebsite(entry);
+    if (!website) return [];
+    return [entry.includes('[') ? `${website.label} [${website.href}]` : website.href];
+  });
+}
+
 // Parse each file type into the profile
 async function parseProfileCsv(content: string): Promise<Partial<OwnerProfileData>> {
   const parsed = parseCsv(content, { preambleLines: 0 });
   if (parsed.rows.length === 0) return {};
   const row = parsed.rows[0];
-  return {
-    firstName: row.first_name,
-    lastName: row.last_name,
-    headline: row.headline,
-    summary: row.summary,
-    industry: row.industry,
-    zipCode: row.zip_code,
-    geoLocation: row.geo_location,
-    birthDate: row.birth_date,
-    twitterHandles: row.twitter_handles ? row.twitter_handles.split(';').map(s => s.trim()).filter(Boolean) : [],
-    websites: row.websites ? row.websites.split(';').map(s => s.trim()).filter(Boolean) : [],
+  const fields: Partial<Record<keyof OwnerProfileData, string>> = {
+    firstName: 'first_name', lastName: 'last_name', headline: 'headline',
+    summary: 'summary', industry: 'industry', zipCode: 'zip_code',
+    geoLocation: 'geo_location', birthDate: 'birth_date',
   };
+  const result: Partial<OwnerProfileData> = {};
+  for (const [field, column] of Object.entries(fields)) {
+    if (Object.hasOwn(row, column)) {
+      (result as Record<string, unknown>)[field] = row[column];
+    }
+  }
+  if (Object.hasOwn(row, 'twitter_handles')) {
+    result.twitterHandles = row.twitter_handles.split(';').map(s => s.trim()).filter(Boolean);
+  }
+  if (Object.hasOwn(row, 'websites')) {
+    result.websites = parseProfileWebsites(row.websites);
+  }
+  return result;
 }
 
 async function parseEmailsCsv(content: string): Promise<string | undefined> {
@@ -149,16 +181,18 @@ function parseAdTargetingCsv(content: string): Record<string, unknown> {
   return result;
 }
 
-function countMessages(content: string, selfName: string): { sent: number; received: number; conversations: number } {
+function countMessages(content: string, selfName: string): { sent: number; received: number; conversations: number } | null {
   const parsed = parseCsv(content, { preambleLines: 0 });
   let sent = 0;
   let received = 0;
   const convos = new Set<string>();
 
   for (const row of parsed.rows) {
+    const fromOwner = isOwnerSender(row.from || '', selfName);
+    const toOwner = isOwnerSender(row.to || '', selfName);
+    if (fromOwner === toOwner || !row.from?.trim() || !row.to?.trim()) return null;
     if (row.conversation_id) convos.add(row.conversation_id);
-    const from = (row.from || '').toLowerCase();
-    if (selfName && from.includes(selfName.toLowerCase())) {
+    if (fromOwner) {
       sent++;
     } else {
       received++;
@@ -182,7 +216,7 @@ function countInvitations(content: string): { sent: number; received: number } {
 }
 
 // File type detection mapping
-const FILE_PARSERS: Record<string, string> = {
+export const FILE_PARSERS: Record<string, string> = {
   'profile.csv': 'profile',
   'email addresses.csv': 'email',
   'phonenumbers.csv': 'phone',
@@ -212,27 +246,78 @@ const FILE_PARSERS: Record<string, string> = {
   'invitations.csv': 'invitations',
 };
 
-function detectDeepFileType(filename: string): string | null {
+export function detectDeepFileType(filename: string): string | null {
   const lower = filename.toLowerCase();
   return FILE_PARSERS[lower] || null;
 }
 
+export class OwnerProfileImportError extends Error {}
+
 export async function importFullProfile(
   client: PoolClient,
   directoryPath: string,
+  snapshots?: ReadonlyMap<string, Buffer>,
+  directoryEntries?: readonly string[],
 ): Promise<{
   profileId: string;
   version: number;
   importedFiles: string[];
   skippedFiles: string[];
+  diagnostics: string[];
   selfName: string;
 }> {
-  const profile = emptyProfile();
+  await client.query('BEGIN');
+  try {
+    // Lock before reading the current version so concurrent imports cannot
+    // allocate the same version or publish two current rows.
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      ['owner-profile-publication']);
+    const result = await importFullProfileLocked(client, directoryPath, snapshots, directoryEntries);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
+async function importFullProfileLocked(
+  client: PoolClient,
+  directoryPath: string,
+  snapshots?: ReadonlyMap<string, Buffer>,
+  directoryEntries?: readonly string[],
+): Promise<{
+  profileId: string;
+  version: number;
+  importedFiles: string[];
+  skippedFiles: string[];
+  diagnostics: string[];
+  selfName: string;
+}> {
+  const currentResult = await client.query<Record<string, unknown>>(
+    'SELECT * FROM owner_profiles WHERE is_current = TRUE ORDER BY version DESC LIMIT 1'
+  );
+  const profile = profileFromCurrent(currentResult.rows[0]);
+  // Message totals describe this export. A partial reimport cannot inherit
+  // totals from a different version unless Messages.csv is counted again.
+  profile.totalMessagesSent = null;
+  profile.totalMessagesReceived = null;
+  profile.totalConversations = null;
   const skippedFiles: string[] = [];
+  const diagnostics: string[] = [];
+  let incomingIdentity = false;
+  let messageOwnerName = '';
 
   // Read directory
-  const entries = await readdir(directoryPath);
-  const csvFiles = entries.filter(name => name.toLowerCase().endsWith('.csv'));
+  const entries = directoryEntries ?? (snapshots ? [...snapshots.keys()] : await readdir(directoryPath));
+  const csvFiles = entries.filter(name => name.toLowerCase().endsWith('.csv'))
+    .sort((a, b) => Number(b.toLowerCase() === 'profile.csv') - Number(a.toLowerCase() === 'profile.csv'));
+  if (!csvFiles.some(name => name.toLowerCase() === 'profile.csv')) {
+    throw new OwnerProfileImportError('Profile.csv is required to import an owner profile');
+  }
+  if (!csvFiles.some(name => name.toLowerCase() === 'messages.csv')) {
+    diagnostics.push('Messages.csv counts unavailable: no Messages.csv was supplied in this import.');
+  }
 
   // Process each file
   for (const filename of csvFiles) {
@@ -244,15 +329,29 @@ export async function importFullProfile(
 
     const filePath = join(directoryPath, filename);
     try {
-      const fileStat = await stat(filePath);
-      if (!fileStat.isFile()) continue;
-
-      const content = await readFile(filePath, 'utf-8');
-      profile.importedFiles.push(filename);
-
+      if (!snapshots) {
+        const fileStat = await stat(filePath);
+        if (!fileStat.isFile()) throw new Error('Not a regular file');
+      }
+      const content = snapshots ? snapshots.get(filename)!.toString('utf-8') : await readFile(filePath, 'utf-8');
+      const requiredColumns = OWNER_REQUIRED_COLUMNS[filename.toLowerCase()];
+      if (fileType !== 'profile' && requiredColumns) {
+        const headers = parseCsv(content, { preambleLines: 0 }).headers;
+        if (requiredColumns.some(column => !headers.includes(column))) {
+          skippedFiles.push(filename);
+          if (fileType === 'messages') {
+            diagnostics.push('Messages.csv counts unavailable: required From column is missing.');
+          }
+          continue;
+        }
+      }
       switch (fileType) {
         case 'profile': {
           const data = await parseProfileCsv(content);
+          incomingIdentity = [data.firstName, data.lastName].some(name => Boolean(name?.trim()));
+          if (data.firstName?.trim() && data.lastName?.trim()) {
+            messageOwnerName = `${data.firstName.trim()} ${data.lastName.trim()}`;
+          }
           Object.assign(profile, data);
           break;
         }
@@ -332,8 +431,23 @@ export async function importFullProfile(
           profile.receipts = parseSimpleCsv(content);
           break;
         case 'messages': {
-          const selfName = [profile.firstName, profile.lastName].filter(Boolean).join(' ');
-          const stats = countMessages(content, selfName);
+          if (!messageOwnerName) {
+            skippedFiles.push(filename);
+            diagnostics.push('Messages.csv counts skipped: this Profile.csv must provide both owner first and last name.');
+            profile.totalMessagesSent = null;
+            profile.totalMessagesReceived = null;
+            profile.totalConversations = null;
+            break;
+          }
+          const stats = countMessages(content, messageOwnerName);
+          if (!stats) {
+            skippedFiles.push(filename);
+            diagnostics.push('Messages.csv counts unavailable: sender or recipient cannot be matched to the verified owner.');
+            profile.totalMessagesSent = null;
+            profile.totalMessagesReceived = null;
+            profile.totalConversations = null;
+            break;
+          }
           profile.totalMessagesSent = stats.sent;
           profile.totalMessagesReceived = stats.received;
           profile.totalConversations = stats.conversations;
@@ -346,9 +460,21 @@ export async function importFullProfile(
           break;
         }
       }
-    } catch {
-      skippedFiles.push(filename);
+      if (!skippedFiles.includes(filename)) profile.importedFiles.push(filename);
+    } catch (error) {
+      if (fileType !== 'profile') {
+        skippedFiles.push(filename);
+        if (fileType === 'messages') {
+          diagnostics.push('Messages.csv counts unavailable: file could not be read.');
+        }
+        continue;
+      }
+      throw new OwnerProfileImportError(`Cannot import ${filename}: ${error instanceof Error ? error.message : 'unreadable file'}`);
     }
+  }
+
+  if (!profile.importedFiles.some(name => name.toLowerCase() === 'profile.csv') || !incomingIdentity) {
+    throw new OwnerProfileImportError('Profile.csv must contain a readable row with a first or last name');
   }
 
   // Determine version: mark previous versions as non-current
@@ -358,11 +484,6 @@ export async function importFullProfile(
   const prevVersion = prevResult.rows[0]?.max_version ?? 0;
   const newVersion = prevVersion + 1;
 
-  // Mark all previous as non-current
-  if (prevVersion > 0) {
-    await client.query('UPDATE owner_profiles SET is_current = FALSE WHERE is_current = TRUE');
-  }
-
   // Build change summary
   let changeSummary: string | null = null;
   if (prevVersion > 0) {
@@ -370,6 +491,9 @@ export async function importFullProfile(
   }
 
   // Insert new versioned profile
+  if (prevVersion > 0) {
+    await client.query('UPDATE owner_profiles SET is_current = FALSE WHERE is_current = TRUE');
+  }
   const insertResult = await client.query<{ id: string }>(
     `INSERT INTO owner_profiles (
       version, is_current, source,
@@ -448,6 +572,7 @@ export async function importFullProfile(
     version: newVersion,
     importedFiles: profile.importedFiles,
     skippedFiles,
+    diagnostics,
     selfName,
   };
 }

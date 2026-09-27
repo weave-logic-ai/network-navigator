@@ -3,7 +3,7 @@
 import { PoolClient } from 'pg';
 import { parseCsv } from './csv-parser';
 import { CompanyResolver } from './company-resolver';
-import { deduplicateContact } from './deduplication';
+import { deduplicateContact, normalizedLinkedInProfileUrl } from './deduplication';
 import { createConnectionEdge } from './edge-builder';
 import { ImportError } from './types';
 
@@ -51,7 +51,8 @@ export async function importConnections(
     try {
       const firstName = row['first_name'] || '';
       const lastName = row['last_name'] || '';
-      const linkedinUrl = row['url'] || '';
+      const rawLinkedinUrl = row['url'] || '';
+      const linkedinUrl = normalizedLinkedInProfileUrl(rawLinkedinUrl);
       const email = row['email_address'] || '';
       const company = row['company'] || '';
       const title = row['position'] || '';
@@ -62,7 +63,7 @@ export async function importConnections(
         result.errors.push({
           file: 'Connections.csv',
           row: i + 1,
-          message: 'Missing LinkedIn URL, skipping row',
+          message: rawLinkedinUrl.trim() ? 'Invalid LinkedIn profile URL, skipping row' : 'Missing LinkedIn URL, skipping row',
         });
         result.skippedRecords++;
         continue;
@@ -129,6 +130,7 @@ export async function importConnections(
         row: i + 1,
         message: err instanceof Error ? err.message : 'Unknown error',
       });
+      result.skippedRecords++;
     }
   }
 

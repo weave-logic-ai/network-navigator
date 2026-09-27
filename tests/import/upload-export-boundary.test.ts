@@ -5,7 +5,7 @@ import { NextRequest } from '../../app/node_modules/next/server';
 import { createOperatorSession, OPERATOR_COOKIE } from '@/lib/auth/operator-session';
 import * as uploadBoundary from '@/lib/import/upload-boundary';
 import {
-  boundedBody, containedPath, MAX_BODY_SIZE, MAX_FILE_SIZE, storedCsvName, UploadLimitError,
+  boundedBody, containedPath, MAX_BODY_SIZE, MAX_FILE_SIZE, MAX_FILES, storedCsvName, UploadLimitError,
   UploadValidationError, isMultipartFormData, validateCsv, validateCsvBatch, writeCsvFile,
 } from '@/lib/import/upload-boundary';
 import { escapeCsvField } from '@/lib/import/csv-export';
@@ -166,7 +166,8 @@ describe('upload boundary', () => {
       expect(response.status).toBe(500);
       expect(writes).toBe(2);
       expect(updateImportSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({
-        status: 'failed', completed_at: expect.any(Date),
+        status: 'failed', completed_at: expect.any(Date), error_count: 1,
+        errors: [{ message: 'Upload failed before processing' }],
       }));
       expect(dbStatus).toBe('failed');
       await expect(readdir(directory)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -309,7 +310,7 @@ describe('upload boundary', () => {
     expect((await POST(tooLarge)).status).toBe(413);
 
     const form = new FormData();
-    for (let i = 0; i < 11; i++) form.append('files', new File(['x'], `${i}.csv`, { type: 'text/csv' }));
+    for (let i = 0; i < MAX_FILES + 1; i++) form.append('files', new File(['x'], `${i}.csv`, { type: 'text/csv' }));
     expect((await POST(await uploadRequest(form))).status).toBe(413);
   });
 
@@ -407,9 +408,14 @@ describe('upload boundary', () => {
     expect(containedPath(directory, name)).toBe(join(directory, name));
   });
 
+  it('rejects Profile Summary.csv before creating an upload session', () => {
+    expect(() => validateCsv(new File(['Name\nAda'], 'Profile Summary.csv', { type: 'text/csv' })))
+      .toThrow(UploadValidationError);
+  });
+
   it('rejects file count, file size and aggregate size before writing', () => {
     const csv = () => new File(['x'], 'Connections.csv', { type: 'text/csv' });
-    expect(() => validateCsvBatch(Array.from({ length: 11 }, csv))).toThrow(UploadLimitError);
+    expect(() => validateCsvBatch(Array.from({ length: MAX_FILES + 1 }, csv))).toThrow(UploadLimitError);
     const oversized = csv();
     Object.defineProperty(oversized, 'size', { value: MAX_FILE_SIZE + 1 });
     expect(() => validateCsvBatch([oversized])).toThrow(UploadLimitError);
@@ -424,6 +430,28 @@ describe('upload boundary', () => {
     await writeCsvFile(new File(['original'], 'Connections.csv'), directory, name);
     await expect(writeCsvFile(new File(['replacement'], 'Connections.csv'), directory, name)).rejects.toMatchObject({ code: 'EEXIST' });
     expect(await readFile(join(directory, name), 'utf8')).toBe('original');
+  });
+});
+
+describe('import status errors', () => {
+  it('returns bounded structured file and row errors for a completed session', async () => {
+    const { getImportSession } = await import('@/lib/db/queries/import');
+    const rowErrors = Array.from({ length: 25 }, (_, index) => ({ row: index + 2, message: `Invalid row ${index + 2}` }));
+    jest.mocked(getImportSession).mockResolvedValue({
+      session: { id: sessionId, status: 'completed', total_files: 1, processed_files: 1,
+        total_records: 25, new_records: 0, updated_records: 0, skipped_records: 0,
+        error_count: 25, errors: rowErrors, started_at: new Date(), completed_at: new Date(), created_at: new Date() },
+      files: [{ id: 'file-1', session_id: sessionId, filename: 'Connections.csv', file_type: 'connections',
+        file_size_bytes: 100, record_count: 25, processed_count: 0, status: 'completed_with_errors',
+        errors: rowErrors, created_at: new Date() }],
+    });
+    const { GET } = await import('@/app/api/import/status/[sessionId]/route');
+    const response = await GET(new NextRequest(`${localOrigin}/api/import/status/${sessionId}`), { params: Promise.resolve({ sessionId }) });
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.errors).toHaveLength(20);
+    expect(body.errorTotal).toBe(25);
+    expect(body.errors[0]).toEqual({ file: 'Connections.csv', row: 2, message: 'Invalid row 2' });
   });
 });
 

@@ -1,24 +1,30 @@
 import { apiGet, apiPost } from "./client";
 import type { ImportSession } from "@/lib/types/import";
 import type { PaginatedResponse } from "@/lib/types/api";
+import type { MappingPreview } from "@/lib/import/mapping-preview";
 
 export interface DetectedLocalData {
   found: boolean;
   directoryPath?: string;
   recognizedFiles?: { name: string; type: string }[];
   deepFiles?: { name: string; type: string }[];
+  ownerProfileFiles?: string[];
   otherFiles?: string[];
   subdirectories?: string[];
   totalCsvCount?: number;
-  hasFullDump?: boolean;
+  hasOwnerProfileFiles?: boolean;
+  contactPreviews?: MappingPreview[];
+  ownerPreviews?: MappingPreview[];
 }
 
 export interface DirectoryImportResult {
-  totalProcessed: number;
-  totalNew: number;
-  totalUpdated: number;
-  totalSkipped: number;
-  totalErrors: number;
+  status: "completed" | "failed";
+  totalRecords: number;
+  newRecords: number;
+  updatedRecords: number;
+  skippedRecords: number;
+  errorCount: number;
+  errors: { file: string; row?: number; message: string }[];
   recognizedFiles: string[];
   skippedFiles?: string[];
 }
@@ -82,15 +88,17 @@ export interface FullProfileImportResult {
   selfName: string;
   importedFiles: string[];
   skippedFiles: string[];
+  diagnostics: string[];
   totalFiles: number;
 }
 
 export async function importFullProfile(
   directoryPath: string
 ): Promise<FullProfileImportResult> {
-  return apiPost<FullProfileImportResult>("/api/import/full-profile", {
+  const response = await apiPost<{ data: FullProfileImportResult }>("/api/import/full-profile", {
     directoryPath,
   });
+  return response.data;
 }
 
 export interface OwnerProfile {

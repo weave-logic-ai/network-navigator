@@ -1,6 +1,7 @@
 import { detectFileType, PROCESSING_ORDER } from '@/lib/import/pipeline';
 import { createHash } from 'crypto';
 import { join } from 'path';
+import { computeNaturalICP } from '@/lib/scoring/natural-icp';
 
 // --- Mocks for runImportPipeline's full dependency graph ---
 // (detectFileType/PROCESSING_ORDER above need none of this; only the
@@ -137,6 +138,7 @@ describe('Import Pipeline', () => {
 
     it('should detect Profile.csv', () => {
       expect(detectFileType('Profile.csv')).toBe('profile');
+      expect(detectFileType('Profile Summary.csv')).toBeNull();
     });
 
     it('should return null for unknown files', () => {
@@ -189,6 +191,43 @@ describe('Import Pipeline', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      jest.mocked(computeNaturalICP).mockResolvedValue(null);
+    });
+
+    it('fails a partial import even when some rows were created', async () => {
+      const { runImportPipeline } = await import('@/lib/import/pipeline');
+      const { importConnections } = await import('@/lib/import/connections-importer');
+      const { completeSession } = await import('@/lib/import/import-session');
+      jest.mocked(importConnections).mockResolvedValueOnce({
+        totalRows: 2, newRecords: 1, updatedRecords: 0, skippedRecords: 1,
+        errors: [{ file: 'Connections.csv', row: 2, message: 'bad row' }],
+      });
+      const summary = await runImportPipeline(fakeClient(), ['/export/Connections.csv'], 'self-1');
+      expect(summary.status).toBe('failed');
+      expect(completeSession).toHaveBeenCalledWith(expect.anything(), summary.sessionId, 'failed', expect.anything());
+    });
+
+    it('completes an update-only rerun without errors', async () => {
+      const { runImportPipeline } = await import('@/lib/import/pipeline');
+      const { importConnections } = await import('@/lib/import/connections-importer');
+      jest.mocked(importConnections).mockResolvedValueOnce({
+        totalRows: 1, newRecords: 0, updatedRecords: 1, skippedRecords: 0, errors: [],
+      });
+      const summary = await runImportPipeline(fakeClient(), ['/export/Connections.csv'], 'self-1');
+      expect(summary.status).toBe('completed');
+    });
+
+    it('stores the final count when post-import work appends errors', async () => {
+      const { runImportPipeline } = await import('@/lib/import/pipeline');
+      const { generateEmbeddings } = await import('@/lib/import/embedding-generator');
+      const { completeSession } = await import('@/lib/import/import-session');
+      const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+      jest.mocked(computeNaturalICP).mockResolvedValue(null);
+      jest.mocked(generateEmbeddings).mockRejectedValueOnce(new Error('embedding failure'));
+      const summary = await runImportPipeline(fakeClient(), ['/export/Connections.csv'], 'self-1');
+      expect(summary.errorCount).toBe(1);
+      expect(completeSession).toHaveBeenCalledWith(expect.anything(), summary.sessionId, 'failed',
+        [{ message: 'Embedding generation failed (non-critical)' }]);
     });
 
     it('calls computeNaturalICP exactly once per import, not per file or per contact', async () => {

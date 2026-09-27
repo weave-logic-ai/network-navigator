@@ -28,6 +28,8 @@ import {
   type FullProfileImportResult,
 } from "@/lib/api/import";
 import { useImportStatus } from "@/lib/hooks/use-import";
+import type { ImportSession } from "@/lib/types/import";
+import { detectContactFileType, ownerProfilePreviewReady, previewContactCsv, type MappingPreview } from "@/lib/import/mapping-preview";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -57,7 +59,6 @@ const DEEP_FILE_LABELS: Record<string, string> = {
   honors: "Honors",
   learning: "Learning",
   organizations: "Organizations",
-  profile_summary: "Profile Summary",
   receipts: "Receipts",
   registration: "Registration",
   rich_media: "Rich Media",
@@ -67,6 +68,77 @@ const DEEP_FILE_LABELS: Record<string, string> = {
   courses: "Courses",
 };
 
+export function DirectoryImportCards({ result }: { result: DirectoryImportResult }) {
+  return (
+    <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      {([
+        ["New", result.newRecords],
+        ["Updated", result.updatedRecords],
+        ["Skipped", result.skippedRecords],
+        ["Errors", result.errorCount],
+      ] as const).map(([label, count]) => (
+        <div key={label} className="rounded-md border p-3 text-center">
+          <p className="text-2xl font-bold">{count}</p>
+          <p className="text-xs text-muted-foreground">{label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function DirectoryImportOutcome({ result, contacts = false }: { result: DirectoryImportResult; contacts?: boolean }) {
+  const failed = result.status === 'failed';
+  const imported = result.newRecords + result.updatedRecords;
+  return <div className="space-y-4" aria-label="Directory import outcome">
+    <div className="flex items-center gap-3">
+      {failed ? <AlertCircle className="h-5 w-5 text-destructive" /> : <CheckCircle className="h-5 w-5 text-green-500" />}
+      <h4 className="text-sm font-medium">{failed ? (contacts ? 'Contacts Import Failed' : 'Import Failed') : (contacts ? 'Contacts Imported' : 'Import Complete')}</h4>
+    </div>
+    <DirectoryImportCards result={result} />
+    {failed && <p className="text-sm text-destructive">{imported} record{imported === 1 ? '' : 's'} imported before failure; {result.skippedRecords} skipped.</p>}
+    {result.errors.length > 0 && <ul className="list-disc space-y-1 pl-5 text-sm text-destructive" aria-label="Directory import errors">
+      {result.errors.map((error, index) => <li key={index}>
+        {error.file || 'Import'}{error.row ? ` row ${error.row}` : ''}: {error.message}
+      </li>)}
+    </ul>}
+  </div>;
+}
+
+export function MappingPreviewList({ previews }: { previews: MappingPreview[] }) {
+  return <div className="space-y-3" aria-label="Field mapping preview">
+    <h4 className="text-sm font-medium">Field mapping preview</h4>
+    {previews.map(preview => <div key={preview.file} className="rounded-md border bg-background p-3 text-sm">
+      <p className="font-medium">{preview.file} → {preview.target}</p>
+      {preview.fields.length > 0 && <ul className="mt-2 space-y-1">
+        {preview.fields.map(field => <li key={field.source}>
+          <span className="font-medium">{field.source}</span> → {field.destination}
+          {field.example && <span className="block truncate text-xs text-muted-foreground">Example: {field.example}</span>}
+        </li>)}
+      </ul>}
+      {preview.ignored.length > 0 && <p className="mt-2 text-xs text-muted-foreground">Ignored columns: {preview.ignored.join(', ')}</p>}
+      {preview.warning && <p className="mt-2 text-xs text-destructive">{preview.warningDisposition === 'skip' ? 'This file will be skipped: ' : ''}{preview.warning}</p>}
+      <p className="mt-2 text-xs text-muted-foreground">Previewed {preview.rowsSampled} sample row{preview.rowsSampled === 1 ? "" : "s"}</p>
+    </div>)}
+  </div>;
+}
+
+export function SessionImportErrors({ session }: { session: ImportSession }) {
+  const errors = session.errors ?? [];
+  const total = Math.max(session.errorTotal ?? 0, session.erroredRecords ?? 0, errors.length);
+  if (errors.length === 0 && !session.error && total === 0) return null;
+  return <div className="space-y-2 text-sm text-destructive" aria-label="Import errors">
+    <p className="font-medium">{total || errors.length} import error{(total || errors.length) === 1 ? "" : "s"}</p>
+    {errors.length > 0 ? <ul className="list-disc space-y-1 pl-5">
+      {errors.map((error, index) => <li key={index}>
+        {error.file ? `${error.file}${error.row ? ` row ${error.row}` : ""}: ` : error.row ? `Row ${error.row}: ` : ""}{error.message}
+      </li>)}
+    </ul> : session.error ? <p>{session.error}</p> : null}
+    {total > errors.length && <p>{errors.length > 0
+      ? `Showing ${errors.length} of ${total} errors. Check the source CSV files for remaining rows.`
+      : 'Detailed errors are unavailable for this session. Check the source CSV files and try again.'}</p>}
+  </div>;
+}
+
 export function UploadStep() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,6 +147,8 @@ export function UploadStep() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [manualPreviews, setManualPreviews] = useState<MappingPreview[]>([]);
+  const [previewing, setPreviewing] = useState(false);
 
   // Local directory detection
   const [localData, setLocalData] = useState<DetectedLocalData | null>(null);
@@ -97,15 +171,25 @@ export function UploadStep() {
       .catch(() => setLocalData({ found: false }));
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (files.length === 0) { setManualPreviews([]); setPreviewing(false); return; }
+    setPreviewing(true);
+    Promise.all(files.map(async file => previewContactCsv(file.name, await file.slice(0, 65536).text())))
+      .then(results => { if (!cancelled) setManualPreviews(results.filter((result): result is MappingPreview => result !== null)); })
+      .catch(() => { if (!cancelled) setUploadError('Could not preview selected CSV files.'); })
+      .finally(() => { if (!cancelled) setPreviewing(false); });
+    return () => { cancelled = true; };
+  }, [files]);
+
   const addFiles = useCallback((newFiles: FileList | File[]) => {
-    const csvFiles = Array.from(newFiles).filter((f) =>
-      f.name.toLowerCase().endsWith(".csv")
-    );
+    const csvFiles = Array.from(newFiles).filter(f => detectContactFileType(f.name));
     if (csvFiles.length === 0) {
-      setUploadError("Only CSV files are accepted.");
+      setUploadError("No supported LinkedIn contacts CSV files selected. Profile Summary.csv is not supported.");
       return;
     }
-    setUploadError(null);
+    setUploadError(csvFiles.length < newFiles.length
+      ? 'Unsupported CSV files were excluded. Only supported LinkedIn contacts files will be imported.' : null);
     setFiles((prev) => [...prev, ...csvFiles]);
   }, []);
 
@@ -164,6 +248,7 @@ export function UploadStep() {
   const handleDeepDiveImport = async () => {
     if (!localData?.directoryPath) return;
     setDeepDiveImporting(true);
+    setDeepDiveResult(null);
     setUploadError(null);
     try {
       const result = await importFullProfile(localData.directoryPath);
@@ -185,7 +270,7 @@ export function UploadStep() {
       <div className="space-y-6">
         <div className="flex items-center gap-3">
           <CheckCircle className="h-6 w-6 text-green-500" />
-          <h3 className="text-lg font-medium">Deep Profile Import Complete</h3>
+          <h3 className="text-lg font-medium">{deepDiveResult.skippedFiles.length ? 'Owner Profile Imported with Skipped Files' : 'Deep Profile Import Complete'}</h3>
         </div>
 
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
@@ -219,8 +304,15 @@ export function UploadStep() {
             ))}
           </div>
         </div>
+        {deepDiveResult.skippedFiles.length > 0 && (
+          <p className="text-sm text-muted-foreground">Skipped files: {deepDiveResult.skippedFiles.join(", ")}</p>
+        )}
+        {deepDiveResult.diagnostics?.map((message) => (
+          <p key={message} className="text-sm text-amber-700 dark:text-amber-300">{message}</p>
+        ))}
+        {uploadError && <p className="text-sm text-destructive">{uploadError}</p>}
 
-        {!localResult && (
+        {!localResult && localData?.recognizedFiles?.some((file) => file.type !== "profile") && (
           <div className="rounded-md border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/30">
             <p className="text-sm text-blue-800 dark:text-blue-200">
               Your profile is ready. Now import your contacts to enable ICP
@@ -248,30 +340,7 @@ export function UploadStep() {
         )}
 
         {localResult && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-3">
-              <CheckCircle className="h-5 w-5 text-green-500" />
-              <h4 className="text-sm font-medium">Contacts Imported</h4>
-            </div>
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <div className="rounded-md border p-3 text-center">
-                <p className="text-2xl font-bold">{localResult.totalNew}</p>
-                <p className="text-xs text-muted-foreground">New</p>
-              </div>
-              <div className="rounded-md border p-3 text-center">
-                <p className="text-2xl font-bold">{localResult.totalUpdated}</p>
-                <p className="text-xs text-muted-foreground">Updated</p>
-              </div>
-              <div className="rounded-md border p-3 text-center">
-                <p className="text-2xl font-bold">{localResult.totalSkipped}</p>
-                <p className="text-xs text-muted-foreground">Skipped</p>
-              </div>
-              <div className="rounded-md border p-3 text-center">
-                <p className="text-2xl font-bold">{localResult.totalErrors}</p>
-                <p className="text-xs text-muted-foreground">Errors</p>
-              </div>
-            </div>
-          </div>
+          <DirectoryImportOutcome result={localResult} contacts />
         )}
 
         <div className="flex gap-3">
@@ -291,35 +360,19 @@ export function UploadStep() {
   if (localResult) {
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <CheckCircle className="h-6 w-6 text-green-500" />
-          <h3 className="text-lg font-medium">Import Complete</h3>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <div className="rounded-md border p-3 text-center">
-            <p className="text-2xl font-bold">{localResult.totalNew}</p>
-            <p className="text-xs text-muted-foreground">New</p>
-          </div>
-          <div className="rounded-md border p-3 text-center">
-            <p className="text-2xl font-bold">{localResult.totalUpdated}</p>
-            <p className="text-xs text-muted-foreground">Updated</p>
-          </div>
-          <div className="rounded-md border p-3 text-center">
-            <p className="text-2xl font-bold">{localResult.totalSkipped}</p>
-            <p className="text-xs text-muted-foreground">Skipped</p>
-          </div>
-          <div className="rounded-md border p-3 text-center">
-            <p className="text-2xl font-bold">{localResult.totalErrors}</p>
-            <p className="text-xs text-muted-foreground">Errors</p>
-          </div>
-        </div>
+        <DirectoryImportOutcome result={localResult} />
 
         <p className="text-sm text-muted-foreground">
-          Processed {localResult.recognizedFiles.length} file
+          Accepted {localResult.recognizedFiles.length} file
           {localResult.recognizedFiles.length !== 1 ? "s" : ""}:{" "}
           {localResult.recognizedFiles.join(", ")}
         </p>
+        {localResult.skippedFiles?.length ? (
+          <p className="text-sm text-muted-foreground">Unrecognized files: {localResult.skippedFiles.join(", ")}</p>
+        ) : null}
+        {localResult.recognizedFiles.some((name) => name.toLowerCase() === 'profile.csv') && (
+          <p className="text-sm text-muted-foreground">Profile.csv was accepted but skipped in the contacts import. Use the separate owner profile import for it.</p>
+        )}
 
         <Button onClick={() => router.push("/contacts")}>View Contacts</Button>
       </div>
@@ -385,9 +438,11 @@ export function UploadStep() {
           </div>
         </div>
 
-        {isFailed && session.error && (
-          <p className="text-sm text-destructive">{session.error}</p>
+        {session.files?.some((file) => file.fileName.toLowerCase() === 'profile.csv') && (
+          <p className="text-sm text-muted-foreground">Profile.csv was accepted but skipped in the contacts import. It did not update your owner profile.</p>
         )}
+
+        <SessionImportErrors session={session} />
 
         {isCompleted && (
           <Button onClick={() => router.push("/contacts")}>
@@ -398,30 +453,36 @@ export function UploadStep() {
     );
   }
 
-  const totalDeepFiles = (localData?.recognizedFiles?.length ?? 0) + (localData?.deepFiles?.length ?? 0);
+  const totalDeepFiles = localData?.ownerProfileFiles?.length ?? 0;
+  const ownerPreviewReady = ownerProfilePreviewReady(localData?.ownerPreviews ?? [], totalDeepFiles);
+  const contactPreviewReady = Boolean(localData?.contactPreviews && localData.contactPreviews.length === localData.recognizedFiles?.length &&
+    localData.contactPreviews.every(preview => preview.fields.length > 0 || preview.target === 'Owner profile (separate import)'));
 
   return (
     <div className="space-y-6">
       {/* Full LinkedIn Deep Dive - shown when full dump is detected */}
-      {localData?.found && localData.hasFullDump && (
+      {localData?.found && localData.hasOwnerProfileFiles && (
         <div className="rounded-lg border-2 border-violet-200 bg-violet-50 p-5 dark:border-violet-900 dark:bg-violet-950/30">
           <div className="flex items-start gap-3">
             <Scan className="mt-0.5 h-5 w-5 text-violet-600 dark:text-violet-400" />
             <div className="flex-1 space-y-3">
               <div>
                 <h3 className="font-medium text-violet-900 dark:text-violet-100">
-                  Full LinkedIn Data Export Detected
+                  Owner Profile Files Detected
                 </h3>
                 <p className="text-sm text-violet-700 dark:text-violet-300">
-                  Found {localData.totalCsvCount} files including your profile,
-                  ad targeting, endorsements, recommendations, positions,
-                  messages, and more. Import everything for a deep ICP and niche
-                  analysis.
+                  Found {totalDeepFiles} supported owner profile file{totalDeepFiles === 1 ? "" : "s"}
+                  {" "}among {localData.totalCsvCount} CSV files. Available files are listed below.
+                  Review the field mapping preview before importing.
                 </p>
               </div>
 
+              <MappingPreviewList previews={localData.ownerPreviews ?? []} />
+              {localData.recognizedFiles?.some(file => file.type !== 'profile') &&
+                <MappingPreviewList previews={(localData.contactPreviews ?? []).filter(preview => preview.target !== 'Owner profile (separate import)')} />}
+
               <div className="flex flex-wrap gap-1.5">
-                {localData.recognizedFiles?.map((file) => (
+                {localData.recognizedFiles?.filter((file) => localData.ownerProfileFiles?.includes(file.name)).map((file) => (
                   <span
                     key={file.name}
                     className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800 dark:bg-violet-900 dark:text-violet-200"
@@ -444,7 +505,7 @@ export function UploadStep() {
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Button
                   onClick={handleDeepDiveImport}
-                  disabled={deepDiveImporting || localImporting}
+                  disabled={deepDiveImporting || localImporting || !ownerPreviewReady}
                   className="bg-violet-600 hover:bg-violet-700 dark:bg-violet-600 dark:hover:bg-violet-700"
                 >
                   {deepDiveImporting ? (
@@ -455,13 +516,13 @@ export function UploadStep() {
                   ) : (
                     <>
                       <Scan className="mr-2 h-4 w-4" />
-                      Deep Dive Import ({totalDeepFiles} files)
+                      Import Owner Profile ({totalDeepFiles} recognized files)
                     </>
                   )}
                 </Button>
-                <Button
+                {localData.recognizedFiles?.some((file) => file.type !== "profile") && <Button
                   onClick={handleLocalImport}
-                  disabled={localImporting || deepDiveImporting}
+                  disabled={localImporting || deepDiveImporting || !contactPreviewReady}
                   variant="outline"
                   className="border-violet-200 dark:border-violet-800"
                 >
@@ -473,10 +534,10 @@ export function UploadStep() {
                   ) : (
                     <>
                       <FolderOpen className="mr-2 h-4 w-4" />
-                      Contacts Only ({localData.recognizedFiles?.length} files)
+                      Import Contacts ({localData.recognizedFiles?.filter((file) => file.type !== "profile").length} contact files)
                     </>
                   )}
-                </Button>
+                </Button>}
               </div>
 
               <p className="text-xs text-violet-600 dark:text-violet-400">
@@ -490,7 +551,7 @@ export function UploadStep() {
       )}
 
       {/* Standard local detection (non-full-dump fallback) */}
-      {localData?.found && !localData.hasFullDump && (
+      {localData?.found && !localData.hasOwnerProfileFiles && (localData.recognizedFiles?.length ?? 0) > 0 && (
         <div className="rounded-lg border border-green-200 bg-green-50 p-5 dark:border-green-900 dark:bg-green-950/30">
           <div className="flex items-start gap-3">
             <HardDrive className="mt-0.5 h-5 w-5 text-green-600 dark:text-green-400" />
@@ -500,13 +561,15 @@ export function UploadStep() {
                   LinkedIn Export Detected
                 </h3>
                 <p className="text-sm text-green-700 dark:text-green-300">
-                  Found {localData.recognizedFiles?.length} importable file
+                  Found {localData.recognizedFiles?.length} recognized file
                   {localData.recognizedFiles?.length !== 1 ? "s" : ""} in{" "}
                   <code className="rounded bg-green-100 px-1 py-0.5 text-xs dark:bg-green-900">
                     {localData.directoryPath}
                   </code>
                 </p>
               </div>
+
+              <MappingPreviewList previews={localData.contactPreviews ?? []} />
 
               <div className="flex flex-wrap gap-1.5">
                 {localData.recognizedFiles?.map((file) => (
@@ -522,13 +585,13 @@ export function UploadStep() {
 
               <Button
                 onClick={handleLocalImport}
-                disabled={localImporting}
+                disabled={localImporting || !contactPreviewReady}
                 className="w-full sm:w-auto"
               >
                 <FolderOpen className="mr-2 h-4 w-4" />
                 {localImporting
                   ? "Importing..."
-                  : `Import ${localData.recognizedFiles?.length} Files`}
+                  : `Import ${localData.recognizedFiles?.length} Accepted Files`}
               </Button>
             </div>
           </div>
@@ -575,7 +638,9 @@ export function UploadStep() {
           </button>
         </p>
         <p className="text-xs text-muted-foreground">
-          Supports LinkedIn connection exports (.csv)
+          Accepts LinkedIn CSV exports for connections, messages, invitations, endorsements,
+          recommendations, positions, education, skills, and company follows. Profile.csv is accepted but skipped here.
+          Review the field mapping preview below. Results show processed records and any import errors.
         </p>
         <input
           ref={fileInputRef}
@@ -617,6 +682,9 @@ export function UploadStep() {
         </div>
       )}
 
+      {files.length > 0 && (previewing ? <p className="text-sm">Reading mapping preview...</p>
+        : <MappingPreviewList previews={manualPreviews} />)}
+
       {uploadError && (
         <p className="text-sm text-destructive">{uploadError}</p>
       )}
@@ -624,7 +692,7 @@ export function UploadStep() {
       {files.length > 0 && (
         <Button
           onClick={handleUpload}
-          disabled={files.length === 0 || uploading}
+          disabled={files.length === 0 || uploading || previewing || manualPreviews.length !== files.length || manualPreviews.some(preview => preview.warning?.startsWith('No supported columns'))}
         >
           {uploading ? "Uploading..." : "Upload & Import"}
         </Button>

@@ -1,6 +1,15 @@
 // Edge builder tests - pure function tests (DB interaction mocked)
+import { createConnectionEdge } from '@/lib/import/edge-builder';
+import type { PoolClient } from 'pg';
 
 describe('Edge Builder', () => {
+  it('backfills connected_on on an existing connection edge', async () => {
+    const query = jest.fn(async (sql: string) =>
+      sql.includes("edge_type = 'CONNECTED_TO'") ? { rows: [{ id: 'edge-1' }] } : { rows: [] });
+    const id = await createConnectionEdge({ query } as unknown as PoolClient, 'self', 'contact', '01 Jan 2023');
+    expect(id).toBe('edge-1');
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('UPDATE edges SET properties'), ['edge-1', '01 Jan 2023']);
+  });
   describe('edge type definitions', () => {
     it('should define all 9 edge types', () => {
       const edgeTypes = [
