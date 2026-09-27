@@ -361,6 +361,9 @@ test('a real loopback WebSocket listener closes an established socket on revoke'
       client!.once('error', reject);
     });
     expect(wsServer.isClientConnected(extensionId)).toBe(true);
+    const live = (wsServer as unknown as { clients: Map<string, WebSocket> }).clients.get(extensionId);
+    expect(live).toBeDefined();
+    const serverClosed = new Promise<void>(resolve => live!.once('close', () => resolve()));
     const closed = new Promise<number>((resolve, reject) => {
       client!.once('close', code => resolve(code));
       client!.once('error', reject);
@@ -369,6 +372,7 @@ test('a real loopback WebSocket listener closes an established socket on revoke'
       { params: Promise.resolve({ extensionId }) });
     expect(deleted.status).toBe(200);
     expect(await closed).toBe(4002);
+    await serverClosed;
     expect(wsServer.isClientConnected(extensionId)).toBe(false);
   } finally {
     client?.terminate();
