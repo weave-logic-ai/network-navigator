@@ -1,16 +1,42 @@
 // POST /api/import/upload - accept multipart CSV file upload
 
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
+import { mkdir, rm } from 'fs/promises';
 import { join } from 'path';
 import { createImportSession } from '@/lib/db/queries/import';
+import {
+  boundedBody, containedPath, MAX_BODY_SIZE,
+  isMultipartFormData, storedCsvName, UploadLimitError, UploadValidationError, validateCsvBatch, writeCsvFile,
+} from '@/lib/import/upload-boundary';
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 const UPLOAD_DIR = join(process.env.NODE_ENV === 'production' ? '/data' : process.cwd(), 'uploads', 'imports');
 
 export async function POST(request: NextRequest) {
+  let sessionDir: string | undefined;
+  let createdSessionDir = false;
   try {
-    const formData = await request.formData();
+    const contentType = request.headers.get('content-type');
+    if (!isMultipartFormData(contentType) || !request.body) {
+      return NextResponse.json({ error: 'Multipart CSV upload required' }, { status: 400 });
+    }
+    const declaredLength = request.headers.get('content-length');
+    if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_BODY_SIZE)) {
+      return NextResponse.json({ error: 'Upload body exceeds limit' }, { status: 413 });
+    }
+
+    // Next/Undici formData() may buffer multipart parts before exposing file count
+    // and sizes. Cap the raw stream first, even without a truthful Content-Length.
+    let bodyLimitExceeded = false;
+    const boundedRequest = new Request(request.url, {
+      method: 'POST', headers: request.headers, body: boundedBody(request.body, MAX_BODY_SIZE, () => { bodyLimitExceeded = true; }), duplex: 'half',
+    } as RequestInit);
+    let formData: FormData;
+    try {
+      formData = await boundedRequest.formData();
+    } catch {
+      if (bodyLimitExceeded) throw new UploadLimitError('Upload body exceeds limit');
+      throw new UploadValidationError('Malformed multipart upload');
+    }
     const files = formData.getAll('files');
 
     if (!files || files.length === 0) {
@@ -20,62 +46,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const validFiles: { name: string; path: string }[] = [];
-    const errors: string[] = [];
+    const validFiles = validateCsvBatch(files);
 
-    // Create session
     const sessionId = await createImportSession();
-
-    // Create upload directory for this session
-    const sessionDir = join(UPLOAD_DIR, sessionId);
-    await mkdir(sessionDir, { recursive: true });
-
-    for (const file of files) {
-      if (!(file instanceof File)) {
-        errors.push('Invalid file entry');
-        continue;
-      }
-
-      // Validate file type
-      if (!file.name.toLowerCase().endsWith('.csv')) {
-        errors.push(`${file.name}: only .csv files are accepted`);
-        continue;
-      }
-
-      // Validate file size
-      if (file.size > MAX_FILE_SIZE) {
-        errors.push(`${file.name}: file exceeds 50 MB limit`);
-        continue;
-      }
-
-      // Save file
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const filePath = join(sessionDir, file.name);
-      await writeFile(filePath, buffer);
-
-      validFiles.push({ name: file.name, path: filePath });
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+      throw new Error('Invalid generated session ID');
     }
-
-    if (validFiles.length === 0) {
-      return NextResponse.json(
-        { error: 'No valid CSV files uploaded', details: errors },
-        { status: 400 }
-      );
+    await mkdir(UPLOAD_DIR, { recursive: true });
+    sessionDir = containedPath(UPLOAD_DIR, sessionId);
+    await mkdir(sessionDir, { mode: 0o700 });
+    createdSessionDir = true;
+    const names: string[] = [];
+    for (const file of validFiles) {
+      const name = storedCsvName(file.name);
+      await writeCsvFile(file, sessionDir, name);
+      names.push(name);
     }
 
     return NextResponse.json(
-      {
-        sessionId,
-        files: validFiles.map((f) => f.name),
-        uploadDir: sessionDir,
-        errors: errors.length > 0 ? errors : undefined,
-      },
+      { sessionId, files: names },
       { status: 201 }
     );
   } catch (error) {
+    if (sessionDir && createdSessionDir) await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+    const limit = error instanceof UploadLimitError || (error instanceof Error && error.message.includes('Upload body exceeds limit'));
+    const invalid = error instanceof UploadValidationError;
     return NextResponse.json(
-      { error: 'Upload failed', details: error instanceof Error ? error.message : undefined },
-      { status: 500 }
+      { error: limit ? 'Upload exceeds allowed limits' : invalid ? error.message : 'Upload failed' },
+      { status: limit ? 413 : invalid ? 400 : 500 }
     );
   }
 }

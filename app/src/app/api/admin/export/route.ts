@@ -2,6 +2,7 @@
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
+import { escapeCsvField } from '@/lib/import/csv-export';
 
 interface ExportRow {
   full_name: string | null;
@@ -67,12 +68,4 @@ export async function GET() {
       { status: 500 }
     );
   }
-}
-
-function escapeCsvField(value: string): string {
-  // If the field contains commas, quotes, or newlines, wrap in quotes and escape inner quotes
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
 }
