@@ -15,24 +15,39 @@ import {
   getActiveLensForTarget,
   createLensForTarget,
 } from '@/lib/targets/lens-service';
-import { getTargetById, getCurrentOwnerProfileId } from '@/lib/targets/service';
+import { getTargetById, getCurrentOwnerProfileId, getResearchTargetState } from '@/lib/targets/service';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
+
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function authorizedTarget(id: string) {
+  if (!uuid.test(id)) return null;
+  const ownerId = await getCurrentOwnerProfileId();
+  if (!ownerId) return null;
+  const [state, target] = await Promise.all([getResearchTargetState(ownerId), getTargetById(id)]);
+  if (!state || !target || state.tenantId !== target.tenantId ||
+      (target.kind === 'self' && target.ownerId !== ownerId)) return null;
+  return { target, scope: { tenantId: state.tenantId, ownerId } };
+}
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const { id } = await params;
-    const target = await getTargetById(id);
-    if (!target) {
+    const access = await authorizedTarget(id);
+    if (!access) {
       return NextResponse.json({ error: 'Target not found' }, { status: 404 });
     }
-    const lenses = await listLensesForTarget(id);
-    const activeLens = await getActiveLensForTarget(id);
+    const lenses = await listLensesForTarget(id, access.scope);
+    const activeLens = await getActiveLensForTarget(id, access.scope);
     return NextResponse.json({ data: lenses, activeLensId: activeLens?.id ?? null });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      { error: 'Failed to list lenses', details: error instanceof Error ? error.message : undefined },
+      { error: 'Failed to list lenses' },
       { status: 500 }
     );
   }
@@ -42,14 +57,20 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const { id } = await params;
-    const target = await getTargetById(id);
-    if (!target) {
+    const access = await authorizedTarget(id);
+    if (!access) {
       return NextResponse.json({ error: 'Target not found' }, { status: 404 });
     }
 
-    const body = (await request.json().catch(() => ({}))) as {
+    const parsed: unknown = await request.json().catch(() => null);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return NextResponse.json({ error: 'Invalid lens body' }, { status: 400 });
+    }
+    const body = parsed as {
       name?: string;
       icpProfileIds?: string[];
       secondaryTargetId?: string | null;
@@ -59,21 +80,40 @@ export async function POST(
     if (!body.name || typeof body.name !== 'string' || body.name.trim().length === 0) {
       return NextResponse.json({ error: 'Missing `name`' }, { status: 400 });
     }
+    if (body.icpProfileIds !== undefined &&
+        (!Array.isArray(body.icpProfileIds) || !body.icpProfileIds.every(value =>
+          typeof value === 'string' && uuid.test(value)))) {
+      return NextResponse.json({ error: 'Invalid ICP profile IDs' }, { status: 400 });
+    }
+    if (body.config !== undefined &&
+        (!body.config || typeof body.config !== 'object' || Array.isArray(body.config))) {
+      return NextResponse.json({ error: 'Invalid lens config' }, { status: 400 });
+    }
 
-    const ownerId = await getCurrentOwnerProfileId();
+    if (body.secondaryTargetId != null) {
+      if (typeof body.secondaryTargetId !== 'string' || !uuid.test(body.secondaryTargetId)) {
+        return NextResponse.json({ error: 'Invalid secondary target' }, { status: 400 });
+      }
+      const secondary = await getTargetById(body.secondaryTargetId);
+      if (!secondary || secondary.tenantId !== access.scope.tenantId ||
+          (secondary.kind === 'self' && secondary.ownerId !== access.scope.ownerId)) {
+        return NextResponse.json({ error: 'Invalid secondary target' }, { status: 400 });
+      }
+    }
+
     const lens = await createLensForTarget({
       targetId: id,
-      tenantId: target.tenantId,
+      tenantId: access.scope.tenantId,
       name: body.name.trim(),
-      userId: ownerId,
-      icpProfileIds: Array.isArray(body.icpProfileIds) ? body.icpProfileIds : [],
+      userId: access.scope.ownerId,
+      icpProfileIds: body.icpProfileIds ?? [],
       secondaryTargetId: body.secondaryTargetId ?? null,
       configExtras: body.config ?? {},
     });
     return NextResponse.json({ data: lens });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      { error: 'Failed to create lens', details: error instanceof Error ? error.message : undefined },
+      { error: 'Failed to create lens' },
       { status: 500 }
     );
   }

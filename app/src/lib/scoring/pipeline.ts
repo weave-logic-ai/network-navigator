@@ -21,6 +21,7 @@ import { checkAndGenerateTasks } from './task-triggers';
 import { resolveTaxonomyChain } from '../taxonomy/service';
 import { RESEARCH_FLAGS } from '../config/research-flags';
 import { getActiveLensIcps } from '../targets/lens-service';
+import { getCurrentOwnerProfileId, getResearchTargetState, getTargetById } from '../targets/service';
 import { emitScoringImpulses } from '../ecc/impulses/scoring-adapter';
 
 /**
@@ -37,7 +38,15 @@ import { emitScoringImpulses } from '../ecc/impulses/scoring-adapter';
  */
 async function resolveIcpProfilesForScoring(targetId?: string): Promise<IcpProfile[]> {
   if (RESEARCH_FLAGS.targets && targetId) {
-    const lensIcps = await getActiveLensIcps(targetId);
+    const ownerId = await getCurrentOwnerProfileId();
+    const [state, target] = ownerId ? await Promise.all([
+      getResearchTargetState(ownerId), getTargetById(targetId),
+    ]) : [null, null];
+    if (!ownerId || !state || !target || state.tenantId !== target.tenantId ||
+        (target.kind === 'self' && target.ownerId !== ownerId)) {
+      throw new Error('Scoring target not found');
+    }
+    const lensIcps = await getActiveLensIcps(targetId, { tenantId: state.tenantId, ownerId });
     if (lensIcps.length > 0) return lensIcps;
   }
   return scoringQueries.getActiveIcpProfiles();

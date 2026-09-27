@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
 import { isShiftClick, setSecondaryTargetViaShiftClick } from "./shift-click";
+import { contextController } from "@/lib/targets/context-controller";
 
 interface SigmaNode {
   key: string;
@@ -90,9 +91,7 @@ interface SigmaGraphProps {
    * which keeps that wire name for consistency with the (unwired)
    * `/api/graph/data` implementation it was ported from. Mirrors the
    * `showProvenanceEdges`/`onShowProvenanceEdgesChange` controlled-prop
-   * pattern above: parent supplies the initial/external value, this
-   * component mirrors it locally and reports back optimistically when
-   * a node Focus action sets a new secondary, so the parent doesn't need to poll.
+   * pattern above: the parent supplies the confirmed server focus.
    */
   rootTargetId?: string | null;
   onRootTargetIdChange?: (next: string) => void;
@@ -111,25 +110,13 @@ const EDGE_TYPE_OPTIONS = [
 /** One action from a selected graph node writes only the secondary target. */
 export async function focusGraphNode(
   node: Pick<SigmaNode, "key" | "attributes">,
-  fetchImpl: typeof fetch = fetch
 ): Promise<{ ok: boolean; secondaryTargetId?: string }> {
   if (node.attributes.kind !== "company") {
-    return setSecondaryTargetViaShiftClick(node.key, fetchImpl);
+    return setSecondaryTargetViaShiftClick(node.key);
   }
   try {
-    const targetRes = await fetchImpl("/api/targets", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind: "company", id: node.key }),
-    });
-    if (!targetRes.ok) return { ok: false };
-    const target = (await targetRes.json()) as { data: { id: string } };
-    const stateRes = await fetchImpl("/api/targets/state", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secondaryTargetId: target.data.id }),
-    });
-    return { ok: stateRes.ok, secondaryTargetId: target.data.id };
+    const snapshot = await contextController.createAndFocus("company", node.key);
+    return { ok: true, secondaryTargetId: snapshot.secondaryTargetId ?? undefined };
   } catch {
     return { ok: false };
   }
@@ -151,13 +138,8 @@ export function SigmaGraph({
   // a refetch (see loadData dep array below) with cache-bust via
   // includeProvenanceEdges=true — matching the Phase 4 §6 behavior.
   const [provenanceOn, setProvenanceOn] = useState<boolean>(showProvenanceEdges);
-  // Local mirror of `rootTargetId` — same controlled-prop pattern as
-  // `provenanceOn` above. The shift-click handler updates this optimistically
-  // (see clickNode below) so the graph re-centers without waiting on a
-  // round trip through the parent.
-  const [activeRootTargetId, setActiveRootTargetId] = useState<string | null>(
-    rootTargetId
-  );
+  // The parent supplies the confirmed server root; failed writes leave it intact.
+  const activeRootTargetId = rootTargetId;
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sigmaRef = useRef<any>(null);
@@ -196,14 +178,7 @@ export function SigmaGraph({
       setFocusError("Could not focus this node. Please try again.");
       return;
     }
-    setActiveRootTargetId(result.secondaryTargetId);
     onRootTargetIdChange?.(result.secondaryTargetId);
-    window.dispatchEvent(new CustomEvent("research-target-changed", {
-      detail: {
-        secondaryTargetId: result.secondaryTargetId,
-        secondaryTargetLabel: node.attributes.label,
-      },
-    }));
     setSecondarySetFlash((prev) => new Set(prev).add(node.key));
     window.setTimeout(() => {
       if (!mountedRef.current) return;
@@ -254,11 +229,8 @@ export function SigmaGraph({
     setProvenanceOn(showProvenanceEdges);
   }, [showProvenanceEdges]);
 
-  // Same sync for the re-root target — e.g. the parent resolved the current
-  // secondary target after this component's initial mount, or the user
-  // cleared the secondary via the header breadcrumb.
+  // Clear local selection when the confirmed root changes.
   useEffect(() => {
-    setActiveRootTargetId(rootTargetId);
     setSearchQuery("");
     setSelectedNode(null);
   }, [rootTargetId]);

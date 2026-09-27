@@ -1,4 +1,5 @@
 // WS-4 §3.2 — graph shift-click helpers.
+import { contextController } from "@/lib/targets/context-controller";
 //
 // Lives in its own module so the component file stays a "use client"
 // bundle while these pure helpers can be imported from tests without
@@ -23,32 +24,16 @@ export function isShiftClick(
 }
 
 /**
- * POST /api/targets with `{kind: 'contact', id}` to get-or-create the
- * target row, then PUT /api/targets/state with `secondaryTargetId`. Silent
- * on failure — the breadcrumb UI polls state on a timer so a missed write
- * self-heals on the next render.
+ * Queue target creation and focus as one invocation in the shared controller.
  *
  * Exported so the graph component and its tests both use the same flow.
  */
 export async function setSecondaryTargetViaShiftClick(
   contactId: string,
-  fetchImpl: typeof fetch = fetch
 ): Promise<{ ok: boolean; secondaryTargetId?: string }> {
   try {
-    const createRes = await fetchImpl("/api/targets", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind: "contact", id: contactId }),
-    });
-    if (!createRes.ok) return { ok: false };
-    const createJson = (await createRes.json()) as { data: { id: string } };
-    const putRes = await fetchImpl("/api/targets/state", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
-    });
-    if (!putRes.ok) return { ok: false, secondaryTargetId: createJson.data.id };
-    return { ok: true, secondaryTargetId: createJson.data.id };
+    const snapshot = await contextController.createAndFocus("contact", contactId);
+    return { ok: true, secondaryTargetId: snapshot.secondaryTargetId ?? undefined };
   } catch {
     return { ok: false };
   }

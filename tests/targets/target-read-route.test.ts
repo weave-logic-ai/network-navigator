@@ -4,10 +4,14 @@ jest.mock('@/lib/targets/service', () => ({
   getDefaultTenantId: jest.fn(),
   getOrCreateContactTarget: jest.fn(),
   getOrCreateCompanyTarget: jest.fn(),
+  getCurrentOwnerProfileId: jest.fn(),
+}));
+jest.mock('@/lib/auth/local-request-boundary', () => ({
+  requireLocalDashboardRequest: jest.fn().mockResolvedValue(null),
 }));
 
 import { GET } from '@/app/api/targets/route';
-import { getTargetById, getDefaultTenantId } from '@/lib/targets/service';
+import { getTargetById, getDefaultTenantId, getCurrentOwnerProfileId } from '@/lib/targets/service';
 
 const ID = 'f96e56cb-e599-4960-b82b-6ac1d53ce503';
 const getTarget = getTargetById as jest.MockedFunction<typeof getTargetById>;
@@ -23,6 +27,7 @@ describe('GET /api/targets?id=', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     getTenant.mockResolvedValue('tenant-1');
+    (getCurrentOwnerProfileId as jest.Mock).mockResolvedValue('owner-1');
   });
 
   it('resolves a target label for an id-only focus change', async () => {
@@ -50,5 +55,16 @@ describe('GET /api/targets?id=', () => {
     });
     const response = await GET(request(ID));
     expect(response.status).toBe(404);
+  });
+
+  it('does not disclose another owner’s self target in the same tenant', async () => {
+    getTarget.mockResolvedValue({
+      id: ID, tenantId: 'tenant-1', kind: 'self', label: 'Private self',
+      ownerId: 'owner-2', contactId: null, companyId: null, pinned: false,
+      createdAt: '', updatedAt: '', lastUsedAt: '',
+    });
+    const response = await GET(request(ID));
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(await response.json())).not.toContain('Private self');
   });
 });

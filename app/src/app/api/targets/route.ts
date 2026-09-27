@@ -13,18 +13,23 @@ import {
   getOrCreateCompanyTarget,
   getDefaultTenantId,
   getTargetById,
+  getCurrentOwnerProfileId,
 } from '@/lib/targets/service';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 // The breadcrumb uses this lookup when a focus-change event carries an id
 // but no label (for example, Back to a previous secondary target).
 export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const id = request.nextUrl.searchParams.get('id');
     if (!id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       return NextResponse.json({ error: 'Valid target id is required' }, { status: 400 });
     }
     const target = await getTargetById(id);
-    if (!target || target.tenantId !== await getDefaultTenantId()) {
+    if (!target || target.tenantId !== await getDefaultTenantId() ||
+        (target.kind === 'self' && target.ownerId !== await getCurrentOwnerProfileId())) {
       return NextResponse.json({ error: 'Target not found' }, { status: 404 });
     }
     return NextResponse.json({ data: target });
@@ -37,6 +42,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = (await request.json().catch(() => ({}))) as {
       kind?: string;

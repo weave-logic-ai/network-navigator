@@ -6,7 +6,7 @@ description: The research-target model — kinds, primary vs. secondary, breadcr
 A **research target** is the first-class answer to "who or what is this session about." Before this sprint, that question was answered implicitly and inconsistently across the app — the owner's dashboard, a contact detail page, a company page, and the extension's sidebar target panel each had their own notion of "current entity." `research_targets` gives every one of those surfaces the same underlying row to point at.
 
 <Callout type="warn">
-The target model is gated behind `RESEARCH_FLAGS.targets` (env var `RESEARCH_TARGETS`), off by default. The backend service and API routes are always callable — the flag controls whether target-aware UI (breadcrumbs, picker, lens controls) renders. See [Snippets](/docs/research-tools/snippets) for the equivalent `RESEARCH_SNIPPETS` flag.
+The target model is gated behind `RESEARCH_FLAGS.targets` (env var `RESEARCH_TARGETS`), off by default. The flag controls whether target-aware UI (breadcrumbs, picker, lens controls) renders; the API routes still require the local operator session. See [Snippets](/docs/research-tools/snippets) for the equivalent `RESEARCH_SNIPPETS` flag.
 </Callout>
 
 ## Kinds
@@ -43,9 +43,9 @@ CREATE TABLE research_target_state (
 );
 ```
 
-`GET /api/targets/state` reads the current pair; `PUT /api/targets/state` accepts only `{ secondaryTargetId: string | null }` — there is no primary field on the request body, because primary can't be changed through this endpoint. If the secondary's underlying contact or company was deleted (all three subject FKs on the target row go `NULL` via `ON DELETE SET NULL`), the state service clears the dangling pointer automatically on next read rather than surfacing a broken reference.
+`GET /api/targets/state` returns the authoritative snapshot and its string `revision`. To focus or clear, `PUT /api/targets/state` requires `{ expectedRevision, action: { type: 'focus', targetId: string | null } }`; the old `{ secondaryTargetId }` body returns 400. A missing revision returns 428, and a stale revision returns 409 with the current snapshot so the caller can resolve the conflict. Back uses `{ type: 'back' }` under the same revisioned envelope. Primary remains immutable. Since migration 057, deleting a contact or company cascades its target row, clears the state pointer through its FK, and advances the revision.
 
-`POST /api/targets` with `{ kind: 'contact' | 'company', id }` gets-or-creates a target row for a subject and returns its id, ready to hand to the `PUT /api/targets/state` call above. This is the two-step flow the picker, the shift-click handler, and the "Make this the target" affordances all use.
+`POST /api/targets` with `{ kind: 'contact' | 'company', id }` gets-or-creates a target row for a subject. The shared context controller queues creation and the revisioned focus command together for the picker, shift-click handler, and other target affordances.
 
 ## Breadcrumbs and switching
 
@@ -57,7 +57,7 @@ Self  >  [Secondary]   [T]
 
 - Hovering the secondary crumb reveals when it was set and which lens was active, with a back-arrow to swap to the prior secondary.
 - History is read from `GET /api/targets/state/history`.
-- Clicking the `X` on the secondary crumb clears it (writes `secondaryTargetId: null`).
+- Clicking the `X` on the secondary crumb clears it with a revisioned `focus` action whose `targetId` is `null`.
 - The `T` key (checked while no input/textarea has focus) opens the target picker modal for a global entity search.
 - When `RESEARCH_FLAGS.targets` is off, the breadcrumb still mounts but with `interactive={false}` — a static label, no hover card, no picker.
 
