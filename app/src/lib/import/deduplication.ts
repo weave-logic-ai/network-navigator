@@ -3,6 +3,8 @@
 import { createHash } from 'crypto';
 import { PoolClient } from 'pg';
 import { DedupResult, FieldChange } from './types';
+import { reconcileContactIdentity } from '../contacts/identity-lifecycle';
+import type { ContactIdentityRow } from '../contacts/identity';
 
 export function computeDedupHash(
   linkedinUrl: string,
@@ -186,10 +188,14 @@ export async function deduplicateContact(
   }
 
   values.push(existing.id);
-  await client.query(
-    `UPDATE contacts SET ${setClauses.join(', ')} WHERE id = $${paramIdx}`,
+  const updated = await client.query<ContactIdentityRow>(
+    `UPDATE contacts SET ${setClauses.join(', ')} WHERE id = $${paramIdx}
+     RETURNING full_name, first_name, last_name, linkedin_url, degree, is_archived`,
     values
   );
+  if (changes.some((change) => ['full_name', 'first_name', 'last_name'].includes(change.field))) {
+    await reconcileContactIdentity(client, existing.id, updated.rows[0]);
+  }
 
   // Merge tags (append, don't replace)
   if (incoming.tags && incoming.tags.length > 0) {

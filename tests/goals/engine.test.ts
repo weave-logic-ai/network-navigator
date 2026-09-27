@@ -5,6 +5,7 @@
 
 jest.mock('@/lib/db/client', () => ({
   query: jest.fn(),
+  transaction: jest.fn(),
 }));
 
 jest.mock('@/lib/goals/checks/icp-checks', () => ({ icpChecks: [jest.fn(), jest.fn()] }));
@@ -14,8 +15,8 @@ jest.mock('@/lib/goals/checks/background-checks', () => ({ backgroundChecks: [je
 jest.mock('@/lib/goals/checks/signal-checks', () => ({ signalChecks: [jest.fn()] }));
 jest.mock('@/lib/goals/checks/relevance-checks', () => ({ relevanceChecks: [jest.fn()] }));
 
-import { query } from '@/lib/db/client';
-import { tick, acceptGoal, rejectGoal, contextHash } from '@/lib/goals/engine';
+import { query, transaction } from '@/lib/db/client';
+import { tick, acceptGoal, rejectGoal, contextHash, StaleGoalIdentityError } from '@/lib/goals/engine';
 import { icpChecks } from '@/lib/goals/checks/icp-checks';
 import { hubChecks } from '@/lib/goals/checks/hub-checks';
 import { relationshipChecks } from '@/lib/goals/checks/relationship-checks';
@@ -25,6 +26,7 @@ import { relevanceChecks } from '@/lib/goals/checks/relevance-checks';
 import type { GoalCandidate, TickContext } from '@/lib/goals/types';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
+const mockTransaction = transaction as jest.MockedFunction<typeof transaction>;
 
 const mockIcp0 = icpChecks[0] as jest.Mock;
 const mockIcp1 = icpChecks[1] as jest.Mock;
@@ -64,6 +66,8 @@ function mockHealthyEmbeddings() {
 
 beforeEach(() => {
   mockQuery.mockReset();
+  mockTransaction.mockReset();
+  mockTransaction.mockImplementation(async (fn) => fn({ query: mockQuery } as never));
   for (const fn of [
     mockIcp0, mockIcp1, mockHub0, mockHub1, mockRelationship0,
     mockBackground0, mockSignal0, mockRelevance0,
@@ -390,13 +394,53 @@ describe('tick', () => {
 
     expect(result.errors).toEqual([]);
   });
+
+  it.each([
+    ['unknown person', 'Unknown Person', 'https://www.linkedin.com/in/ada-lovelace/', false],
+    ['self marker', 'Ada Lovelace', 'self:c1', false],
+    ['placeholder profile', 'Ada Lovelace', 'https://www.linkedin.com/in/unknown', false],
+    ['valid person', 'Ada Lovelace', 'https://www.linkedin.com/in/ada-lovelace/', true],
+  ])('filters %s before suggesting a contact goal', async (_label, fullName, url, expected) => {
+    const proposal = candidate({
+      title: 'Contact suggestion',
+      metadata: {
+        engine: 'signal_boost', checkType: 'role-change-detected', contextHash: 'contact-c1',
+        suggestedTasks: [{ title: 'Congratulate', description: 'Message', taskType: 'congratulate', priority: 2, contactId: 'c1' }],
+      },
+    });
+    mockRelationship0.mockResolvedValueOnce([proposal]);
+    mockQuery.mockImplementation(((sql: unknown) => {
+      const text = String(sql);
+      if (text.includes('FROM import_sessions')) return mockRows([{ c: '1' }]);
+      if (text.includes('FROM icp_profiles')) return mockRows([{ c: '1' }]);
+      if (text.includes('FROM contacts WHERE id = $1')) return mockRows([{
+        full_name: fullName, first_name: null, last_name: null,
+        linkedin_url: url, degree: 1, is_archived: false,
+      }]);
+      if (text.includes('FROM goal_check_feedback')) return mockRows([{ rejection_count: '0' }]);
+      if (text.includes('FROM goals')) return mockRows([]);
+      if (text.includes('FROM profile_embeddings')) return mockRows([{ c: '100' }]);
+      if (text.includes('FROM contacts')) return mockRows([{ c: '100' }]);
+      return mockRows([]);
+    }) as typeof mockQuery);
+
+    const result = await tick({ page: 'contacts' });
+    expect(result.newGoals).toHaveLength(expected ? 1 : 0);
+    expect(mockQuery.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO goals'))).toHaveLength(expected ? 1 : 0);
+  });
 });
 
 describe('acceptGoal', () => {
-  it('does nothing when the goal is not found (or not in "suggested" status)', async () => {
-    mockQuery.mockReturnValueOnce(mockRows([])); // UPDATE ... RETURNING -> no rows
+  const validContact = {
+    full_name: 'Ada Lovelace', first_name: null, last_name: null,
+    linkedin_url: 'https://www.linkedin.com/in/ada-lovelace/',
+    degree: 1, is_archived: false,
+  };
 
-    await acceptGoal('missing-id');
+  it('does nothing when the goal is not found (or not in "suggested" status)', async () => {
+    mockQuery.mockReturnValueOnce(mockRows([])); // initial unlocked candidate read
+
+    expect(await acceptGoal('missing-id')).toBe(false);
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
@@ -413,35 +457,118 @@ describe('acceptGoal', () => {
     mockQuery.mockReturnValueOnce(
       mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'niche-coverage-gap' }])
     );
-    mockQuery.mockReturnValueOnce(mockRows([])); // feedback insert
-    mockQuery.mockReturnValueOnce(mockRows([])); // task 1 insert
-    mockQuery.mockReturnValueOnce(mockRows([])); // task 2 insert
+    mockQuery.mockReturnValueOnce(mockRows([validContact])); // locked identity
+    mockQuery.mockReturnValueOnce(
+      mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'niche-coverage-gap' }])
+    ); // locked goal reread
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // task 1 insert
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // task 2 insert
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // goal activation
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // feedback insert
 
-    await acceptGoal('goal-1');
+    expect(await acceptGoal('goal-1')).toBe(true);
 
-    expect(mockQuery).toHaveBeenCalledTimes(4);
+    expect(mockQuery).toHaveBeenCalledTimes(7);
 
-    const feedbackCall = mockQuery.mock.calls[1];
+    const feedbackCall = mockQuery.mock.calls[6];
     expect(String(feedbackCall[0])).toMatch(/INSERT INTO goal_check_feedback/);
     expect(String(feedbackCall[0])).toMatch(/TRUE/);
     expect(feedbackCall[1]).toEqual(['niche-coverage-gap', 'niche-coverage-gap', 'hash1']);
 
-    const task1Call = mockQuery.mock.calls[2];
+    const task1Call = mockQuery.mock.calls[3];
     expect(String(task1Call[0])).toMatch(/INSERT INTO tasks/);
     expect(task1Call[1]).toEqual(['goal-1', 'Task 1', 'D1', 'expand_network', 2, 'https://x', 'c1']);
 
-    const task2Call = mockQuery.mock.calls[3];
+    const task2Call = mockQuery.mock.calls[4];
     expect(task2Call[1]).toEqual(['goal-1', 'Task 2', 'D2', 'manual', 3, null, null]);
+  });
+
+  it.each([
+    ['Unknown Person', 'https://www.linkedin.com/in/ada-lovelace/', 1],
+    ['Ada Lovelace', 'https://www.linkedin.com/in/unknown', 1],
+    ['Ada Lovelace', 'self:owner-id', 1],
+    ['Ada Lovelace', 'https://www.linkedin.com/in/ada-lovelace/', 0],
+  ])('does not create stale outreach for %s / %s', async (fullName, linkedinUrl, degree) => {
+    const metadata = {
+      checkType: 'warm-lead-cooling', contextHash: 'h',
+      suggestedTasks: [{
+        title: 'Send message', description: 'Outreach', taskType: 'SEND_MESSAGE',
+        priority: 2, contactId: 'c1',
+      }],
+    };
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'warm-lead-cooling' }]));
+    mockQuery.mockReturnValueOnce(mockRows([{ ...validContact, full_name: fullName, linkedin_url: linkedinUrl, degree }]));
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'warm-lead-cooling' }]));
+
+    expect(await acceptGoal('goal-stale')).toBe(false);
+    expect(mockQuery.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO tasks'))).toHaveLength(0);
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes("status = 'cancelled'"))).toBe(true);
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes('goal_check_feedback'))).toBe(false);
+  });
+
+  it('rejects contactless automatic outreach even when a manual task is also suggested', async () => {
+    const metadata = {
+      checkType: 'niche-coverage-gap', contextHash: 'h',
+      suggestedTasks: [
+        { title: 'Message', taskType: 'SEND_MESSAGE', priority: 2 },
+        { title: 'Review', taskType: 'manual', priority: 3 },
+      ],
+    };
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'niche-coverage-gap' }]));
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'niche-coverage-gap' }]));
+    expect(await acceptGoal('goal-1')).toBe(false);
+    const inserts = mockQuery.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO tasks'));
+    expect(inserts).toHaveLength(0);
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes("status = 'cancelled'"))).toBe(true);
+  });
+
+  it('cancels a mixed suggestion when any linked contact is stale', async () => {
+    const metadata = {
+      checkType: 'hub-unexplored', contextHash: 'mixed',
+      suggestedTasks: [
+        { title: 'Browse Ada', taskType: 'expand_network', priority: 2, contactId: 'valid-id' },
+        { title: 'Message Unknown', taskType: 'SEND_MESSAGE', priority: 3, contactId: 'stale-id' },
+      ],
+    };
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'hub-unexplored' }]));
+    mockQuery.mockReturnValueOnce(mockRows([{ ...validContact, full_name: 'Unknown Person' }]));
+    mockQuery.mockReturnValueOnce(mockRows([validContact]));
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'hub-unexplored' }]));
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // cancellation with audit metadata
+
+    expect(await acceptGoal('mixed-goal')).toBe(false);
+    const sql = mockQuery.mock.calls.map(([statement]) => String(statement)).join('\n');
+    expect(sql).toContain("status = 'cancelled'");
+    expect(sql).toContain('stale_suggested_identity');
+    expect(sql).not.toContain('INSERT INTO tasks');
+    expect(sql).not.toContain('INSERT INTO goal_check_feedback');
+    expect(sql).not.toContain("status = 'active'");
   });
 
   it('creates no tasks when the goal has no suggestedTasks', async () => {
     const metadata = { checkType: 'x', contextHash: 'h', suggestedTasks: [] };
     mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'x' }]));
-    mockQuery.mockReturnValueOnce(mockRows([])); // feedback insert
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'x' }]));
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // activation
+    mockQuery.mockReturnValueOnce(mockRows([{}])); // feedback insert
 
-    await acceptGoal('goal-2');
+    expect(await acceptGoal('goal-2')).toBe(true);
 
-    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects when insert-time eligibility fails despite a valid locked read', async () => {
+    const metadata = { checkType: 'warm-lead-cooling', contextHash: 'h', suggestedTasks: [
+      { title: 'Send message', taskType: 'SEND_MESSAGE', priority: 2, contactId: 'c1' },
+    ] };
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'warm-lead-cooling' }]));
+    mockQuery.mockReturnValueOnce(mockRows([validContact]));
+    mockQuery.mockReturnValueOnce(mockRows([{ metadata: JSON.stringify(metadata), goal_type: 'warm-lead-cooling' }]));
+    mockQuery.mockReturnValueOnce(mockRows([])); // INSERT ... SELECT finds no eligible contact
+
+    await expect(acceptGoal('goal-stale')).rejects.toBeInstanceOf(StaleGoalIdentityError);
+    expect(String(mockQuery.mock.calls[3][0])).toContain('EXISTS');
+    expect(mockQuery.mock.calls.some(([sql]) => String(sql).includes('UPDATE goals'))).toBe(false);
   });
 });
 

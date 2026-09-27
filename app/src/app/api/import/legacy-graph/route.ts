@@ -10,6 +10,7 @@ import { resolve } from 'path';
 import { getPool } from '@/lib/db/client';
 import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
 import type { PoolClient } from 'pg';
+import { importLegacyContacts } from '@/lib/import/legacy-contacts';
 
 // Allowed paths
 const ALLOWED_PREFIXES = ['/home/aepod/dev/ctox/', '/data/'];
@@ -112,16 +113,6 @@ interface LegacyGraph {
 
 // ── Import logic ────────────────────────────────────────────────────────────
 
-function parseName(raw: string): { firstName: string; lastName: string; fullName: string } {
-  const fullName = raw.trim();
-  const parts = fullName.split(/\s+/);
-  return {
-    firstName: parts[0] || '',
-    lastName: parts.slice(1).join(' ') || '',
-    fullName,
-  };
-}
-
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -144,68 +135,6 @@ async function importCompanies(
   }
 
   return slugToUuid;
-}
-
-async function importContacts(
-  client: PoolClient,
-  contacts: Record<string, LegacyContact>,
-  companyMap: Map<string, string>
-): Promise<{ urlToUuid: Map<string, string>; importedIds: string[] }> {
-  const urlToUuid = new Map<string, string>();
-  const importedIds: string[] = [];
-
-  for (const [url, contact] of Object.entries(contacts)) {
-    const displayName = contact.enrichedName || contact.name || '';
-    const { firstName, lastName, fullName } = parseName(displayName);
-    const companyUuid = contact.companyId ? companyMap.get(contact.companyId) : null;
-
-    const result = await client.query(
-      `INSERT INTO contacts (
-        linkedin_url, first_name, last_name, full_name,
-        headline, title, current_company, current_company_id,
-        location, about, connections_count, degree,
-        discovered_via, tags, is_archived
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      ON CONFLICT (linkedin_url) DO UPDATE SET
-        full_name = COALESCE(NULLIF(EXCLUDED.full_name,''), contacts.full_name),
-        first_name = COALESCE(NULLIF(EXCLUDED.first_name,''), contacts.first_name),
-        last_name = COALESCE(NULLIF(EXCLUDED.last_name,''), contacts.last_name),
-        headline = COALESCE(NULLIF(EXCLUDED.headline,''), contacts.headline),
-        title = COALESCE(NULLIF(EXCLUDED.title,''), contacts.title),
-        current_company = COALESCE(NULLIF(EXCLUDED.current_company,''), contacts.current_company),
-        current_company_id = COALESCE(EXCLUDED.current_company_id, contacts.current_company_id),
-        location = COALESCE(NULLIF(EXCLUDED.location,''), contacts.location),
-        about = COALESCE(NULLIF(EXCLUDED.about,''), contacts.about),
-        connections_count = COALESCE(EXCLUDED.connections_count, contacts.connections_count),
-        degree = EXCLUDED.degree,
-        discovered_via = EXCLUDED.discovered_via,
-        tags = EXCLUDED.tags
-      RETURNING id`,
-      [
-        url,
-        firstName,
-        lastName,
-        fullName,
-        contact.headline || contact.currentRole || null,
-        contact.title || contact.currentRole || null,
-        contact.currentCompany || null,
-        companyUuid || null,
-        contact.enrichedLocation || contact.location || null,
-        contact.about || null,
-        contact.mutualConnections || null,
-        contact.degree || 1,
-        contact.discoveredVia || [],
-        contact.tags || [],
-        false,
-      ]
-    );
-
-    const contactId = result.rows[0].id;
-    urlToUuid.set(url, contactId);
-    importedIds.push(contactId);
-  }
-
-  return { urlToUuid, importedIds };
 }
 
 async function importEdges(
@@ -536,7 +465,7 @@ export async function POST(request: NextRequest) {
     const companyMap = await importCompanies(client, graph.companies || {});
 
     // 2. Contacts
-    const { urlToUuid, importedIds } = await importContacts(
+    const { urlToUuid, importedIds } = await importLegacyContacts(
       client,
       graph.contacts || {},
       companyMap

@@ -2,7 +2,7 @@
 // Fast: all checks are indexed lookups, no heavy computation
 
 import crypto from 'crypto';
-import { query } from '../db/client';
+import { query, transaction } from '../db/client';
 import type { TickContext, GoalCandidate, TickResult, GoalCheck } from './types';
 import { icpChecks } from './checks/icp-checks';
 import { hubChecks } from './checks/hub-checks';
@@ -10,11 +10,36 @@ import { relationshipChecks } from './checks/relationship-checks';
 import { backgroundChecks } from './checks/background-checks';
 import { signalChecks } from './checks/signal-checks';
 import { relevanceChecks } from './checks/relevance-checks';
+import { CONTACT_RECOMMENDATION_ELIGIBLE_SQL, isRecommendationEligible, type ContactIdentityRow } from '../contacts/identity';
 
 const REJECTION_THRESHOLD = 3;   // Need 3 rejections to suppress
 const REJECTION_WINDOW_DAYS = 30;
 const MAX_CONTEXT_CANDIDATES = 3;
 const MAX_BACKGROUND_CHECKS = 2;
+const OUTREACH_TASK_TYPES = new Set(['SEND_MESSAGE', 'outreach', 'pitch_offering', 'referral_ask', 'ENGAGE_CONTENT', 'engage_content', 'congratulate']);
+
+async function hasEligibleContact(contactId: string): Promise<boolean> {
+  try {
+    const result = await query<ContactIdentityRow>(
+      `SELECT full_name, first_name, last_name, linkedin_url, degree, is_archived
+       FROM contacts WHERE id = $1`,
+      [contactId]
+    );
+    return !!result.rows[0] && isRecommendationEligible(result.rows[0]);
+  } catch {
+    return false;
+  }
+}
+
+async function hasEligibleSuggestedTasks(candidate: GoalCandidate): Promise<boolean> {
+  const tasks = candidate.metadata.suggestedTasks;
+  if (tasks.some((task) => OUTREACH_TASK_TYPES.has(task.taskType) && !task.contactId)) return false;
+  const contactIds = [...new Set(tasks.flatMap((task) => task.contactId ? [task.contactId] : []))];
+  for (const id of contactIds) {
+    if (!(await hasEligibleContact(id))) return false;
+  }
+  return true;
+}
 
 /**
  * Hash a check type + context for dedup/feedback lookup.
@@ -51,6 +76,19 @@ async function isDuplicate(goalType: string, ctxHash: string): Promise<boolean> 
     `SELECT id FROM goals
      WHERE goal_type = $1 AND status IN ('active', 'suggested')
        AND metadata->>'contextHash' = $2
+       AND NOT (status = 'suggested' AND source = 'system' AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(
+           CASE WHEN jsonb_typeof(goals.metadata->'suggestedTasks') = 'array'
+             THEN goals.metadata->'suggestedTasks' ELSE '[]'::jsonb END
+         ) AS suggested(task)
+         LEFT JOIN contacts c ON c.id::text = suggested.task->>'contactId'
+         WHERE (NULLIF(suggested.task->>'contactId', '') IS NOT NULL
+           AND NOT COALESCE((${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}), FALSE))
+           OR (NULLIF(suggested.task->>'contactId', '') IS NULL
+             AND suggested.task->>'taskType' IN ('SEND_MESSAGE', 'outreach',
+               'pitch_offering', 'referral_ask', 'ENGAGE_CONTENT',
+               'engage_content', 'congratulate'))
+       ))
      LIMIT 1`,
     [goalType, ctxHash]
   );
@@ -191,6 +229,9 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
 
   // Dedup + suppression filter
   for (const candidate of candidates) {
+    // Other checks may produce a contact-linked goal; validate before its
+    // title or suggested tasks can appear as a recommendation.
+    if (!(await hasEligibleSuggestedTasks(candidate))) continue;
     const ctxHash = candidate.metadata.contextHash;
 
     // Check suppression (3 rejections)
@@ -244,36 +285,98 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
   return { newGoals, errors };
 }
 
-/**
- * Accept a suggested goal — changes status to 'active' and creates suggested tasks.
- */
-export async function acceptGoal(goalId: string): Promise<void> {
-  const goalResult = await query<{ metadata: string; goal_type: string }>(
-    `UPDATE goals SET status = 'active' WHERE id = $1 AND status = 'suggested'
-     RETURNING metadata::text, goal_type`,
-    [goalId]
-  );
-
-  if (goalResult.rows.length === 0) return;
-
-  const metadata = JSON.parse(goalResult.rows[0].metadata);
-
-  // Record acceptance feedback
-  await query(
-    `INSERT INTO goal_check_feedback (check_type, goal_type, context_hash, accepted)
-     VALUES ($1, $2, $3, TRUE)`,
-    [metadata.checkType, goalResult.rows[0].goal_type, metadata.contextHash]
-  );
-
-  // Create suggested tasks
-  const suggestedTasks = metadata.suggestedTasks ?? [];
-  for (const task of suggestedTasks) {
-    await query(
-      `INSERT INTO tasks (goal_id, title, description, task_type, priority, url, contact_id, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'system')`,
-      [goalId, task.title, task.description, task.taskType, task.priority, task.url ?? null, task.contactId ?? null]
-    );
+export class StaleGoalIdentityError extends Error {
+  constructor() {
+    super('Suggested contacts no longer have a verified identity; refresh the goal suggestions.');
+    this.name = 'StaleGoalIdentityError';
   }
+}
+
+/** Accept a suggested goal and its eligible tasks as one database transaction. */
+export async function acceptGoal(goalId: string): Promise<boolean> {
+  return transaction(async (client) => {
+    // Read the candidate without a goal lock, then acquire contact locks in a
+    // stable order before locking the goal. Contact edits follow contact→goal.
+    const candidate = await client.query<{ metadata: string }>(
+      `SELECT metadata::text FROM goals WHERE id = $1 AND status = 'suggested'`,
+      [goalId]
+    );
+    if (candidate.rows.length === 0) return false;
+    const candidateTasks = JSON.parse(candidate.rows[0].metadata).suggestedTasks ?? [];
+    const lockedContacts = new Map<string, ContactIdentityRow>();
+    const contactIds = [...new Set<string>(candidateTasks.flatMap((task: { contactId?: string }) =>
+      task.contactId ? [task.contactId] : []))].sort();
+    for (const contactId of contactIds) {
+      const contact = await client.query<ContactIdentityRow>(
+        `SELECT full_name, first_name, last_name, linkedin_url, degree, is_archived
+         FROM contacts WHERE id = $1 FOR SHARE`,
+        [contactId]
+      );
+      if (contact.rows[0]) lockedContacts.set(contactId, contact.rows[0]);
+    }
+
+    const goalResult = await client.query<{ metadata: string; goal_type: string }>(
+      `SELECT metadata::text, goal_type FROM goals
+       WHERE id = $1 AND status = 'suggested' FOR UPDATE`,
+      [goalId]
+    );
+    if (goalResult.rows.length === 0) return false;
+    if (goalResult.rows[0].metadata !== candidate.rows[0].metadata) {
+      throw new StaleGoalIdentityError();
+    }
+
+    const metadata = JSON.parse(goalResult.rows[0].metadata);
+    const suggestedTasks = metadata.suggestedTasks ?? [];
+    let invalidIdentity = false;
+
+    for (const task of suggestedTasks) {
+      const outreach = OUTREACH_TASK_TYPES.has(task.taskType);
+      if (task.contactId) {
+        const contact = lockedContacts.get(task.contactId);
+        if (!contact || !isRecommendationEligible(contact)) {
+          invalidIdentity = true;
+          break;
+        }
+      } else if (outreach) {
+        invalidIdentity = true;
+        break;
+      }
+    }
+
+    // A mixed suggestion still has a stale title, target and task count. Cancel
+    // the entire goal rather than accepting only its valid subset.
+    if (invalidIdentity) {
+      await client.query(
+        `UPDATE goals SET status = 'cancelled',
+           metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+             'u1_identity_guard', jsonb_build_object('reason', 'stale_suggested_identity', 'at', clock_timestamp()))
+         WHERE id = $1`,
+        [goalId]
+      );
+      return false;
+    }
+
+    for (const task of suggestedTasks) {
+      const inserted = await client.query(
+        `INSERT INTO tasks (goal_id, title, description, task_type, priority, url, contact_id, source)
+         SELECT $1, $2, $3, $4, $5, $6, $7::uuid, 'system'
+         WHERE $7::uuid IS NULL OR EXISTS (
+           SELECT 1 FROM contacts c WHERE c.id = $7::uuid AND ${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}
+         )`,
+        [goalId, task.title, task.description ?? null, task.taskType, task.priority,
+          task.url ?? (task.contactId ? `/contacts/${task.contactId}` : null), task.contactId ?? null]
+      );
+      if (!inserted.rowCount) throw new StaleGoalIdentityError();
+    }
+
+    await client.query(`UPDATE goals SET status = 'active' WHERE id = $1`, [goalId]);
+    await client.query(
+      `INSERT INTO goal_check_feedback (check_type, goal_type, context_hash, accepted)
+       VALUES ($1, $2, $3, TRUE)`,
+      [metadata.checkType, goalResult.rows[0].goal_type, metadata.contextHash]
+    );
+    return true;
+  });
 }
 
 /**

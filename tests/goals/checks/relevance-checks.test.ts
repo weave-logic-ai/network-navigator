@@ -12,6 +12,8 @@ import { relevanceChecks } from '@/lib/goals/checks/relevance-checks';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
 const [skillClusterGap, offeringAlignment] = relevanceChecks;
+const identity = { full_name: 'Alex Kim', first_name: null, last_name: null,
+  linkedin_url: 'https://www.linkedin.com/in/alex-kim/', degree: 1, is_archived: false };
 
 function mockRows<T>(rows: T[]): ReturnType<typeof query> {
   return Promise.resolve({ rows, command: '', rowCount: rows.length, oid: 0, fields: [] }) as ReturnType<typeof query>;
@@ -78,7 +80,7 @@ describe('offeringAlignment', () => {
 
   it('produces a candidate for a strongly aligned contact', async () => {
     mockQuery.mockReturnValueOnce(mockRows([{
-      id: 'c1', name: 'Alex Kim', offering_id: 'o1', offering_name: 'Fractional CTO', fit_score: 0.92,
+      ...identity, id: 'c1', offering_id: 'o1', offering_name: 'Fractional CTO', fit_score: 0.92,
     }]));
 
     const result = await offeringAlignment({ page: 'discover', selectedIcpId: 'icp1' });
@@ -88,5 +90,14 @@ describe('offeringAlignment', () => {
     expect(result[0].title).toBe('Alex Kim is ideal for "Fractional CTO" — 92% fit');
     expect(result[0].metadata.engine).toBe('skills_relevance');
     expect(result[0].metadata.suggestedTasks[0].taskType).toBe('pitch_offering');
+    const sql = String(mockQuery.mock.calls[0][0]);
+    expect(sql.indexOf('c.linkedin_url ~*')).toBeLessThan(sql.indexOf('LIMIT 1'));
+  });
+
+  it('does not suggest an unknown profile even if a query mock returns it', async () => {
+    mockQuery.mockReturnValueOnce(mockRows([{ ...identity, id: 'c1',
+      linkedin_url: 'https://www.linkedin.com/in/unknown', offering_id: 'o1',
+      offering_name: 'Fractional CTO', fit_score: 0.92 }]));
+    expect(await offeringAlignment({ page: 'discover', selectedIcpId: 'icp1' })).toEqual([]);
   });
 });

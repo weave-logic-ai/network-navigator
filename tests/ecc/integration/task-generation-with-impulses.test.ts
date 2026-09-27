@@ -42,6 +42,14 @@ function mockRows<T>(rows: T[]) {
 
 const TENANT_ID = 'tenant-default-uuid';
 
+function namedIdentity(fullName: string) {
+  return {
+    full_name: fullName, first_name: null, last_name: null,
+    linkedin_url: 'https://www.linkedin.com/in/ada-lovelace/',
+    degree: 1, is_archived: false,
+  };
+}
+
 function fixedComposite(overrides: Record<string, unknown> = {}) {
   return {
     compositeScore: 0.9,
@@ -160,6 +168,10 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       const text = String(sql);
       const p = (params ?? []) as unknown[];
 
+      if (text.includes('obj_description(to_regclass')) {
+        return mockRows([{ repair_ready: true, recommendation_ready: true }]);
+      }
+
       if (text.includes(`FROM tenants WHERE slug = 'default'`)) {
         return mockRows([{ id: TENANT_ID }]);
       }
@@ -197,8 +209,8 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         return mockRows([]);
       }
 
-      if (text.includes('SELECT full_name FROM contacts WHERE id')) {
-        return mockRows([{ full_name: 'Ada Lovelace' }]);
+      if (text.includes('FROM contacts WHERE id = $1')) {
+        return mockRows([namedIdentity('Ada Lovelace')]);
       }
 
       if (text.includes('SELECT id FROM tasks')) {
@@ -207,7 +219,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
 
       if (text.includes('INSERT INTO tasks')) {
         insertedTasks.push({ sql: text, params: p });
-        return mockRows([]);
+        return text.includes('RETURNING id') ? mockRows([{ id: 'created-task' }]) : mockRows([]);
       }
 
       return mockRows([]);
@@ -295,8 +307,12 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       const text = String(sql);
       const p = (params ?? []) as unknown[];
 
-      if (text.includes('SELECT full_name FROM contacts WHERE id')) {
-        return mockRows([{ full_name: 'Ada Lovelace' }]);
+      if (text.includes('obj_description(to_regclass')) {
+        return mockRows([{ repair_ready: true, recommendation_ready: true }]);
+      }
+
+      if (text.includes('FROM contacts WHERE id = $1')) {
+        return mockRows([namedIdentity('Ada Lovelace')]);
       }
       if (text.includes('SELECT id FROM tasks')) {
         return mockRows([]);
@@ -323,6 +339,101 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
     const sql = mockQuery.mock.calls.map(c => String(c[0])).join('\n');
     expect(sql).not.toMatch(/INSERT INTO impulses/);
     expect(sql).not.toMatch(/FROM impulse_handlers/);
+  });
+
+  it.each([
+    ['legacy', false, 'unknown', false],
+    ['ECC', true, 'unknown', false],
+    ['legacy', false, 'self', true],
+    ['ECC', true, 'self', true],
+  ])('%s pipeline handles %s identity without outreach', async (_mode, enabled, _identity, self) => {
+    if (enabled) process.env.ECC_IMPULSES = 'true';
+
+    jest.doMock('@/lib/db/client', () => ({
+      query: jest.fn(), transaction: jest.fn(), healthCheck: jest.fn(),
+      getPool: jest.fn(), shutdown: jest.fn(),
+    }));
+    jest.doMock('@/lib/db/queries/scoring', () => ({
+      getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
+      getWeightProfileByName: jest.fn().mockResolvedValue(null),
+      getContactScoringData: jest.fn().mockResolvedValue(fullContact({ degree: 1 })),
+      getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
+      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
+      getContactScoreBreakdown: jest.fn().mockResolvedValue({
+        compositeScore: 0.5, tier: 'silver', persona: 'warm-lead',
+        behavioralPersona: 'engaged-professional', scoredAt: null,
+        dimensions: [], referralLikelihood: null, referralTier: null,
+        referralPersona: null, referralDimensions: [], behavioralSignals: null,
+        referralSignals: null,
+      }),
+      upsertContactScore: jest.fn().mockResolvedValue(undefined),
+      upsertContactIcpFit: jest.fn().mockResolvedValue(undefined),
+    }));
+    jest.doMock('@/lib/scoring/composite', () => ({
+      computeCompositeScore: jest.fn().mockReturnValue(fixedComposite()),
+    }));
+    jest.doMock('@/lib/scoring/referral/referral-pipeline', () => ({
+      computeReferralScore: jest.fn().mockReturnValue({
+        likelihood: 0.1, tier: null, persona: null, dimensions: [], signals: null,
+      }),
+    }));
+
+    const { query } = await import('@/lib/db/client');
+    const mockQuery = query as jest.MockedFunction<typeof query>;
+    const impulses: Record<string, Record<string, unknown>> = {};
+    const inserted: unknown[][] = [];
+    const pending = new Set<string>();
+    let nextImpulse = 0;
+    mockQuery.mockImplementation(((sql: unknown, params?: unknown[]) => {
+      const statement = String(sql);
+      const values = (params ?? []) as unknown[];
+      if (statement.includes('obj_description(to_regclass')) {
+        return mockRows([{ repair_ready: true, recommendation_ready: true }]);
+      }
+      if (statement.includes("FROM tenants WHERE slug = 'default'")) return mockRows([{ id: TENANT_ID }]);
+      if (statement.includes('INSERT INTO impulses')) {
+        const id = `imp-${++nextImpulse}`;
+        const row = {
+          id, tenant_id: values[0], impulse_type: values[1],
+          source_entity_type: values[2], source_entity_id: values[3],
+          payload: JSON.parse(values[4] as string), created_at: '2026-01-01',
+        };
+        impulses[id] = row;
+        return mockRows([row]);
+      }
+      if (statement.includes('SELECT * FROM impulses WHERE id')) return mockRows([impulses[values[0] as string]]);
+      if (statement.includes('FROM impulse_handlers')) return mockRows([{
+        id: `h-${values[1]}`, tenant_id: TENANT_ID, impulse_type: values[1],
+        handler_type: 'task_generator', config: {}, enabled: true, priority: 0,
+        created_at: 'x', updated_at: 'x',
+      }]);
+      if (statement.includes('INSERT INTO impulse_acks')) return mockRows([]);
+      if (statement.includes('FROM contacts WHERE id = $1')) {
+        return mockRows([{ ...namedIdentity('Unknown Person'), linkedin_url: self ? 'self:c1' : namedIdentity('Unknown Person').linkedin_url }]);
+      }
+      if (statement.includes('SELECT id FROM tasks')) {
+        return mockRows(pending.has(values[0] as string) ? [{ id: 'existing' }] : []);
+      }
+      if (statement.includes('INSERT INTO tasks')) {
+        if (pending.has(values[2] as string)) return mockRows([]);
+        inserted.push(values);
+        pending.add(values[2] as string);
+        return statement.includes('RETURNING id') ? mockRows([{ id: 'repair-task' }]) : mockRows([]);
+      }
+      return mockRows([]);
+    }) as typeof mockQuery);
+
+    const { scoreContact } = await import('@/lib/scoring/pipeline');
+    await scoreContact('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(inserted).toHaveLength(self ? 0 : 1);
+    if (!self) {
+      expect(inserted[0][0]).toBe('Verify identity for contact');
+      expect(inserted[0][2]).toBe('REPAIR_IDENTITY');
+      expect(inserted[0][5]).toBe('/contacts/c1');
+    }
   });
 });
 

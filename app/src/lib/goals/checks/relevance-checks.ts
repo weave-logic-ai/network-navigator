@@ -10,6 +10,7 @@
 import { query } from '../../db/client';
 import { contextHash } from '../engine';
 import type { TickContext, GoalCandidate, GoalCheck } from '../types';
+import { CONTACT_RECOMMENDATION_ELIGIBLE_SQL, contactDisplayName, identityFromRow, isRecommendationEligible, type ContactIdentityRow } from '../../contacts/identity';
 
 const CHECK_SKILL_CLUSTER_GAP = 'skill-cluster-gap';
 const CHECK_OFFERING_ALIGNMENT = 'offering-alignment';
@@ -83,15 +84,14 @@ async function skillClusterGap(ctx: TickContext): Promise<GoalCandidate[]> {
 async function offeringAlignment(ctx: TickContext): Promise<GoalCandidate[]> {
   if (!ctx.selectedIcpId) return [];
 
-  const result = await query<{
+  const result = await query<ContactIdentityRow & {
     id: string;
-    name: string;
     offering_id: string;
     offering_name: string;
     fit_score: number;
   }>(
     `SELECT c.id,
-            COALESCE(c.full_name, c.first_name || ' ' || c.last_name, 'Unknown') AS name,
+            c.full_name, c.first_name, c.last_name, c.linkedin_url, c.degree, c.is_archived,
             o.id AS offering_id,
             o.name AS offering_name,
             cif.fit_score
@@ -100,7 +100,7 @@ async function offeringAlignment(ctx: TickContext): Promise<GoalCandidate[]> {
      JOIN icp_offerings io ON io.icp_id = cif.icp_profile_id
      JOIN offerings o ON o.id = io.offering_id AND o.is_active = TRUE
      WHERE cif.icp_profile_id = $1
-       AND c.is_archived = FALSE
+       AND ${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}
        AND cif.fit_score >= 0.7
        AND c.tags IS NOT NULL AND array_length(c.tags, 1) > 0
        AND EXISTS (
@@ -119,12 +119,14 @@ async function offeringAlignment(ctx: TickContext): Promise<GoalCandidate[]> {
   if (result.rows.length === 0) return [];
 
   const row = result.rows[0];
+  if (!isRecommendationEligible(row)) return [];
+  const name = contactDisplayName(identityFromRow(row))!;
   const pct = Math.round(row.fit_score * 100);
   const hash = contextHash(CHECK_OFFERING_ALIGNMENT, { contactId: row.id, offeringId: row.offering_id });
 
   return [{
-    title: `${row.name} is ideal for "${row.offering_name}" — ${pct}% fit`,
-    description: `${row.name}'s skills align with your "${row.offering_name}" offering (${pct}% ICP fit). Prepare a targeted pitch.`,
+    title: `${name} is ideal for "${row.offering_name}" — ${pct}% fit`,
+    description: `${name}'s skills align with your "${row.offering_name}" offering (${pct}% ICP fit). Prepare a targeted pitch.`,
     goalType: CHECK_OFFERING_ALIGNMENT,
     priority: 2,
     metadata: {
@@ -132,8 +134,8 @@ async function offeringAlignment(ctx: TickContext): Promise<GoalCandidate[]> {
       checkType: CHECK_OFFERING_ALIGNMENT,
       contextHash: hash,
       suggestedTasks: [{
-        title: `Prepare "${row.offering_name}" pitch for ${row.name}`,
-        description: `Draft a personalized pitch for "${row.offering_name}" tailored to ${row.name}'s background.`,
+        title: `Prepare "${row.offering_name}" pitch for ${name}`,
+        description: `Draft a personalized pitch for "${row.offering_name}" tailored to ${name}'s background.`,
         taskType: 'pitch_offering',
         priority: 2,
         contactId: row.id,

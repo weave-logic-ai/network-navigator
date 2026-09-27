@@ -1,6 +1,7 @@
 // Contact CRUD query functions with pagination, filtering, sorting
 
-import { query } from '../client';
+import { query, transaction } from '../client';
+import { reconcileContactIdentity } from '../../contacts/identity-lifecycle';
 
 interface ListContactsOptions {
   page?: number;
@@ -320,12 +321,21 @@ export async function updateContact(
   if (setClauses.length === 0) return getContactById(id);
 
   values.push(id);
-  const result = await query<ContactRow>(
-    `UPDATE contacts SET ${setClauses.join(', ')} WHERE id = $${idx} AND is_archived = FALSE RETURNING *`,
-    values
-  );
+  const selfMarkerGuard = 'linkedin_url' in data ? ` AND linkedin_url !~* '^self:'` : '';
+  const sql = `UPDATE contacts SET ${setClauses.join(', ')} WHERE id = $${idx} AND is_archived = FALSE${selfMarkerGuard} RETURNING *`;
+  const identityFields = ['linkedin_url', 'full_name', 'first_name', 'last_name', 'degree', 'is_archived'];
+  if (!Object.keys(data).some((key) => identityFields.includes(key))) {
+    const result = await query<ContactRow>(sql, values);
+    return result.rows[0] ?? null;
+  }
 
-  return result.rows[0] ?? null;
+  return transaction(async (client) => {
+    const result = await client.query<ContactRow>(sql, values);
+    const contact = result.rows[0];
+    if (!contact) return null;
+    await reconcileContactIdentity(client, id, contact);
+    return contact;
+  });
 }
 
 export async function deleteContact(
@@ -336,11 +346,7 @@ export async function deleteContact(
     const result = await query('DELETE FROM contacts WHERE id = $1', [id]);
     return (result.rowCount ?? 0) > 0;
   }
-  const result = await query(
-    'UPDATE contacts SET is_archived = TRUE WHERE id = $1 AND is_archived = FALSE',
-    [id]
-  );
-  return (result.rowCount ?? 0) > 0;
+  return (await updateContact(id, { is_archived: true })) !== null;
 }
 
 export async function searchContacts(

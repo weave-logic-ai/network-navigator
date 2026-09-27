@@ -288,6 +288,30 @@ init. Anything added after the volume exists — including the ADR-036
 editorial migrations and `048-seed-impulse-handlers.sql` — must be applied
 explicitly, using the command documented in the header of `048`.
 
+Before deploying the U1 identity task generators to an existing database,
+apply `056-pending-identity-repair-unique.sql`. The generators fail with an
+"Identity task schema is not ready" error until both versioned indexes exist.
+From the repository root, with the existing database running:
+
+```bash
+set -euo pipefail
+docker compose exec -T db psql -U "${POSTGRES_USER:-ctox}" -d "${POSTGRES_DB:-ctox}" -v ON_ERROR_STOP=1 \
+  < data/db/init/056-pending-identity-repair-unique.sql
+docker compose exec -T db psql -U "${POSTGRES_USER:-ctox}" -d "${POSTGRES_DB:-ctox}" -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+BEGIN
+  IF COALESCE(obj_description(to_regclass('uq_tasks_pending_identity_repair_contact'), 'pg_class'), '') <> 'U1-056-auto-only-v3'
+     OR COALESCE(obj_description(to_regclass('uq_tasks_pending_auto_recommendation'), 'pg_class'), '') <> 'U1-056-auto-only-v3' THEN
+    RAISE EXCEPTION 'Migration 056 v3 task indexes are not ready';
+  END IF;
+END $$;
+SQL
+```
+
+Migration 056 audits skipped duplicate automatic tasks and invalid automatic
+outreach in task metadata. It does not cancel user-created tasks. A fresh empty
+database volume runs 056 automatically with the other init scripts.
+
 ### Phase 3 — Survive the auto-stop: BUILT AND TESTED
 
 `scripts/ruos-bootstrap.sh` in this repo is the per-boot re-provisioner,

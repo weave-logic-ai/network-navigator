@@ -1,7 +1,7 @@
 // POST /api/goals/[id]/accept - Accept a suggested goal
 
 import { NextRequest, NextResponse } from 'next/server';
-import { acceptGoal } from '@/lib/goals/engine';
+import { acceptGoal, StaleGoalIdentityError } from '@/lib/goals/engine';
 
 export async function POST(
   _request: NextRequest,
@@ -9,9 +9,13 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    await acceptGoal(id);
+    const accepted = await acceptGoal(id);
+    if (!accepted) return NextResponse.json({ error: 'Goal is no longer suggested' }, { status: 409 });
     return NextResponse.json({ data: { accepted: true } });
   } catch (error) {
+    if (error instanceof StaleGoalIdentityError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     return NextResponse.json(
       { error: 'Failed to accept goal', details: error instanceof Error ? error.message : undefined },
       { status: 500 }

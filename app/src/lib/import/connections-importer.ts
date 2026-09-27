@@ -47,6 +47,7 @@ export async function importConnections(
 
   for (let i = 0; i < parsed.rows.length; i++) {
     const row = parsed.rows[i];
+    let rowTransactionStarted = false;
     try {
       const firstName = row['first_name'] || '';
       const lastName = row['last_name'] || '';
@@ -66,6 +67,10 @@ export async function importConnections(
         result.skippedRecords++;
         continue;
       }
+
+      // Keep a contact identity update and its task/goal reconciliation atomic.
+      await client.query('BEGIN');
+      rowTransactionStarted = true;
 
       // Resolve company
       const companyRecord = await companyResolver.resolve(company);
@@ -102,12 +107,23 @@ export async function importConnections(
 
       // Create CONNECTED_TO edge
       await createConnectionEdge(client, selfContactId, dedupResult.contactId, connectedOn);
+      await client.query('COMMIT');
+      rowTransactionStarted = false;
 
       // Update counters
       if (dedupResult.action === 'created') result.newRecords++;
       else if (dedupResult.action === 'updated') result.updatedRecords++;
       else result.skippedRecords++;
     } catch (err) {
+      if (rowTransactionStarted) {
+        try {
+          await client.query('ROLLBACK');
+        } finally {
+          // The resolver may cache a company inserted by this row. A rollback
+          // removes that company, so its ID must never reach a later row.
+          companyResolver.clearCache();
+        }
+      }
       result.errors.push({
         file: 'Connections.csv',
         row: i + 1,

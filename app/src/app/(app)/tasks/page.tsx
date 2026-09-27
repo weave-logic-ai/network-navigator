@@ -43,6 +43,7 @@ interface Goal {
   task_count: number;
   completed_task_count: number;
   created_at: string;
+  metadata?: { suggestedTasks?: Array<{ title: string; description?: string; taskType?: string }> };
 }
 
 interface Task {
@@ -57,12 +58,14 @@ interface Task {
   url: string | null;
   due_date: string | null;
   contact_name: string | null;
+  metadata?: { u1_identity_migration?: { reason?: string } };
   created_at: string;
 }
 
 type TaskType = "manual" | "enrichment" | "scoring" | "outreach" | "expand_network";
 
 const STATUS_COLORS: Record<string, string> = {
+  suggested: "bg-violet-100 text-violet-700",
   pending: "bg-gray-100 text-gray-700",
   in_progress: "bg-blue-100 text-blue-700",
   completed: "bg-green-100 text-green-700",
@@ -74,6 +77,12 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const TASK_TYPES: TaskType[] = ["manual", "enrichment", "scoring", "outreach", "expand_network"];
+
+async function requireSuccessfulResponse(response: Response, action: string): Promise<void> {
+  if (response.ok) return;
+  const body = await response.json().catch(() => null);
+  throw new Error(`${action}: ${body?.error || body?.details || `HTTP ${response.status}`}`);
+}
 
 // ── TaskItem component ──
 
@@ -87,6 +96,10 @@ function TaskItem({
   onDelete: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const identityWithheld = task.status === "skipped" &&
+    task.metadata?.u1_identity_migration?.reason === "invalid_outreach_identity";
+  const title = identityWithheld ? "Outreach withheld — contact identity needs review" : task.title;
+  const taskUrl = identityWithheld ? null : task.url ?? (task.contact_id ? `/contacts/${task.contact_id}` : null);
 
   const nextStatus =
     task.status === "pending"
@@ -115,18 +128,18 @@ function TaskItem({
             <p
               className={`text-sm font-medium truncate ${task.status === "completed" ? "line-through text-muted-foreground" : ""}`}
             >
-              {task.url ? (
+              {taskUrl ? (
                 <a
-                  href={task.url}
-                  target={task.url.startsWith("http") ? "_blank" : "_self"}
+                  href={taskUrl}
+                  target={taskUrl.startsWith("http") ? "_blank" : "_self"}
                   rel="noopener noreferrer"
                   className="hover:underline text-primary"
                 >
-                  {task.title}
-                  {task.url.startsWith("http") && <ExternalLink className="h-3 w-3 inline ml-1" />}
+                  {title}
+                  {taskUrl.startsWith("http") && <ExternalLink className="h-3 w-3 inline ml-1" />}
                 </a>
               ) : (
-                task.title
+                title
               )}
             </p>
             <div className="flex flex-wrap items-center gap-1.5 mt-1">
@@ -136,11 +149,11 @@ function TaskItem({
               <Badge className={`text-[10px] px-1.5 py-0 border-0 ${STATUS_COLORS[task.status] ?? ""}`}>
                 {task.status.replace("_", " ")}
               </Badge>
-              {task.contact_name && (
-                <span className="text-[11px] text-muted-foreground flex items-center gap-0.5">
+              {task.contact_id && (
+                <a href={`/contacts/${task.contact_id}`} className="text-[11px] text-primary hover:underline flex items-center gap-0.5">
                   <ExternalLink className="h-3 w-3" />
-                  {task.contact_name}
-                </span>
+                  {identityWithheld ? "Contact record" : task.contact_name || "Contact record"}
+                </a>
               )}
               {task.due_date && (
                 <span className="text-[11px] text-muted-foreground flex items-center gap-0.5">
@@ -178,7 +191,9 @@ function TaskItem({
         </div>
       </div>
       {expanded && task.description && (
-        <p className="text-xs text-muted-foreground pl-6">{task.description}</p>
+        <p className="text-xs text-muted-foreground pl-6">
+          {identityWithheld ? `Original task: ${task.title}. ${task.description}` : task.description}
+        </p>
       )}
     </div>
   );
@@ -267,6 +282,8 @@ function GoalCard({
   onTaskStatusChange,
   onDeleteTask,
   onAddTask,
+  onReview,
+  reviewing,
 }: {
   goal: Goal;
   tasks: Task[];
@@ -275,6 +292,8 @@ function GoalCard({
   onTaskStatusChange: (id: string, status: string) => void;
   onDeleteTask: (id: string) => void;
   onAddTask: (data: { title: string; description: string; taskType: string; priority: number; goalId: string | null }) => void;
+  onReview: (id: string, decision: "accept" | "reject") => void;
+  reviewing: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showTaskForm, setShowTaskForm] = useState(false);
@@ -337,6 +356,22 @@ function GoalCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {goal.status === "suggested" && (
+          <div className="space-y-2 rounded-md border p-3" aria-label={`Review ${goal.title}`}>
+            <p className="text-xs text-muted-foreground">Review this suggestion before tasks are created.</p>
+            {(goal.metadata?.suggestedTasks ?? []).map((task, index) => (
+              <div key={index} className="text-sm">
+                <span className="font-medium">{task.title}</span>
+                {task.description && <p className="text-xs text-muted-foreground">{task.description}</p>}
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <Button size="sm" disabled={reviewing} onClick={() => onReview(goal.id, "accept")}>Accept</Button>
+              <Button size="sm" variant="outline" disabled={reviewing} onClick={() => onReview(goal.id, "reject")}>Reject</Button>
+            </div>
+          </div>
+        )}
+        {goal.status !== "suggested" && <>
         <div className="flex items-center gap-2">
           <Progress value={progress} className="flex-1 h-1.5" />
           <span className="text-[11px] text-muted-foreground whitespace-nowrap">
@@ -420,6 +455,7 @@ function GoalCard({
             ))}
           </div>
         )}
+        </>}
       </CardContent>
     </Card>
   );
@@ -435,6 +471,8 @@ export default function GoalsTasksPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showGoalForm, setShowGoalForm] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [reviewingGoalId, setReviewingGoalId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [showStandaloneForm, setShowStandaloneForm] = useState(false);
   const [newGoalTitle, setNewGoalTitle] = useState("");
   const [newGoalDesc, setNewGoalDesc] = useState("");
@@ -498,6 +536,7 @@ export default function GoalsTasksPage() {
 
   async function createGoal() {
     if (!newGoalTitle.trim()) return;
+    setActionError(null);
     try {
       const res = await fetch("/api/goals", {
         method: "POST",
@@ -508,37 +547,40 @@ export default function GoalsTasksPage() {
           priority: newGoalPriority,
         }),
       });
-      if (res.ok) {
-        setNewGoalTitle("");
-        setNewGoalDesc("");
-        setNewGoalPriority(5);
-        setShowGoalForm(false);
-        await loadGoals();
-      }
-    } catch {
-      // silent
+      await requireSuccessfulResponse(res, "Could not create goal");
+      setNewGoalTitle("");
+      setNewGoalDesc("");
+      setNewGoalPriority(5);
+      setShowGoalForm(false);
+      await loadGoals();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not create goal");
     }
   }
 
   async function updateGoalStatus(id: string, status: string) {
+    setActionError(null);
     try {
-      await fetch(`/api/goals/${id}`, {
+      const res = await fetch(`/api/goals/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
+      await requireSuccessfulResponse(res, "Could not update goal");
       await loadGoals();
-    } catch {
-      // silent
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not update goal");
     }
   }
 
   async function handleDeleteGoal(id: string) {
+    setActionError(null);
     try {
-      await fetch(`/api/goals/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/goals/${id}`, { method: "DELETE" });
+      await requireSuccessfulResponse(res, "Could not delete goal");
       await loadGoals();
-    } catch {
-      // silent
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not delete goal");
     }
   }
 
@@ -549,6 +591,7 @@ export default function GoalsTasksPage() {
     priority: number;
     goalId: string | null;
   }) {
+    setActionError(null);
     try {
       const res = await fetch("/api/tasks", {
         method: "POST",
@@ -561,43 +604,47 @@ export default function GoalsTasksPage() {
           goalId: data.goalId || undefined,
         }),
       });
-      if (res.ok) {
-        if (data.goalId) {
-          await Promise.all([loadGoals(), loadGoalTasks(data.goalId)]);
-        } else {
-          await loadStandaloneTasks();
-        }
+      await requireSuccessfulResponse(res, "Could not create task");
+      if (data.goalId) {
+        await Promise.all([loadGoals(), loadGoalTasks(data.goalId)]);
+      } else {
+        await loadStandaloneTasks();
       }
-    } catch {
-      // silent
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not create task");
     }
   }
 
   async function updateTaskStatus(id: string, status: string) {
+    setActionError(null);
     try {
-      await fetch(`/api/tasks/${id}`, {
+      const res = await fetch(`/api/tasks/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
+      await requireSuccessfulResponse(res, "Could not update task");
       await Promise.all([loadGoals(), loadStandaloneTasks()]);
-      goals.forEach((g) => loadGoalTasks(g.id));
-    } catch {
-      // silent
+      await Promise.all(goals.map((g) => loadGoalTasks(g.id)));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not update task");
     }
   }
 
   async function handleDeleteTask(id: string) {
+    setActionError(null);
     try {
-      await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+      await requireSuccessfulResponse(res, "Could not delete task");
       await Promise.all([loadGoals(), loadStandaloneTasks()]);
-      goals.forEach((g) => loadGoalTasks(g.id));
-    } catch {
-      // silent
+      await Promise.all(goals.map((g) => loadGoalTasks(g.id)));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not delete task");
     }
   }
 
   async function handleGenerateGoals() {
+    setActionError(null);
     setGenerating(true);
     try {
       // Run tick with tasks page context to generate goals
@@ -606,7 +653,7 @@ export default function GoalsTasksPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ page: "tasks" }),
       });
-      if (!res.ok) return;
+      await requireSuccessfulResponse(res, "Could not generate goals");
       const json = await res.json();
       const newGoals = json.data?.newGoals ?? [];
 
@@ -617,37 +664,31 @@ export default function GoalsTasksPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ page: "discover" }),
         });
-        if (res2.ok) {
-          const json2 = await res2.json();
-          const more = json2.data?.newGoals ?? [];
-          if (more.length === 0) {
-            // No goals found — auto-accept any pending suggested goals
-            const sugRes = await fetch("/api/goals?status=suggested");
-            if (sugRes.ok) {
-              const sugJson = await sugRes.json();
-              const suggested = sugJson.data ?? [];
-              for (const g of suggested.slice(0, 3)) {
-                await fetch(`/api/goals/${g.id}/accept`, { method: "POST" });
-              }
-            }
-          }
-        }
-      } else {
-        // Auto-accept generated goals
-        const goalsRes = await fetch("/api/goals?status=suggested");
-        if (goalsRes.ok) {
-          const goalsJson = await goalsRes.json();
-          for (const g of (goalsJson.data ?? []).slice(0, 3)) {
-            await fetch(`/api/goals/${g.id}/accept`, { method: "POST" });
-          }
-        }
+        await requireSuccessfulResponse(res2, "Could not generate goals");
+        await res2.json();
       }
-
-      loadGoals();
-    } catch {
-      // silent
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not generate goals");
     } finally {
+      setGoalTasks({});
+      await loadAll();
       setGenerating(false);
+    }
+  }
+
+  async function reviewSuggestion(id: string, decision: "accept" | "reject") {
+    setActionError(null);
+    setReviewingGoalId(id);
+    try {
+      const res = await fetch(`/api/goals/${id}/${decision}`, { method: "POST" });
+      await requireSuccessfulResponse(res, `Could not ${decision} suggested goal`);
+      setGoalTasks({});
+      await loadAll();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : `Could not ${decision} suggested goal`);
+      await loadAll();
+    } finally {
+      setReviewingGoalId(null);
     }
   }
 
@@ -693,6 +734,7 @@ export default function GoalsTasksPage() {
               <SelectContent>
                 <SelectItem value="all">All statuses</SelectItem>
                 <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="suggested">Suggested</SelectItem>
                 <SelectItem value="pending">Pending</SelectItem>
                 <SelectItem value="in_progress">In Progress</SelectItem>
                 <SelectItem value="completed">Completed</SelectItem>
@@ -719,6 +761,13 @@ export default function GoalsTasksPage() {
           </div>
         }
       />
+
+      {actionError && (
+        <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex items-center justify-between gap-3">
+          <span>{actionError} Refresh the list or retry the action.</span>
+          <Button variant="ghost" size="sm" onClick={() => { setActionError(null); void loadAll(); }}>Refresh</Button>
+        </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-5">
         {/* Left column: Goals */}
@@ -805,6 +854,8 @@ export default function GoalsTasksPage() {
               onTaskStatusChange={updateTaskStatus}
               onDeleteTask={handleDeleteTask}
               onAddTask={createTask}
+              onReview={reviewSuggestion}
+              reviewing={reviewingGoalId === goal.id}
             />
           ))}
         </div>

@@ -255,6 +255,11 @@ export default function ContactDetailPage() {
   const [loading, setLoading] = useState(true);
   const [tagInput, setTagInput] = useState("");
   const [savingTags, setSavingTags] = useState(false);
+  const [editingLinkedIn, setEditingLinkedIn] = useState(false);
+  const [linkedinDraft, setLinkedinDraft] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
+  const [savingLinkedIn, setSavingLinkedIn] = useState(false);
+  const [linkedinError, setLinkedinError] = useState<string | null>(null);
   const [enriching, setEnriching] = useState<string | null>(null);
   const [enrichResult, setEnrichResult] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -636,6 +641,27 @@ export default function ContactDetailPage() {
     }
   }
 
+  async function saveLinkedIn() {
+    if (!contact) return;
+    setSavingLinkedIn(true);
+    setLinkedinError(null);
+    try {
+      const response = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ full_name: nameDraft.trim(), linkedin_url: linkedinDraft.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save LinkedIn profile");
+      setContact(result.data);
+      setEditingLinkedIn(false);
+    } catch (error) {
+      setLinkedinError(error instanceof Error ? error.message : "Could not save LinkedIn profile");
+    } finally {
+      setSavingLinkedIn(false);
+    }
+  }
+
   if (loading) {
     return (
       <div>
@@ -1010,11 +1036,37 @@ export default function ContactDetailPage() {
                   enriching={enriching}
                   onEnrich={handleEnrich}
                 />
-                <InfoRow
-                  label="LinkedIn"
-                  value={contact.linkedinUrl}
-                  isLink
-                />
+                <div>
+                  {editingLinkedIn ? (
+                    <div className="space-y-2">
+                      <label htmlFor="contact-identity-name" className="text-sm">Contact name</label>
+                      <input id="contact-identity-name" type="text" value={nameDraft}
+                        onChange={(event) => setNameDraft(event.target.value)}
+                        className="w-full rounded border bg-background px-2 py-1 text-sm" />
+                      <label htmlFor="contact-linkedin-url" className="text-sm">LinkedIn profile</label>
+                      <input id="contact-linkedin-url" type="url" value={linkedinDraft}
+                        onChange={(event) => setLinkedinDraft(event.target.value)}
+                        className="w-full rounded border bg-background px-2 py-1 text-sm" />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={saveLinkedIn} disabled={savingLinkedIn}>Save</Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setEditingLinkedIn(false); setLinkedinError(null); }}
+                          disabled={savingLinkedIn}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2">
+                      <InfoRow label="LinkedIn" value={contact.linkedinUrl}
+                        isLink={!contact.linkedinUrl?.startsWith("self:")} />
+                      {!contact.linkedinUrl?.startsWith("self:") && (
+                        <Button size="sm" variant="ghost" aria-label="Edit contact identity"
+                          onClick={() => { setNameDraft(contact.fullName ?? ""); setLinkedinDraft(contact.linkedinUrl ?? ""); setLinkedinError(null); setEditingLinkedIn(true); }}>
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {linkedinError && <p role="alert" className="text-sm text-destructive">{linkedinError}</p>}
+                </div>
                 <InfoRow
                   label="Degree"
                   value={`${contact.degree}${ordinalSuffix(contact.degree)}`}
