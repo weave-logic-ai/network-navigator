@@ -38,7 +38,7 @@ async function resolveTenantId(tenantIdOverride?: string): Promise<string> {
  */
 export async function enrichContactWithChain(
   contact: EnrichmentContact,
-  options: { targetFields?: string[]; budgetLimitCents?: number } = {},
+  options: { targetFields?: string[]; budgetLimitCents?: number; quoteId?: string } = {},
   tenantId?: string
 ): Promise<{ results: EnrichmentResult[]; _chainId?: string }> {
   const results = await originalEnrichContact(contact, options);

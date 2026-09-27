@@ -127,10 +127,9 @@ integration('Contacts list on disposable Postgres', () => {
       const response = await applyEnrichment({
         json: async () => ({ contactId, fields: [{ field: 'email', value: 'bea@example.test' }] }),
       } as NextRequest);
-      expect(response.status).toBe(200);
-      expect((await response.json()).data.fieldsApplied).toBe(1);
-      expect((await query<{ email: string }>('SELECT email FROM contacts WHERE id = $1', [contactId])).rows[0].email)
-        .toBe('bea@example.test');
+      expect(response.status).toBe(400);
+      expect((await query<{ email: string | null }>('SELECT email FROM contacts WHERE id = $1', [contactId])).rows[0].email)
+        .toBeNull();
       expect((await listContacts({ enrichmentStatus: 'has_data' })).data.map((c) => c.id)).toContain(contactId);
       expect((await listContacts({ enrichmentStatus: 'no_data' })).data.map((c) => c.id)).not.toContain(contactId);
     } finally {

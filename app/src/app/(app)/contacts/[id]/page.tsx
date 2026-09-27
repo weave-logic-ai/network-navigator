@@ -270,13 +270,12 @@ export default function ContactDetailPage() {
     label: string;
     oldValue: string | null;
     newValue: string;
-    editValue: string; // user-editable version of newValue
     confidence: number;
     provider: string;
     selected: boolean;
-    editing: boolean;
   }
   const [enrichReview, setEnrichReview] = useState<{
+    quote: string;
     fields: ReviewField[];
     totalCostCents: number;
     gatedFields: string[]; // fields PDL has but are behind Person tier paywall
@@ -319,7 +318,16 @@ export default function ContactDetailPage() {
       fields: string[];
     }>;
     totalCostCents: number;
+    budgetRemaining: number;
+    withinBudget: boolean;
+    quote: string;
   } | null>(null);
+  const [enrichRecoveryNeeded, setEnrichRecoveryNeeded] = useState(false);
+  const [recoveryQuote, setRecoveryQuote] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRecoveryQuote(sessionStorage.getItem(`contact-enrichment-pending-${contactId}`));
+  }, [contactId]);
 
   const loadGauges = useCallback(async () => {
     setGaugesLoading(true);
@@ -387,8 +395,23 @@ export default function ContactDetailPage() {
     loadGauges();
   }, [loadGauges]);
 
-  function handleEnrich(_field?: string) {
+  async function handleEnrich(_field?: string) {
+    if (recoveryQuote) {
+      setEnrichResult('Recover the saved paid result before requesting a new quote.');
+      return;
+    }
     if (!contact) return;
+    try {
+      const response = await fetch('/api/enrichment/estimate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactIds: [contactId] }),
+      });
+      if (!response.ok) throw new Error('Could not estimate enrichment cost');
+      const { data: estimate } = await response.json() as { data: {
+        totalCostCents: number; budgetRemaining: number; withinBudget: boolean;
+        quote: string;
+        perProvider: Array<{ providerId: string; providerName: string; costCents: number }>;
+      } };
 
     // Show ALL enrichable fields with their current values and which provider can fill them
     const fieldBreakdown = ENRICHABLE_FIELDS.map((f) => {
@@ -439,18 +462,28 @@ export default function ContactDetailPage() {
       }
     }
 
-    const totalCost = providerBreakdown.reduce((sum, p) => sum + p.costCents, 0);
-
     setEnrichConfirm({
       fields: fieldBreakdown,
-      providerBreakdown,
-      totalCostCents: totalCost,
+      providerBreakdown: estimate.perProvider.map(p => ({
+        name: p.providerId, displayName: p.providerName, costCents: p.costCents,
+        fields: providerBreakdown.find(local => local.displayName === p.providerName)?.fields || [],
+      })),
+      totalCostCents: estimate.totalCostCents,
+      budgetRemaining: estimate.budgetRemaining,
+      withinBudget: estimate.withinBudget,
+      quote: estimate.quote,
     });
+    } catch (error) {
+      setEnrichResult(error instanceof Error ? error.message : 'Could not estimate enrichment cost');
+    }
   }
 
-  async function doEnrich() {
-    if (!enrichConfirm) return;
-    setEnrichConfirm(null);
+  async function doEnrich(quoteOverride?: string) {
+    const quote = quoteOverride || enrichConfirm?.quote;
+    if (!quote) return;
+    sessionStorage.setItem(`contact-enrichment-pending-${contactId}`, quote);
+    setRecoveryQuote(quote);
+    setEnrichRecoveryNeeded(true);
     setEnriching("all");
     setEnrichResult(null);
     try {
@@ -463,17 +496,40 @@ export default function ContactDetailPage() {
         body: JSON.stringify({
           contactId,
           dryRun: true,
+          quote,
         }),
       });
       if (res.ok) {
         const json = await res.json();
+        if (json.running) {
+          setEnrichRecoveryNeeded(true);
+          setEnrichResult(json.message || 'Paid request is still running. Recover this same quote later.');
+          return;
+        }
+        if (json.noCharge) {
+          sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+          setRecoveryQuote(null);
+          setEnrichRecoveryNeeded(false);
+          setEnrichConfirm(null);
+          setEnrichResult('No provider call was made. You can request a fresh estimate.');
+          return;
+        }
+        setEnrichRecoveryNeeded(false);
+        setEnrichConfirm(null);
         const result = json.data?.[0];
+        if (json.partial) {
+          setEnrichResult(`Enrichment stopped: ${json.stopReason}. Spent $${((json.totalCostCents || 0) / 100).toFixed(2)}; reserved exposure $${((json.reservedBudgetCents || 0) / 100).toFixed(2)}. Review returned fields before requesting another quote.`);
+        }
         const delta: Array<{
           field: string; label: string; oldValue: string | null;
           newValue: string | null; confidence: number; provider: string; selected: boolean;
         }> = result?.delta || [];
         const totalCost = result?.totalCostCents ?? 0;
         const gatedFields: string[] = result?.gatedFields || [];
+        if (!json.partial && delta.length === 0 && gatedFields.length === 0) {
+          sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+          setRecoveryQuote(null);
+        }
 
         // Map raw PDL field names to our enrichment field names for display
         const gatedEnrichFields = new Set<string>();
@@ -487,22 +543,23 @@ export default function ContactDetailPage() {
           if (mapped) gatedEnrichFields.add(mapped);
         }
 
-        if (delta.length === 0 && gatedEnrichFields.size === 0) {
+        if (json.partial && delta.length === 0) {
+          // The partial outcome above is the actionable result.
+        } else if (delta.length === 0 && gatedEnrichFields.size === 0) {
           setEnrichResult("No new data found from enrichment providers");
         } else if (delta.length === 0 && gatedEnrichFields.size > 0) {
           setEnrichResult(
             `PDL has data for ${[...gatedEnrichFields].join(", ")} but it requires the Person tier (upgrade from Starter). No fields to apply.`
           );
         } else {
-          // Open review modal with editable fields
+          // Open review modal for the exact saved provider values.
           setEnrichReview({
+            quote,
             fields: delta
               .filter((d) => d.newValue !== null)
               .map((d) => ({
                 ...d,
                 newValue: d.newValue!,
-                editValue: d.newValue!,
-                editing: false,
               })),
             totalCostCents: totalCost,
             gatedFields: [...gatedEnrichFields],
@@ -536,15 +593,18 @@ export default function ContactDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contactId,
+          quote: enrichReview.quote,
           fields: selected.map((f) => ({
             field: f.field,
-            value: f.editValue,
+            value: f.newValue,
           })),
         }),
       });
       if (res.ok) {
         const json = await res.json();
         const applied = json.data?.fieldsApplied ?? 0;
+        sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+        setRecoveryQuote(null);
         setEnrichResult(`Applied ${applied} field${applied !== 1 ? "s" : ""}`);
         await loadContact();
       } else {
@@ -566,30 +626,6 @@ export default function ContactDetailPage() {
         ...prev,
         fields: prev.fields.map((f) =>
           f.field === field ? { ...f, selected: !f.selected } : f
-        ),
-      };
-    });
-  }
-
-  function setReviewEditing(field: string, editing: boolean) {
-    setEnrichReview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        fields: prev.fields.map((f) =>
-          f.field === field ? { ...f, editing } : f
-        ),
-      };
-    });
-  }
-
-  function setReviewEditValue(field: string, value: string) {
-    setEnrichReview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        fields: prev.fields.map((f) =>
-          f.field === field ? { ...f, editValue: value } : f
         ),
       };
     });
@@ -718,7 +754,7 @@ export default function ContactDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => handleEnrich()}
+              onClick={() => recoveryQuote ? doEnrich(recoveryQuote) : handleEnrich()}
               disabled={enriching !== null}
             >
               {enriching === "all" ? (
@@ -726,7 +762,7 @@ export default function ContactDetailPage() {
               ) : (
                 <Sparkles className="h-3.5 w-3.5 mr-1.5" />
               )}
-              Enrich
+              {recoveryQuote ? 'Recover paid result' : 'Enrich'}
             </Button>
           </div>
         }
@@ -768,7 +804,7 @@ export default function ContactDetailPage() {
       {enrichResult && (
         <div
           className={`rounded-md px-3 py-2 text-sm mb-4 ${
-            enrichResult.includes("failed")
+            enrichResult.includes("failed") || enrichResult.includes("stopped")
               ? "bg-destructive/10 text-destructive"
               : "bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-200"
           }`}
@@ -785,7 +821,7 @@ export default function ContactDetailPage() {
                 <DollarSign className="h-4 w-4 text-orange-500" />
                 Confirm Enrichment
               </h3>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setEnrichConfirm(null)}>
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setEnrichConfirm(null)} disabled={enrichRecoveryNeeded}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -844,21 +880,23 @@ export default function ContactDetailPage() {
             </div>
 
             <p className="text-xs text-muted-foreground mb-4">
-              The waterfall calls providers in order until all fields are filled.
-              You&apos;ll review results before anything is saved.
+              Worst-case expected spend: ${(enrichConfirm.totalCostCents / 100).toFixed(2)}.
+              Remaining budget: ${(enrichConfirm.budgetRemaining / 100).toFixed(2)}.
+              Preview may cost money. You&apos;ll review results before anything is saved.
             </p>
+            {enrichRecoveryNeeded && <p role="alert" className="text-xs mb-3">{enrichResult || 'Paid request may still be running. Recover this same quote before another paid preview.'}</p>}
 
             <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEnrichConfirm(null)}>
+              <Button variant="outline" size="sm" onClick={() => setEnrichConfirm(null)} disabled={enrichRecoveryNeeded}>
                 Cancel
               </Button>
               <Button
                 size="sm"
                 onClick={() => doEnrich()}
-                disabled={enrichConfirm.fields.every((f) => !!f.currentValue)}
+                disabled={!!enriching || enrichConfirm.fields.every((f) => !!f.currentValue) || !enrichConfirm.withinBudget}
               >
                 <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                Enrich (${(enrichConfirm.totalCostCents / 100).toFixed(2)})
+                {enrichRecoveryNeeded ? 'Recover paid result' : `Enrich ($${(enrichConfirm.totalCostCents / 100).toFixed(2)})`}
               </Button>
             </div>
           </div>
@@ -883,6 +921,9 @@ export default function ContactDetailPage() {
               Select which fields to apply. You can edit values before saving.
               Cost: ${(enrichReview.totalCostCents / 100).toFixed(2)}
             </p>
+            {enrichResult?.includes("Enrichment stopped") && (
+              <p role="alert" className="mb-3 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{enrichResult}</p>
+            )}
 
             <div className="rounded-md border divide-y text-sm overflow-y-auto flex-1 mb-4">
               {enrichReview.fields.map((f) => (
@@ -907,43 +948,13 @@ export default function ContactDetailPage() {
                     </span>
                   </div>
 
-                  {/* Row 2: old value → new value (editable) */}
+                  {/* Row 2: old value → saved provider value */}
                   <div className="flex items-center gap-2 pl-6 text-xs">
                     <span className={`truncate max-w-[120px] ${f.oldValue ? "text-muted-foreground" : "text-orange-500 italic"}`}>
                       {f.oldValue || "empty"}
                     </span>
                     <ArrowRight className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-                    {f.editing ? (
-                      <input
-                        type="text"
-                        className="flex-1 border rounded px-1.5 py-0.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-primary"
-                        value={f.editValue}
-                        onChange={(e) => setReviewEditValue(f.field, e.target.value)}
-                        onBlur={() => setReviewEditing(f.field, false)}
-                        onKeyDown={(e) => { if (e.key === "Enter") setReviewEditing(f.field, false); }}
-                        autoFocus
-                      />
-                    ) : (
-                      <span
-                        className={`flex-1 truncate ${
-                          f.oldValue && f.oldValue !== f.editValue
-                            ? "text-blue-600 font-medium"
-                            : "text-green-600 font-medium"
-                        }`}
-                      >
-                        {f.editValue}
-                      </span>
-                    )}
-                    {!f.editing && (
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground p-0.5"
-                        onClick={() => setReviewEditing(f.field, true)}
-                        title="Edit value"
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                    )}
+                    <span className="flex-1 truncate text-green-600 font-medium">{f.newValue}</span>
                   </div>
 
                   {/* Overwrite warning */}
