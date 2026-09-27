@@ -16,8 +16,7 @@ import {
   summarizePiiDetection,
 } from '../shared/pii-scrubber';
 import {
-  enqueueSnippet,
-  getSnippetQueueDepth,
+  getSnippetQueue,
   SNIPPET_QUEUE_KEY,
 } from '../shared/snippet-queue';
 import { addApprovedOrigins, revokeOrigin } from '../shared/approved-origins';
@@ -744,11 +743,13 @@ captureBtn.addEventListener('click', () => {
 
   chrome.runtime.sendMessage(
     { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage,
-    (_response) => {
-      captureBtn.textContent = 'Captured!';
+    (response: { status?: string; message?: string } | undefined) => {
+      const status = response?.status;
+      captureBtn.textContent = status === 'submitted' ? 'Submitted' : status === 'queued' ? 'Queued locally' : status === 'limit' ? 'Limit reached' : 'Capture failed';
+      captureBtn.setAttribute('title', response?.message || chrome.runtime.lastError?.message || '');
       setTimeout(() => {
-        captureBtn.removeAttribute('disabled');
-        captureBtn.textContent = 'Capture This Page';
+        if (status !== 'limit') captureBtn.removeAttribute('disabled');
+        if (status === 'submitted' || status === 'queued') captureBtn.textContent = 'Capture This Page';
         updateStatus();
       }, 1500);
     }
@@ -1001,6 +1002,16 @@ const snippetLinkPrepBtn = document.getElementById('sp-snippet-link-prep-btn');
 // WS-3 Phase 6 §9/§10 additions
 const snippetPiiBanner = document.getElementById('sp-snippet-pii-banner');
 const snippetQueueDepthEl = document.getElementById('sp-snippet-queue-depth');
+
+function changeSnippetQueue(action: 'QUEUE_SNIPPET' | 'RETRY_SNIPPET' | 'DISCARD_SNIPPET', payload: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: action, payload }, (response: { status?: string; message?: string } | undefined) => {
+      const error = chrome.runtime.lastError?.message || response?.message;
+      if (response?.status !== 'ok') reject(new Error(error || 'Snippet queue unavailable'));
+      else resolve();
+    });
+  });
+}
 
 let availableTags: SidebarTagRow[] = [];
 let currentSnippet: SidebarSnippetPayload | null = null;
@@ -1523,24 +1534,64 @@ function showPiiBannerForText(text: string): void {
 }
 
 /**
- * WS-3 Phase 6 §10 — render the offline-snippet-queue badge. Shown only when
- * there's at least one queued item; clicking does nothing (replay is driven
- * by the service worker).
+ * Render local snippet work and recovery controls beside the queue badge.
  */
 async function refreshSnippetQueueDepth(): Promise<void> {
   if (!snippetQueueDepthEl) return;
   try {
-    const depth = await getSnippetQueueDepth();
+    const queue = await getSnippetQueue();
+    const depth = queue.length;
+    let list = document.getElementById('sp-snippet-queue-list');
+    if (!list) {
+      list = document.createElement('div');
+      list.id = 'sp-snippet-queue-list';
+      snippetQueueDepthEl.parentElement?.insertAdjacentElement('afterend', list);
+    }
+    list.replaceChildren();
+    for (const item of queue) {
+      const row = document.createElement('div');
+      const label = document.createElement('span');
+      const kind = typeof item.body === 'object' && item.body !== null && 'kind' in item.body ? String(item.body.kind) : 'snippet';
+      label.textContent = `${kind}: ${item.state === 'failed' || item.retryCount >= 5 ? 'Failed' : 'Queued'}${item.lastError ? ` — ${item.lastError}` : ''}`;
+      row.append(label);
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => { void changeSnippetQueue('RETRY_SNIPPET', { id: item.id }).then(refreshSnippetQueueDepth).catch(showSnippetQueueError); });
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.textContent = 'Discard';
+      discard.addEventListener('click', () => { void changeSnippetQueue('DISCARD_SNIPPET', { id: item.id }).then(refreshSnippetQueueDepth).catch(showSnippetQueueError); });
+      row.append(retry, discard);
+      if (item.state === 'failed' || item.retryCount >= 5) {
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.textContent = 'Restore draft';
+        restore.addEventListener('click', () => {
+          try { restoreQueuedSnippet(item.body); } catch (error) { showSnippetQueueError(error as Error); }
+        });
+        row.append(restore);
+      }
+      list.append(row);
+    }
     if (depth <= 0) {
       snippetQueueDepthEl.style.display = 'none';
       snippetQueueDepthEl.textContent = '';
       return;
     }
     snippetQueueDepthEl.style.display = '';
-    snippetQueueDepthEl.textContent = `${depth} queued`;
-    snippetQueueDepthEl.title = `${depth} snippet${depth === 1 ? '' : 's'} waiting for the server to come back.`;
+    const failed = queue.filter((item) => item.state === 'failed' || item.retryCount >= 5).length;
+    snippetQueueDepthEl.textContent = failed ? `${depth} local (${failed} failed)` : `${depth} queued`;
+    snippetQueueDepthEl.title = `${depth} local snippet${depth === 1 ? '' : 's'}; review errors below.`;
   } catch {
     snippetQueueDepthEl.style.display = 'none';
+  }
+}
+
+function showSnippetQueueError(error: Error): void {
+  if (snippetErrorEl) {
+    snippetErrorEl.style.display = '';
+    snippetErrorEl.textContent = error.message;
   }
 }
 
@@ -1573,6 +1624,58 @@ function activateSnippetTab(kind: 'text' | 'image' | 'link'): void {
   // Always hide any in-flight card when user flips tabs — avoids saving a
   // text payload while showing the image UI or vice versa.
   resetSnippetCard();
+}
+
+function restoreQueuedSnippet(raw: unknown): void {
+  if (!snippetEnabled || !snipModeActive) throw new Error('Enable Snip mode to restore this draft.');
+  if (!raw || typeof raw !== 'object') throw new Error('Stored snippet is invalid.');
+  const body = raw as Record<string, unknown>;
+  const [, lockedKind, lockedId] = lastRenderedLock.split(':');
+  if ((lockedKind === 'person' ? 'contact' : lockedKind) !== body.targetKind || lockedId !== body.targetId) {
+    throw new Error('Open the original research target before restoring this draft.');
+  }
+  const kind = body.kind;
+  if (kind !== 'text' && kind !== 'image' && kind !== 'link') throw new Error('Stored snippet type is invalid.');
+  activateSnippetTab(kind);
+  const tags = new Set<string>(Array.isArray(body.tagSlugs) ? body.tagSlugs.filter((value): value is string => typeof value === 'string') : []);
+  const note = typeof body.note === 'string' ? body.note : '';
+  const sourceUrl = typeof body.sourceUrl === 'string' ? body.sourceUrl : 'about:blank';
+  const pageType = typeof body.pageType === 'string' ? body.pageType : null;
+  if (kind === 'text' && typeof body.text === 'string') {
+    const candidates = extractPersonBigrams(body.text);
+    currentSnippet = {
+      kind, selection: { text: body.text, sourceUrl, pageTitle: '', pageType },
+      selectedTags: tags, selectedMentions: new Set<string>(Array.isArray(body.mentionContactIds) ? body.mentionContactIds.filter((value): value is string => typeof value === 'string') : []),
+      mentionCandidates: candidates, note,
+    };
+    if (snippetPreview) { snippetPreview.style.display = ''; snippetPreview.textContent = body.text.slice(0, 400); }
+    if (snippetMentionsField) snippetMentionsField.style.display = '';
+    if (snippetMentionsContainer) renderMentionChips(snippetMentionsContainer, candidates, currentSnippet.selectedMentions);
+    showPiiBannerForText(body.text);
+  } else if (kind === 'image' && typeof body.imageBytes === 'string' && typeof body.mimeType === 'string') {
+    currentSnippet = {
+      kind, imageBytes: body.imageBytes, mimeType: body.mimeType,
+      width: typeof body.width === 'number' ? body.width : null,
+      height: typeof body.height === 'number' ? body.height : null,
+      approximateBytes: Math.ceil(body.imageBytes.length * 3 / 4),
+      sourceUrl, pageUrl: sourceUrl, pageTitle: '', pageType, selectedTags: tags, note,
+    };
+    if (snippetPreview) snippetPreview.style.display = 'none';
+    if (snippetImagePreviewWrap) snippetImagePreviewWrap.style.display = '';
+    if (snippetImagePreview) snippetImagePreview.src = `data:${body.mimeType};base64,${body.imageBytes}`;
+    if (snippetMentionsField) snippetMentionsField.style.display = 'none';
+  } else if (kind === 'link' && typeof body.href === 'string') {
+    const linkText = typeof body.linkText === 'string' ? body.linkText : null;
+    currentSnippet = { kind, href: body.href, linkText, sourceUrl, pageTitle: '', pageType, selectedTags: tags, note };
+    if (snippetPreview) { snippetPreview.style.display = ''; snippetPreview.textContent = linkText ? `${linkText} — ${body.href}` : body.href; }
+    if (snippetMentionsField) snippetMentionsField.style.display = 'none';
+  } else {
+    throw new Error('Stored snippet payload is incomplete.');
+  }
+  if (snippetNoteEl) snippetNoteEl.value = note;
+  if (snippetTagsContainer) renderTagChips(snippetTagsContainer, tags);
+  if (snippetCard) snippetCard.style.display = '';
+  if (snippetStatus) snippetStatus.textContent = 'Draft restored. Correct and save it, then discard the failed copy.';
 }
 
 if (snippetTabText) snippetTabText.addEventListener('click', () => activateSnippetTab('text'));
@@ -2001,29 +2104,27 @@ if (snippetSaveBtn) {
         });
       } catch (networkErr) {
         // WS-3 Phase 6 §10 — server unreachable → queue for later replay.
-        await enqueueSnippet(body, (networkErr as Error).message ?? 'network');
+        await changeSnippetQueue('QUEUE_SNIPPET', { body, error: (networkErr as Error).message ?? 'network' });
         await refreshSnippetQueueDepth();
-        if (snippetStatus)
-          snippetStatus.textContent = 'Offline — saved locally. Will retry.';
-        if (snippetImageStatus)
-          snippetImageStatus.textContent = 'Offline — saved locally. Will retry.';
         resetSnippetCard();
+        if (snippetStatus) snippetStatus.textContent = 'Queued locally — will retry.';
         return;
       }
       if (!res.ok) {
-        // 5xx → queue for retry (server failure). 4xx → surface validation.
-        if (res.status >= 500 && res.status < 600) {
-          await enqueueSnippet(body, `HTTP ${res.status}`);
+        // Keep transient failures locally; preserve validation errors in the editor.
+        if (res.status === 429 || res.status >= 500) {
+          await changeSnippetQueue('QUEUE_SNIPPET', { body, error: `HTTP ${res.status}` });
           await refreshSnippetQueueDepth();
-          if (snippetStatus)
-            snippetStatus.textContent = `Server unavailable (HTTP ${res.status}) — saved locally.`;
-          if (snippetImageStatus)
-            snippetImageStatus.textContent = `Server unavailable (HTTP ${res.status}) — saved locally.`;
           resetSnippetCard();
+          if (snippetStatus) snippetStatus.textContent = `Queued locally (HTTP ${res.status}) — will retry.`;
           return;
         }
         const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
-        throw new Error((err as { message?: string }).message ?? `HTTP ${res.status}`);
+        const message = (err as { message?: string }).message ?? `HTTP ${res.status}`;
+        await changeSnippetQueue('QUEUE_SNIPPET', { body, error: `HTTP ${res.status}: ${message}`, state: 'failed' });
+        await refreshSnippetQueueDepth();
+        if (snippetStatus) snippetStatus.textContent = `Validation failed (HTTP ${res.status}) — correct this draft and save; a failed copy is retained locally.`;
+        return;
       }
       const okMsg =
         currentSnippet.kind === 'image'
@@ -2031,10 +2132,8 @@ if (snippetSaveBtn) {
           : currentSnippet.kind === 'link'
           ? 'Link snippet saved.'
           : 'Snippet saved.';
-      if (snippetStatus) snippetStatus.textContent = okMsg;
-      if (snippetImageStatus) snippetImageStatus.textContent = okMsg;
-      if (snippetLinkStatus) snippetLinkStatus.textContent = okMsg;
       resetSnippetCard();
+      if (snippetStatus) snippetStatus.textContent = okMsg;
     } catch (err) {
       if (snippetErrorEl) {
         snippetErrorEl.style.display = '';

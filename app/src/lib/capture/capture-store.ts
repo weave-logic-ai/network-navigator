@@ -3,6 +3,7 @@
 import zlib from 'zlib';
 import crypto from 'crypto';
 import { query } from '@/lib/db/client';
+import type { PoolClient } from 'pg';
 
 /**
  * Compress HTML using gzip.
@@ -39,13 +40,17 @@ export async function storePageCache(params: {
   viewportHeight: number;
   documentHeight: number;
   triggerMode: string;
+  client?: PoolClient;
 }): Promise<{ id: string; storedBytes: number; compressionRatio: number }> {
   const contentHash = computeContentHash(params.html);
   const originalSize = Buffer.byteLength(params.html, 'utf-8');
 
   // Store the HTML content directly (the page_cache table uses TEXT, not BYTEA)
   // The rotation trigger will automatically keep only the 5 most recent per URL
-  const result = await query<{ id: string }>(
+  const runQuery: typeof query = params.client
+    ? (text, values) => params.client!.query(text, values)
+    : query;
+  const result = await runQuery<{ id: string }>(
     `INSERT INTO page_cache (
       url, page_type, html_content, compressed, content_hash, version,
       captured_by, parsed, capture_id, extension_version, session_id,

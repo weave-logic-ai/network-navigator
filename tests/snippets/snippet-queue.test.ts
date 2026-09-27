@@ -1,6 +1,6 @@
 // WS-3 Phase 6 §10 — offline snippet queue tests.
 //
-// Exercises enqueue → flush ordering, retry cap, and 4xx-non-retryable.
+// Exercises enqueue → flush ordering and preservation of failed work.
 // Uses a local in-memory stand-in for chrome.storage.local.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -76,7 +76,7 @@ describe('snippet-queue', () => {
     expect(bodies).toEqual([{ idx: 1 }, { idx: 2 }, { idx: 3 }]);
   });
 
-  it('drops items that hit a 4xx (non-retryable)', async () => {
+  it('retains items that hit a 4xx for explicit retry or discard', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
     await mod.enqueueSnippet({ idx: 1 });
 
@@ -91,7 +91,10 @@ describe('snippet-queue', () => {
       fetchImpl,
     });
     expect(r.processed).toBe(0);
-    expect(r.remaining).toBe(0);
+    expect(r.remaining).toBe(1);
+    expect((await mod.getSnippetQueue())[0]).toMatchObject({
+      state: 'failed', lastError: 'HTTP 422',
+    });
   });
 
   it('stops after a 5xx + bumps retry count', async () => {
@@ -119,7 +122,7 @@ describe('snippet-queue', () => {
     expect(list[1].retryCount).toBe(0);
   });
 
-  it('discards items once retryCount exceeds the cap', async () => {
+  it('retains exhausted items without automatic replay', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
     // Manually seed a queue item at max retries by dropping it in storage.
     await (globalThis as any).chrome.storage.local.set({
@@ -140,7 +143,8 @@ describe('snippet-queue', () => {
       fetchImpl,
     });
     expect(r.processed).toBe(0);
-    expect(r.remaining).toBe(0);
+    expect(r.remaining).toBe(1);
+    expect((await mod.getSnippetQueue())[0].id).toBe('old');
     expect((fetchImpl as unknown as jest.Mock).mock.calls.length).toBe(0);
   });
 

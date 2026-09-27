@@ -23,6 +23,7 @@
 //     for local development (docker-compose, tests, etc.).
 
 import dns from 'dns';
+import net from 'net';
 
 export type PrivateIpReason =
   | 'private_ip'
@@ -41,9 +42,6 @@ export interface PrivateIpCheckResult {
 }
 
 const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-// Rough-bracket IPv6 literal check — precise validation is not needed;
-// any host we cannot parse as IPv4/IPv6 goes through DNS lookup.
-const IPV6_LITERAL_RE = /^[0-9a-f:]+$/i;
 
 function localhostAllowed(): boolean {
   return process.env.SOURCES_ALLOW_LOCALHOST === 'true';
@@ -87,38 +85,56 @@ export function classifyIPv4(ip: string): PrivateIpReason | null {
 
 /**
  * Classify an IPv6 literal. Returns null if the IP is OK to fetch.
- * We accept a light pre-parse — Node's dns.lookup always hands us canonical
- * output so we do not need a full RFC 4291 parser.
+ * Parse hextets structurally because DNS results and literal URLs may use
+ * either dotted or hexadecimal IPv4 tails.
  */
 export function classifyIPv6(ip: string): PrivateIpReason | null {
-  const lower = ip.toLowerCase();
-  // IPv4-mapped: ::ffff:a.b.c.d
-  const v4mapped = /^(?:0{0,4}:){5}ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(lower)
-    ?? /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(lower);
-  if (v4mapped) {
-    return classifyIPv4(v4mapped[1]);
+  const words = expandIPv6(ip);
+  if (!words) return 'invalid_host';
+  if (words.every((word) => word === 0)) return 'unspecified';
+  if (words.slice(0, 7).every((word) => word === 0) && words[7] === 1) {
+    return localhostAllowed() ? null : 'loopback';
   }
-  // Unspecified ::
-  if (lower === '::' || /^0{1,4}(:0{1,4}){0,6}(:0{1,4})?$/.test(lower)) {
-    return 'unspecified';
+  // IPv4-mapped addresses may be written with dotted or hexadecimal tails.
+  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
+    return classifyIPv4(`${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`);
   }
-  // Loopback ::1
-  if (lower === '::1') return localhostAllowed() ? null : 'loopback';
-  // Multicast ff00::/8
-  if (lower.startsWith('ff')) return 'multicast';
-  // Link-local fe80::/10
-  if (/^fe[89ab]/.test(lower)) return 'link_local';
-  // Unique local fc00::/7
-  if (/^f[cd]/.test(lower)) return 'private_ip';
+  // Deprecated IPv4-compatible syntax is still accepted by some clients.
+  if (words.slice(0, 6).every((word) => word === 0)) {
+    return classifyIPv4(`${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`);
+  }
+  if ((words[0] & 0xff00) === 0xff00) return 'multicast';
+  if ((words[0] & 0xffc0) === 0xfe80) return 'link_local';
+  if ((words[0] & 0xfe00) === 0xfc00) return 'private_ip';
   return null;
+}
+
+function expandIPv6(input: string): number[] | null {
+  if (net.isIP(input) !== 6 || input.includes('%')) return null;
+  let ip = input.toLowerCase();
+  const dottedTail = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip);
+  if (dottedTail) {
+    const octets = octetsOf(dottedTail[1]);
+    if (!octets) return null;
+    ip = ip.slice(0, -dottedTail[1].length)
+      + ((octets[0] << 8) | octets[1]).toString(16)
+      + ':' + ((octets[2] << 8) | octets[3]).toString(16);
+  }
+  const halves = ip.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves[1] ? halves[1].split(':') : [];
+  const omitted = 8 - left.length - right.length;
+  if (omitted < 0 || (halves.length === 1 && omitted !== 0)) return null;
+  return [...left, ...Array(omitted).fill('0'), ...right].map((part) => parseInt(part, 16));
 }
 
 /**
  * Classify any IP literal (IPv4 or IPv6).
  */
 export function classifyIp(ip: string): PrivateIpReason | null {
-  if (IPV4_RE.test(ip)) return classifyIPv4(ip);
-  if (IPV6_LITERAL_RE.test(ip) || ip.includes(':')) return classifyIPv6(ip);
+  if (net.isIP(ip) === 4) return classifyIPv4(ip);
+  if (net.isIP(ip) === 6) return classifyIPv6(ip);
   return 'invalid_host';
 }
 
@@ -142,12 +158,12 @@ export async function checkHostSafe(
 
   // Short-circuit "localhost" hostname.
   if (normalized === 'localhost' || normalized === 'localhost.localdomain') {
-    if (localhostAllowed()) return { blocked: false, host: normalized };
+    if (localhostAllowed()) return { blocked: false, host: normalized, resolvedIp: '127.0.0.1' };
     return { blocked: true, reason: 'loopback', host: normalized };
   }
 
   // Literal IPv4.
-  if (IPV4_RE.test(normalized)) {
+  if (net.isIP(normalized) === 4) {
     const reason = classifyIPv4(normalized);
     return reason
       ? { blocked: true, reason, host: normalized, resolvedIp: normalized }
@@ -155,11 +171,14 @@ export async function checkHostSafe(
   }
 
   // Literal IPv6 (URLs carry this in brackets which we stripped above).
-  if (normalized.includes(':')) {
+  if (net.isIP(normalized) === 6) {
     const reason = classifyIPv6(normalized);
     return reason
       ? { blocked: true, reason, host: normalized, resolvedIp: normalized }
       : { blocked: false, host: normalized, resolvedIp: normalized };
+  }
+  if (normalized.includes(':')) {
+    return { blocked: true, reason: 'invalid_host', host: normalized };
   }
 
   // DNS lookup.
@@ -177,7 +196,7 @@ export async function checkHostSafe(
     return { blocked: true, reason: 'invalid_host', host: normalized };
   }
   for (const rec of records) {
-    const reason = rec.family === 6 ? classifyIPv6(rec.address) : classifyIPv4(rec.address);
+    const reason = classifyIp(rec.address);
     if (reason) {
       return { blocked: true, reason, host: normalized, resolvedIp: rec.address };
     }

@@ -16,8 +16,9 @@
 // Clicking the secondary crumb's "X" clears the secondary. The `T` shortcut
 // hint opens the target picker (keyboard handled by TargetPickerModal).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { X, ArrowLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { formatBreadcrumbTime } from "@/lib/targets/breadcrumb-format";
 
 interface TargetStateDto {
@@ -51,6 +52,7 @@ export function TargetBreadcrumbs({
   initialSecondaryTargetId = null,
   interactive = true,
 }: TargetBreadcrumbsProps) {
+  const router = useRouter();
   const [primaryLabel] = useState(initialPrimaryLabel);
   const [secondaryLabel, setSecondaryLabel] = useState<string | null>(
     initialSecondaryLabel
@@ -60,9 +62,11 @@ export function TargetBreadcrumbs({
   );
   const [history, setHistory] = useState<HistoryEntryDto[]>([]);
   const [hovered, setHovered] = useState(false);
+  const changeRevision = useRef(0);
 
   useEffect(() => {
     const onTargetChanged = (event: Event) => {
+      changeRevision.current += 1;
       const detail = (event as CustomEvent<{
         secondaryTargetId: string | null;
         secondaryTargetLabel?: string | null;
@@ -70,20 +74,29 @@ export function TargetBreadcrumbs({
       setSecondaryId(detail?.secondaryTargetId ?? null);
       setSecondaryLabel(detail?.secondaryTargetLabel ?? null);
       setHistory([]);
+      // The dashboard comparison and target surface are server components.
+      // Every successful context writer emits this event after its PUT.
+      router.refresh();
     };
     window.addEventListener("research-target-changed", onTargetChanged);
     return () => window.removeEventListener("research-target-changed", onTargetChanged);
-  }, []);
+  }, [router]);
+
+  useEffect(() => {
+    setSecondaryId(initialSecondaryTargetId);
+    setSecondaryLabel(initialSecondaryLabel);
+  }, [initialSecondaryTargetId, initialSecondaryLabel]);
 
   // Keep the component in sync if another tab / page updated the state.
   useEffect(() => {
     let cancelled = false;
+    const revision = changeRevision.current;
     async function refresh() {
       try {
         const res = await fetch("/api/targets/state");
         if (!res.ok) return;
         const json = (await res.json()) as { data: TargetStateDto | null };
-        if (cancelled || !json.data) return;
+        if (cancelled || revision !== changeRevision.current || !json.data) return;
         if (!json.data.secondaryTargetId) {
           setSecondaryLabel(null);
           setSecondaryId(null);
@@ -96,7 +109,7 @@ export function TargetBreadcrumbs({
         );
         if (!targetRes.ok) return;
         const targetJson = (await targetRes.json()) as { data: TargetDto | null };
-        if (cancelled || !targetJson.data) return;
+        if (cancelled || revision !== changeRevision.current || !targetJson.data) return;
         setSecondaryLabel(targetJson.data.label);
         setSecondaryId(targetJson.data.id);
       } catch {
@@ -138,8 +151,8 @@ export function TargetBreadcrumbs({
         body: JSON.stringify({ secondaryTargetId: null }),
       });
       if (!response.ok) return;
-      setSecondaryLabel(null);
-      setSecondaryId(null);
+      const json = (await response.json()) as { data?: TargetStateDto | null };
+      if (!json.data || json.data.secondaryTargetId !== null) return;
       window.dispatchEvent(new CustomEvent("research-target-changed", {
         detail: { secondaryTargetId: null },
       }));
@@ -159,22 +172,27 @@ export function TargetBreadcrumbs({
         body: JSON.stringify({ secondaryTargetId: prior.targetId }),
       });
       if (!response.ok) return;
-      window.dispatchEvent(new CustomEvent("research-target-changed", {
-        detail: { secondaryTargetId: prior.targetId },
-      }));
-      // Best-effort resolve for optimistic UI update.
+      const json = (await response.json()) as { data?: TargetStateDto | null };
+      if (json.data?.secondaryTargetId !== prior.targetId) return;
+      // Resolve the label before publishing so the breadcrumb and dashboard
+      // switch to the same target in one event.
       try {
         const targetRes = await fetch(`/api/targets?id=${prior.targetId}`);
         if (targetRes.ok) {
           const targetJson = (await targetRes.json()) as { data: TargetDto | null };
           if (targetJson.data) {
-            setSecondaryLabel(targetJson.data.label);
-            setSecondaryId(targetJson.data.id);
+            window.dispatchEvent(new CustomEvent("research-target-changed", {
+              detail: { secondaryTargetId: targetJson.data.id, secondaryTargetLabel: targetJson.data.label },
+            }));
+            return;
           }
         }
       } catch {
         /* silent */
       }
+      window.dispatchEvent(new CustomEvent("research-target-changed", {
+        detail: { secondaryTargetId: prior.targetId },
+      }));
     } catch {
       /* silent */
     }
@@ -182,6 +200,10 @@ export function TargetBreadcrumbs({
 
   const current = history[0];
   const prior = history[1];
+  // An id-only event still represents a confirmed focus change. Keep the
+  // crumb visible while its label is resolved (or if lookup is unavailable).
+  const displaySecondaryLabel = secondaryLabel ??
+    (secondaryId ? `Target ${secondaryId.slice(0, 8)}` : null);
 
   return (
     <nav
@@ -189,7 +211,7 @@ export function TargetBreadcrumbs({
       className="flex items-center gap-2 border-b border-border/40 bg-muted/20 px-4 py-1.5 text-xs text-muted-foreground"
     >
       <span className="font-medium text-foreground">{primaryLabel}</span>
-      {secondaryLabel ? (
+      {displaySecondaryLabel ? (
         <>
           <span aria-hidden="true">&rsaquo;</span>
           <span
@@ -208,12 +230,12 @@ export function TargetBreadcrumbs({
                 <ArrowLeft className="size-3" />
               </button>
             ) : null}
-            {secondaryLabel}
+            {displaySecondaryLabel}
             <button
               type="button"
               onClick={handleClearSecondary}
               className="rounded p-0.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-              aria-label={`Clear secondary target ${secondaryLabel}`}
+              aria-label={`Clear secondary target ${displaySecondaryLabel}`}
             >
               <X className="size-3" />
             </button>
@@ -223,7 +245,7 @@ export function TargetBreadcrumbs({
                 className="absolute left-0 top-full z-20 mt-1 min-w-[12rem] rounded border border-border/60 bg-background p-2 text-[11px] shadow-md"
               >
                 <span className="block font-medium text-foreground">
-                  {secondaryLabel}
+                  {displaySecondaryLabel}
                 </span>
                 <span className="block text-muted-foreground">
                   Set {formatBreadcrumbTime(current.openedAt)}

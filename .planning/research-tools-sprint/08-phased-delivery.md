@@ -15,6 +15,10 @@ The five story outcomes still need proof: US-1 company-centered source timeline 
 - `app/src/app/(app)/network/page.tsx` sends persisted secondary state to Sigma. `sigma-graph.tsx` sends it as the historically named `primaryTargetId` query parameter; `sigma-data/route.ts` now re-roots contacts and companies. The dashboard renders a bounded contact-vs-self comparison and owner-wide cards once. Do not call US-1, US-2, or US-5 complete from these partial paths.
 - `RESEARCH_*` flags default false. ADR-035 accepts per-deployment flags and supersedes ADR-033's per-user gate. The old `RESEARCH_SOURCE_RSS` checkbox was mislabeled; compose uses `RESEARCH_SOURCES` and `RESEARCH_CONNECTOR_RSS`. A local code check cannot prove staging or production flags.
 
+## Feature and UX repair plan (2026-09-27)
+
+The [page/feature review and coordinator plan](../../docs/plans/feature-ux-review-2026-09-27.md) adds evidence-backed child tasks for lenses, comparisons, graph visualization, page workflows, extension reliability and adversarial security. Use its dependencies, ownership fences and acceptance checks when assigning work. R1–R11 below remain the story/release source of truth; this review does not mark them complete or waive their gates.
+
 ## Prioritized backlog
 
 Dependencies are backlog IDs below. **In progress / unverified** means code is being changed concurrently but its story acceptance has not been demonstrated. **Open** means a concrete delivery gap remains. **Decision** means the product contract must be settled before coding that item. An owner role owns acceptance evidence as well as implementation.

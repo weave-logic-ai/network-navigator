@@ -3,6 +3,7 @@
 import { NextResponse } from 'next/server';
 import { query, healthCheck } from '@/lib/db/client';
 import * as enrichmentQueries from '@/lib/db/queries/enrichment';
+import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 
 interface HealthCheck {
   status: 'healthy' | 'degraded';
@@ -11,20 +12,22 @@ interface HealthCheck {
     providers: Array<{ name: string; active: boolean }>;
     counts: Record<string, number>;
     diskUsage?: { dbSizeBytes: number; dbSizeHuman: string };
+    parser: { enabled: boolean; checked: boolean; lastRollupDay: string | null; error?: string };
   };
+  error?: string;
 }
 
 export async function GET() {
+  const health: HealthCheck = {
+    status: 'healthy',
+    checks: {
+      db: { connected: false },
+      providers: [],
+      counts: {},
+      parser: { enabled: RESEARCH_FLAGS.parserTelemetry, checked: false, lastRollupDay: null },
+    },
+  };
   try {
-    const health: HealthCheck = {
-      status: 'healthy',
-      checks: {
-        db: { connected: false },
-        providers: [],
-        counts: {},
-      },
-    };
-
     // DB connection check with latency measurement
     const dbStart = Date.now();
     const dbOk = await healthCheck();
@@ -47,6 +50,20 @@ export async function GET() {
       active: p.isActive,
     }));
 
+    if (RESEARCH_FLAGS.parserTelemetry) {
+      try {
+        const rollup = await query<{ last_rollup_day: string | null }>(
+          `SELECT MAX(day)::text AS last_rollup_day FROM parse_field_outcomes_daily`
+        );
+        health.checks.parser.lastRollupDay = rollup.rows[0]?.last_rollup_day ?? null;
+        health.checks.parser.checked = true;
+      } catch {
+        health.status = 'degraded';
+        health.checks.parser.checked = true;
+        health.checks.parser.error = 'Unable to read parser rollup status';
+      }
+    }
+
     // DB size estimate
     try {
       const sizeResult = await query<{ size_bytes: string; size_human: string }>(
@@ -63,13 +80,12 @@ export async function GET() {
       // Non-critical — some DB configs may restrict pg_database_size
     }
 
-    return NextResponse.json(health);
+    return NextResponse.json(health, { status: health.status === 'degraded' ? 503 : 200 });
   } catch (error) {
+    health.status = 'degraded';
+    health.error = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      {
-        status: 'degraded',
-        error: error instanceof Error ? error.message : 'Unknown error',
-      },
+      health,
       { status: 503 }
     );
   }

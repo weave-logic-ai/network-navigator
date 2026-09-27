@@ -2,6 +2,38 @@
 
 import { ContactScoringData, DimensionScorer, IcpCriteria } from '../types';
 
+export const ROLE_GROUP_ALIASES: Record<string, string[]> = {
+  'CEO/Founder': ['CEO', 'founder', 'chief executive officer'],
+  'CTO/Tech Leader': ['CTO', 'chief technology officer', 'chief tech', 'tech leader'],
+  VP: ['VP', 'vice president'],
+  Director: ['director'],
+  'Manager/Head': ['manager', 'head of'],
+  Engineer: ['engineer', 'developer'],
+  Sales: ['sales', 'account exec'],
+  Marketing: ['marketing', 'growth'],
+  Product: ['product'],
+  Consultant: ['consultant', 'advisor'],
+};
+
+/** Match a whole role token or phrase, ignoring punctuation and case. */
+function matchesPhrase(title: string | null | undefined, role: string): boolean {
+  const words = (value: string) => value.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const titleWords = words(title ?? '');
+  const roleWords = words(role);
+  if (roleWords.length === 0) return false;
+  return titleWords.some((_, index) =>
+    roleWords.every((word, offset) => titleWords[index + offset] === word)
+  );
+}
+
+export function matchesRole(title: string | null | undefined, role: string): boolean {
+  const aliases = ROLE_GROUP_ALIASES[role] ??
+    (role.toLowerCase() === 'cto' ? ['CTO', 'chief technology officer'] : undefined);
+  return aliases
+    ? aliases.some(alias => matchesPhrase(title, alias))
+    : matchesPhrase(title, role);
+}
+
 export class IcpFitScorer implements DimensionScorer {
   readonly dimension = 'icp_fit';
 
@@ -14,8 +46,8 @@ export class IcpFitScorer implements DimensionScorer {
     // Role match
     if (icpCriteria.roles && icpCriteria.roles.length > 0) {
       totalChecks++;
-      const titleLower = (contact.title || contact.headline || '').toLowerCase();
-      if (icpCriteria.roles.some(r => titleLower.includes(r.toLowerCase()))) {
+      const title = contact.title || contact.headline;
+      if (icpCriteria.roles.some(r => matchesRole(title, r))) {
         matchedChecks++;
       }
     }

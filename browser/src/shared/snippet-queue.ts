@@ -20,6 +20,8 @@ export interface QueuedSnippet {
   retryCount: number;
   /** Last error message (truncated). Used for surfacing to the user. */
   lastError?: string;
+  state?: 'queued' | 'failed';
+  nextRetryAt?: string;
 }
 
 export const SNIPPET_QUEUE_KEY = 'snippetQueue';
@@ -28,6 +30,13 @@ export const SNIPPET_QUEUE_MAX_RETRIES = 5;
 export const SNIPPET_QUEUE_FLUSH_ALARM = 'snippet-queue-flush';
 /** 30 seconds per the spec's "30-second timer" trigger. */
 export const SNIPPET_QUEUE_FLUSH_INTERVAL_MIN = 0.5;
+let queueMutation: Promise<unknown> = Promise.resolve();
+
+function mutateQueue<T>(operation: () => Promise<T>): Promise<T> {
+  const result = queueMutation.then(operation, operation);
+  queueMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 export async function getSnippetQueue(): Promise<QueuedSnippet[]> {
   return new Promise((resolve) => {
@@ -45,8 +54,10 @@ export async function getSnippetQueueDepth(): Promise<number> {
 
 export async function enqueueSnippet(
   body: unknown,
-  error?: string
+  error?: string,
+  state: 'queued' | 'failed' = 'queued'
 ): Promise<QueuedSnippet> {
+  return mutateQueue(async () => {
   const queue = await getSnippetQueue();
   const item: QueuedSnippet = {
     id: crypto.randomUUID(),
@@ -55,41 +66,47 @@ export async function enqueueSnippet(
     body,
     retryCount: 0,
     lastError: error ? error.slice(0, 400) : undefined,
+    state,
   };
-  // Cap at SNIPPET_QUEUE_MAX — drop the oldest if we're at limit. Matches the
-  // capture-queue behaviour in utils/storage.ts.
-  while (queue.length >= SNIPPET_QUEUE_MAX) queue.shift();
+  if (queue.length >= SNIPPET_QUEUE_MAX) {
+    throw new Error(`Local snippet queue is full (${SNIPPET_QUEUE_MAX}). Retry or discard an item before saving.`);
+  }
   queue.push(item);
   await chrome.storage.local.set({ [SNIPPET_QUEUE_KEY]: queue });
   return item;
+  });
 }
 
 export async function removeSnippetFromQueue(id: string): Promise<void> {
+  return mutateQueue(async () => {
   const queue = await getSnippetQueue();
   const next = queue.filter((q) => q.id !== id);
   await chrome.storage.local.set({ [SNIPPET_QUEUE_KEY]: next });
+  });
 }
 
 export async function updateSnippetQueueItem(
   id: string,
   patch: Partial<QueuedSnippet>
 ): Promise<void> {
+  return mutateQueue(async () => {
   const queue = await getSnippetQueue();
   const idx = queue.findIndex((q) => q.id === id);
   if (idx === -1) return;
   queue[idx] = { ...queue[idx], ...patch };
   await chrome.storage.local.set({ [SNIPPET_QUEUE_KEY]: queue });
+  });
 }
 
 export async function clearSnippetQueue(): Promise<void> {
-  await chrome.storage.local.set({ [SNIPPET_QUEUE_KEY]: [] });
+  await mutateQueue(() => chrome.storage.local.set({ [SNIPPET_QUEUE_KEY]: [] }));
 }
 
 /**
  * Replay queued snippets against the app. Returns the count of successfully
  * flushed items + the updated queue length. Errors are captured and stored
- * against each item so subsequent retries can reason about them; items that
- * exceed `SNIPPET_QUEUE_MAX_RETRIES` are dropped.
+ * against each item so subsequent retries can reason about them. Exhausted
+ * and validation failures remain visible until the user retries or discards.
  *
  * This is invoked from the service worker on the flush alarm and on WS
  * `CAPTURE_CONFIRMED`/`PARSE_COMPLETE` (proxies for connectivity returning).
@@ -106,10 +123,8 @@ export async function flushSnippetQueue(options: {
   // Preserve order-of-insertion — matches the original enqueue ordering.
   let processed = 0;
   for (const item of [...queue]) {
-    if (item.retryCount >= SNIPPET_QUEUE_MAX_RETRIES) {
-      await removeSnippetFromQueue(item.id);
-      continue;
-    }
+    if (item.state === 'failed' || item.retryCount >= SNIPPET_QUEUE_MAX_RETRIES) continue;
+    if (item.nextRetryAt && Date.parse(item.nextRetryAt) > Date.now()) continue;
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -117,33 +132,41 @@ export async function flushSnippetQueue(options: {
       if (options.extensionToken) {
         headers['X-Extension-Token'] = options.extensionToken;
       }
-      const res = await fetchImpl(`${options.appUrl}${item.path}`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(item.body),
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      let res: Response;
+      try {
+        res = await fetchImpl(`${options.appUrl}${item.path}`, {
+          method: 'POST', headers, body: JSON.stringify(item.body), signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       if (res.ok) {
         await removeSnippetFromQueue(item.id);
         processed += 1;
         continue;
       }
-      // 4xx: validation-level, not retryable — drop.
-      if (res.status >= 400 && res.status < 500) {
-        await removeSnippetFromQueue(item.id);
-        continue;
-      }
-      // 5xx: bump the retry count and leave the item for next pass.
+      const retryable = res.status === 429 || res.status >= 500;
+      const retryCount = item.retryCount + 1;
+      const retryAfter = res.headers?.get?.('Retry-After');
+      const retrySeconds = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) : 0;
       await updateSnippetQueueItem(item.id, {
-        retryCount: item.retryCount + 1,
+        retryCount,
         lastError: `HTTP ${res.status}`,
+        state: retryable && retryCount < SNIPPET_QUEUE_MAX_RETRIES ? 'queued' : 'failed',
+        nextRetryAt: retryable ? new Date(Date.now() + Math.max(retrySeconds * 1000, Math.min(300000, 1000 * 2 ** retryCount))).toISOString() : undefined,
       });
       // Stop iterating on a 5xx — preserves FIFO order and avoids hammering
       // a server that's struggling.
       break;
     } catch (err) {
+      const retryCount = item.retryCount + 1;
       await updateSnippetQueueItem(item.id, {
-        retryCount: item.retryCount + 1,
+        retryCount,
         lastError: (err as Error).message ?? 'network error',
+        state: retryCount < SNIPPET_QUEUE_MAX_RETRIES ? 'queued' : 'failed',
+        nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** retryCount)).toISOString(),
       });
       break;
     }
@@ -151,4 +174,8 @@ export async function flushSnippetQueue(options: {
 
   const after = await getSnippetQueue();
   return { processed, remaining: after.length };
+}
+
+export async function retrySnippet(id: string): Promise<void> {
+  await updateSnippetQueueItem(id, { retryCount: 0, state: 'queued', nextRetryAt: undefined });
 }

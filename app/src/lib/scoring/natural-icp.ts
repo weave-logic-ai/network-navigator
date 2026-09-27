@@ -3,6 +3,7 @@
 // an ICP that represents "who your network already looks like"
 
 import { query } from "../db/client";
+import { matchesRole, ROLE_GROUP_ALIASES } from "./scorers/icp-fit";
 
 export interface NaturalICPResult {
   roles: string[];
@@ -75,31 +76,18 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
   // --- NETWORK ANALYSIS (40% weight) ---
 
   // Top 10 title patterns by frequency
-  const titleRes = await query<{ title_pattern: string; cnt: string }>(
-    `SELECT
-       CASE
-         WHEN title ILIKE '%CEO%' OR title ILIKE '%founder%' THEN 'CEO/Founder'
-         WHEN title ILIKE '%CTO%' OR title ILIKE '%chief tech%' THEN 'CTO/Tech Leader'
-         WHEN title ILIKE '%VP%' OR title ILIKE '%vice president%' THEN 'VP'
-         WHEN title ILIKE '%director%' THEN 'Director'
-         WHEN title ILIKE '%manager%' OR title ILIKE '%head of%' THEN 'Manager/Head'
-         WHEN title ILIKE '%engineer%' OR title ILIKE '%developer%' THEN 'Engineer'
-         WHEN title ILIKE '%sales%' OR title ILIKE '%account exec%' THEN 'Sales'
-         WHEN title ILIKE '%marketing%' OR title ILIKE '%growth%' THEN 'Marketing'
-         WHEN title ILIKE '%product%' THEN 'Product'
-         WHEN title ILIKE '%consult%' OR title ILIKE '%advisor%' THEN 'Consultant'
-         ELSE 'Other'
-       END AS title_pattern,
-       COUNT(*)::text AS cnt
-     FROM contacts
-     WHERE degree > 0 AND is_archived = FALSE AND title IS NOT NULL
-     GROUP BY title_pattern
-     ORDER BY COUNT(*) DESC
-     LIMIT 10`
+  const titleRes = await query<{ title: string }>(
+    `SELECT title FROM contacts
+     WHERE degree > 0 AND is_archived = FALSE AND title IS NOT NULL`
   );
-  const topRoles = titleRes.rows
-    .filter((r) => r.title_pattern !== "Other")
-    .map((r) => ({ role: r.title_pattern, count: parseInt(r.cnt, 10) }));
+  const rolePatterns = Object.keys(ROLE_GROUP_ALIASES);
+  const roleCounts = new Map<string, number>();
+  for (const { title } of titleRes.rows) {
+    const role = rolePatterns.find((pattern) => matchesRole(title, pattern));
+    if (role) roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+  }
+  const topRoles = [...roleCounts].sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([role, count]) => ({ role, count }));
 
   // Top 5 industries from company data
   const industryRes = await query<{ industry: string; cnt: string }>(

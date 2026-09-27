@@ -73,6 +73,9 @@ describe('sources/private-ip classification', () => {
   it('maps IPv4-mapped IPv6 to the IPv4 table', () => {
     expect(classifyIPv6('::ffff:10.0.0.1')).toBe('private_ip');
     expect(classifyIPv6('::ffff:8.8.8.8')).toBeNull();
+    expect(classifyIPv6('::ffff:0a00:0001')).toBe('private_ip');
+    expect(classifyIPv6('::ffff:7f00:0001')).toBe('loopback');
+    expect(classifyIPv6('::10.0.0.1')).toBe('private_ip');
   });
 
   it('classifyIp routes to v4 or v6 automatically', () => {
@@ -151,5 +154,6 @@ describe('sources/private-ip checkHostSafe', () => {
     process.env.SOURCES_ALLOW_LOCALHOST = 'true';
     const r = await checkHostSafe('localhost', async () => []);
     expect(r.blocked).toBe(false);
+    expect(r.resolvedIp).toBe('127.0.0.1');
   });
 });

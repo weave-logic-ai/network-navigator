@@ -253,11 +253,13 @@ captureBtn.addEventListener('click', () => {
 
   chrome.runtime.sendMessage(
     { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage,
-    (_response) => {
-      captureBtn.textContent = 'Captured!';
+    (response: { status?: string; message?: string } | undefined) => {
+      const status = response?.status;
+      captureBtn.textContent = status === 'submitted' ? 'Submitted' : status === 'queued' ? 'Queued locally' : status === 'limit' ? 'Limit reached' : 'Capture failed';
+      captureBtn.setAttribute('title', response?.message || chrome.runtime.lastError?.message || '');
       setTimeout(() => {
-        captureBtn.removeAttribute('disabled');
-        captureBtn.textContent = 'Capture This Page';
+        if (status !== 'limit') captureBtn.removeAttribute('disabled');
+        if (status === 'submitted' || status === 'queued') captureBtn.textContent = 'Capture This Page';
         updateStatus();
       }, 1500);
     }

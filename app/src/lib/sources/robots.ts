@@ -14,6 +14,7 @@
 
 import { query } from '../db/client';
 import { hostOf } from './url-normalize';
+import { safeHttpGet } from './safe-http';
 
 export interface RobotsRuleGroup {
   userAgent: string;
@@ -31,6 +32,7 @@ interface CacheRow {
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
+const MAX_ROBOTS_BYTES = 1024 * 1024;
 const DEFAULT_USER_AGENT = 'NetworkNavigator';
 
 /**
@@ -164,17 +166,13 @@ async function writeCache(
  */
 async function fetchRobots(host: string): Promise<{ ok: boolean; body: string; error?: string }> {
   const url = `https://${host}/robots.txt`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
+    const res = await safeHttpGet(url, { maxBytes: MAX_ROBOTS_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
     if (res.status === 404) return { ok: true, body: '' };
-    if (!res.ok) return { ok: false, body: '', error: `HTTP ${res.status}` };
-    const body = await res.text();
+    if (res.status < 200 || res.status >= 300) return { ok: false, body: '', error: `HTTP ${res.status}` };
+    const body = res.bytes.toString('utf8');
     return { ok: true, body };
   } catch (err) {
-    clearTimeout(timer);
     return { ok: false, body: '', error: (err as Error).message };
   }
 }

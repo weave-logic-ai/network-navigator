@@ -248,7 +248,9 @@ export default function ContactDetailPage() {
   const [contact, setContact] = useState<ContactDetail | null>(null);
   const [scores, setScores] = useState<ScoreBreakdown | null>(null);
   const [icpBreakdown, setIcpBreakdown] = useState<IcpBreakdown | null>(null);
-  const [gauges, setGauges] = useState<AllGauges | null>(null);
+  const [gauges, setGauges] = useState<Partial<AllGauges> | null>(null);
+  const [gaugeErrors, setGaugeErrors] = useState<string[]>([]);
+  const [gaugesLoading, setGaugesLoading] = useState(false);
   const [goalsAndTasks, setGoalsAndTasks] = useState<GoalsAndTasks | null>(null);
   const [loading, setLoading] = useState(true);
   const [tagInput, setTagInput] = useState("");
@@ -314,14 +316,28 @@ export default function ContactDetailPage() {
     totalCostCents: number;
   } | null>(null);
 
+  const loadGauges = useCallback(async () => {
+    setGaugesLoading(true);
+    try {
+      const response = await fetch(`/api/contacts/${contactId}/gauges`);
+      const json = await response.json();
+      const hasData = json.data && Object.keys(json.data).length > 0;
+      if (hasData) setGauges(json.data);
+      setGaugeErrors(json.errors?.length ? json.errors : response.ok && hasData ? [] : ["all gauges"]);
+    } catch {
+      setGaugeErrors(["all gauges"]);
+    } finally {
+      setGaugesLoading(false);
+    }
+  }, [contactId]);
+
   const loadContact = useCallback(async () => {
     try {
-      const [contactRes, scoresRes, providersRes, icpRes, gaugesRes, goalsRes] = await Promise.all([
+      const [contactRes, scoresRes, providersRes, icpRes, goalsRes] = await Promise.all([
         fetch(`/api/contacts/${contactId}`),
         fetch(`/api/contacts/${contactId}/scores`),
         fetch("/api/enrichment/providers"),
         fetch(`/api/contacts/${contactId}/icp-breakdown`),
-        fetch(`/api/contacts/${contactId}/gauges`),
         fetch(`/api/contacts/${contactId}/goals`),
       ]);
 
@@ -345,11 +361,6 @@ export default function ContactDetailPage() {
         setIcpBreakdown(json.data);
       }
 
-      if (gaugesRes.ok) {
-        const json = await gaugesRes.json();
-        setGauges(json.data);
-      }
-
       if (goalsRes.ok) {
         const json = await goalsRes.json();
         setGoalsAndTasks(json.data);
@@ -364,6 +375,12 @@ export default function ContactDetailPage() {
   useEffect(() => {
     loadContact();
   }, [loadContact]);
+
+  useEffect(() => {
+    setGauges(null);
+    setGaugeErrors([]);
+    loadGauges();
+  }, [loadGauges]);
 
   function handleEnrich(_field?: string) {
     if (!contact) return;
@@ -1218,20 +1235,6 @@ export default function ContactDetailPage() {
                   </CardContent>
                 </Card>
               </div>
-              {gauges && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-sm">ECC Gauges</CardTitle>
-                  </CardHeader>
-                  <CardContent className="grid gap-4 sm:grid-cols-2">
-                    <DCTEGauge {...gauges.dcte} />
-                    <RSTEGauge {...gauges.rste} />
-                    <EMOTGauge {...gauges.emot} />
-                    <SCENGauge {...gauges.scen} />
-                  </CardContent>
-                </Card>
-              )}
-
               {scores.dimensions.length > 0 && (
                 <Card>
                   <CardHeader>
@@ -1319,6 +1322,28 @@ export default function ContactDetailPage() {
               </CardContent>
             </Card>
           )}
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle className="text-sm">ECC Gauges</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {gaugeErrors.length > 0 && (
+                <div role="alert" className="flex items-center justify-between gap-2 text-sm">
+                  <span>Could not load {gaugeErrors.join(", ")}. Available gauges are shown below.</span>
+                  <Button variant="outline" size="sm" onClick={loadGauges} disabled={gaugesLoading}>
+                    {gaugesLoading ? "Retrying…" : "Retry gauges"}
+                  </Button>
+                </div>
+              )}
+              {gaugesLoading && !gauges && <p className="text-sm text-muted-foreground">Loading gauges…</p>}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {gauges?.dcte && <DCTEGauge {...gauges.dcte} />}
+                {gauges?.rste && <RSTEGauge {...gauges.rste} />}
+                {gauges?.emot && <EMOTGauge {...gauges.emot} />}
+                {gauges?.scen && <SCENGauge {...gauges.scen} />}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="enrichment" className="mt-4">

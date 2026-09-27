@@ -135,11 +135,15 @@ export function TargetPickerModal() {
         body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
       });
       if (!stateRes.ok) return;
+      const stateJson = (await stateRes.json()) as {
+        data?: { secondaryTargetId?: string | null } | null;
+      };
+      if (stateJson.data?.secondaryTargetId !== createJson.data.id) return;
       setOpen(false);
       setQ("");
       window.dispatchEvent(new CustomEvent("research-target-changed", {
         detail: {
-          secondaryTargetId: createJson.data.id,
+          secondaryTargetId: stateJson.data.secondaryTargetId,
           secondaryTargetLabel: result.label,
         },
       }));

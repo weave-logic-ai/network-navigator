@@ -37,28 +37,49 @@ export async function GET() {
 
 export async function PUT(request: NextRequest) {
   try {
+    // A missing or malformed field must never be interpreted as a clear.
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).length !== 1 ||
+        !Object.prototype.hasOwnProperty.call(body, 'secondaryTargetId')) {
+      return NextResponse.json({ error: 'Body must contain only secondaryTargetId' }, { status: 400 });
+    }
+    const secondaryTargetId = (body as { secondaryTargetId: unknown }).secondaryTargetId;
+    if (secondaryTargetId !== null &&
+        (typeof secondaryTargetId !== 'string' ||
+         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(secondaryTargetId))) {
+      return NextResponse.json({ error: 'Invalid secondaryTargetId' }, { status: 400 });
+    }
     const ownerId = await getCurrentOwnerProfileId();
     if (!ownerId) {
       return NextResponse.json({ error: 'No owner profile configured' }, { status: 400 });
     }
 
-    const body = (await request.json().catch(() => ({}))) as {
-      secondaryTargetId?: string | null;
-    };
-
     // Validate the target id exists (when non-null). Keeps a stale client
     // from wedging the state with a dangling FK — the FK itself has
     // ON DELETE SET NULL so we'd self-heal on deletion, but we'd rather
     // 400 now than surface a silent clear.
-    if (body.secondaryTargetId != null) {
-      const target = await getTargetById(body.secondaryTargetId);
+    const previous = await getResearchTargetState(ownerId);
+    if (secondaryTargetId !== null) {
+      const target = await getTargetById(secondaryTargetId);
       if (!target) {
         return NextResponse.json({ error: 'Target not found' }, { status: 404 });
       }
+      if (!previous || target.tenantId !== previous.tenantId ||
+          target.kind === 'self' || target.id === previous.primaryTargetId) {
+        return NextResponse.json({ error: 'Invalid secondary target' }, { status: 400 });
+      }
     }
 
-    const previous = await getResearchTargetState(ownerId);
-    const state = await setSecondaryTarget(ownerId, body.secondaryTargetId ?? null);
+    const state = await setSecondaryTarget(ownerId, secondaryTargetId);
+    if (!state) {
+      return NextResponse.json({ error: 'Target state was not updated' }, { status: 500 });
+    }
     if (state?.secondaryTargetId && previous?.secondaryTargetId !== state.secondaryTargetId) {
       await pushTargetHistory(ownerId, {
         targetId: state.secondaryTargetId,

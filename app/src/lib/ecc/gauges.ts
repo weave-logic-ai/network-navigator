@@ -90,15 +90,31 @@ export interface AllGauges {
   scen: SCENScore;
 }
 
-export async function computeAllGauges(contactId: string): Promise<AllGauges> {
-  const [dcte, dtse, rste, emot, scen] = await Promise.all([
+export interface GaugeResults {
+  data: Partial<AllGauges>;
+  errors: Array<keyof AllGauges>;
+}
+
+export async function computeAllGauges(contactId: string): Promise<GaugeResults> {
+  const results = await Promise.allSettled([
     computeDCTE(contactId),
     computeDTSE(contactId),
     computeRSTE(contactId),
     computeEMOT(contactId),
     computeSCEN(contactId),
   ]);
-  return { dcte, dtse, rste, emot, scen };
+  const keys: Array<keyof AllGauges> = ["dcte", "dtse", "rste", "emot", "scen"];
+  const data: Partial<AllGauges> = {};
+  const errors: Array<keyof AllGauges> = [];
+  results.forEach((result, index) => {
+    const key = keys[index];
+    if (result.status === "fulfilled") {
+      Object.assign(data, { [key]: result.value });
+    } else {
+      errors.push(key);
+    }
+  });
+  return { data, errors };
 }
 
 // ----- DCTE computation -----
@@ -117,9 +133,10 @@ async function computeDCTE(contactId: string): Promise<DCTEScore> {
     composite_score: number | null;
     connections_count: number | null;
   }>(
-    `SELECT full_name, headline, title, current_company, email, phone,
-            linkedin_url, about, location, tags, composite_score, connections_count
-     FROM contacts WHERE id = $1`,
+    `SELECT c.full_name, c.headline, c.title, c.current_company, c.email, c.phone,
+            c.linkedin_url, c.about, c.location, c.tags, cs.composite_score, c.connections_count
+     FROM contacts c LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+     WHERE c.id = $1`,
     [contactId]
   );
   if (res.rows.length === 0) {
@@ -182,15 +199,15 @@ async function computeDCTE(contactId: string): Promise<DCTEScore> {
 
   // Enrichment segment (weight 0.15) — check company industry + enrichment history count
   const enrichRes = await query<{ cnt: string }>(
-    `SELECT COUNT(*)::text as cnt FROM enrichment_history WHERE contact_id = $1`,
+    `SELECT COUNT(*)::text as cnt FROM person_enrichments WHERE contact_id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const enrichCount = parseInt(enrichRes.rows[0]?.cnt || "0", 10);
 
   const companyRes = await query<{ industry: string | null }>(
     `SELECT co.industry FROM contacts c JOIN companies co ON c.current_company_id = co.id WHERE c.id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [] }));
+  );
   const hasIndustry = has(companyRes.rows[0]?.industry);
   if (!hasIndustry) missing.push("company_industry");
   const enrichment =
@@ -252,7 +269,7 @@ async function computeDTSE(contactId: string): Promise<DTSEStatus> {
      WHERE t.contact_id = $1 AND g.status IN ('active','in_progress')
      LIMIT 10`,
     [contactId]
-  ).catch(() => ({ rows: [] }));
+  );
 
   const pendingRes = await query<{
     id: string;
@@ -264,12 +281,12 @@ async function computeDTSE(contactId: string): Promise<DTSEStatus> {
      FROM tasks WHERE contact_id = $1 AND status IN ('pending','in_progress')
      ORDER BY priority DESC LIMIT 10`,
     [contactId]
-  ).catch(() => ({ rows: [] }));
+  );
 
   const completedRes = await query<{ cnt: string }>(
     `SELECT COUNT(*)::text as cnt FROM tasks WHERE contact_id = $1 AND status = 'completed'`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
 
   // Persona/beliefs from scoring
   const personaRes = await query<{
@@ -278,7 +295,7 @@ async function computeDTSE(contactId: string): Promise<DTSEStatus> {
   }>(
     `SELECT persona, referral_persona FROM contact_scores WHERE contact_id = $1 ORDER BY scored_at DESC LIMIT 1`,
     [contactId]
-  ).catch(() => ({ rows: [] }));
+  );
 
   const p = personaRes.rows[0];
 
@@ -430,7 +447,7 @@ async function computeEMOT(contactId: string): Promise<EMOTScore> {
   const obsRes = await query<{ cnt: string }>(
     `SELECT COUNT(*)::text as cnt FROM behavioral_observations WHERE contact_id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const obsCount = parseInt(obsRes.rows[0]?.cnt || "0", 10);
 
   // Edge signals
@@ -456,7 +473,7 @@ async function computeEMOT(contactId: string): Promise<EMOTScore> {
   }>(
     `SELECT behavioral_signals FROM contact_scores WHERE contact_id = $1 ORDER BY scored_at DESC LIMIT 1`,
     [contactId]
-  ).catch(() => ({ rows: [] }));
+  );
 
   const signals = scoreRes.rows[0]?.behavioral_signals;
   const amplification =
@@ -519,9 +536,10 @@ async function computeSCEN(contactId: string): Promise<SCENScore> {
     composite_score: number | null;
     connections_count: number | null;
   }>(
-    `SELECT full_name, headline, title, current_company, email, phone,
-            about, location, tags, linkedin_url, composite_score, connections_count
-     FROM contacts WHERE id = $1`,
+    `SELECT c.full_name, c.headline, c.title, c.current_company, c.email, c.phone,
+            c.about, c.location, c.tags, c.linkedin_url, cs.composite_score, c.connections_count
+     FROM contacts c LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+     WHERE c.id = $1`,
     [contactId]
   );
   if (fieldRes.rows.length === 0) {
@@ -551,16 +569,18 @@ async function computeSCEN(contactId: string): Promise<SCENScore> {
 
   // Scoring dimensions
   const dimRes = await query<{ cnt: string }>(
-    `SELECT COUNT(*)::text as cnt FROM contact_score_dimensions WHERE contact_id = $1`,
+    `SELECT COUNT(*)::text as cnt FROM score_dimensions sd
+     JOIN contact_scores cs ON cs.id = sd.contact_score_id
+     WHERE cs.contact_id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const scoringDimensions = parseInt(dimRes.rows[0]?.cnt || "0", 10);
 
   // Enrichment sources
   const enrichRes = await query<{ cnt: string }>(
-    `SELECT COUNT(DISTINCT provider)::text as cnt FROM enrichment_history WHERE contact_id = $1`,
+    `SELECT COUNT(DISTINCT provider)::text as cnt FROM person_enrichments WHERE contact_id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const enrichmentSources = parseInt(enrichRes.rows[0]?.cnt || "0", 10);
 
   // Edge count
@@ -574,7 +594,7 @@ async function computeSCEN(contactId: string): Promise<SCENScore> {
   const embRes = await query<{ cnt: string }>(
     `SELECT COUNT(*)::text as cnt FROM profile_embeddings WHERE contact_id = $1`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const embeddingExists = parseInt(embRes.rows[0]?.cnt || "0", 10) > 0;
 
   // Recent activity (any edge or observation in 30 days)
@@ -583,7 +603,7 @@ async function computeSCEN(contactId: string): Promise<SCENScore> {
      WHERE (source_contact_id = $1 OR target_contact_id = $1)
      AND created_at > NOW() - INTERVAL '30 days'`,
     [contactId]
-  ).catch(() => ({ rows: [{ cnt: "0" }] }));
+  );
   const recentActivity = parseInt(actRes.rows[0]?.cnt || "0", 10) > 0;
 
   // Confidence calculation

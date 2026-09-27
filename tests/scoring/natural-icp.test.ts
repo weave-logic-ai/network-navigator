@@ -39,7 +39,7 @@ function makeQueryRouter(overrides: {
     if (sql.includes('FROM owner_profiles')) {
       return resultOf(overrides.owner ?? []);
     }
-    if (sql.includes('title_pattern')) {
+    if (sql.includes('SELECT title FROM contacts')) {
       return resultOf(overrides.titles ?? []);
     }
     if (sql.includes('co.industry')) {
@@ -122,8 +122,8 @@ describe('scoring/natural-icp', () => {
           },
         ],
         titles: [
-          { title_pattern: 'CEO/Founder', cnt: '5' },
-          { title_pattern: 'Engineer', cnt: '3' },
+          ...Array.from({ length: 5 }, () => ({ title: 'CEO & Founder' })),
+          ...Array.from({ length: 3 }, () => ({ title: 'Software Engineer' })),
         ],
         industries: [
           { industry: 'Fintech', cnt: '4' },
@@ -179,6 +179,21 @@ describe('scoring/natural-icp', () => {
     // profileSignals exposes about-derived keywords (the old live route
     // computed these but never merged or returned them).
     expect(result!.profileSignals.aboutKeywords.length).toBeGreaterThan(0);
+  });
+
+  it('classifies a Creative Director separately from a CTO', async () => {
+    const { query } = await import('@/lib/db/client');
+    const mockQuery = query as jest.MockedFunction<typeof query>;
+    mockQuery.mockImplementation(makeQueryRouter({
+      owner: [{ headline: 'Helping leaders', summary: null, industry: null, skills: [] }],
+      titles: [{ title: 'Creative Director' }, { title: 'Chief Technology Officer' }],
+    }) as unknown as typeof query);
+    const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+    const result = await computeNaturalICP();
+    expect(result?.networkSignals.topRoles).toEqual(expect.arrayContaining([
+      { role: 'CTO/Tech Leader', count: 1 },
+      { role: 'Director', count: 1 },
+    ]));
   });
 
   it('inserts a new natural ICP row identified by source=natural when none exists', async () => {
