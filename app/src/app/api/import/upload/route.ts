@@ -1,9 +1,12 @@
 // POST /api/import/upload - accept multipart CSV file upload
 
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, rm } from 'fs/promises';
+import { createHash } from 'crypto';
+import { mkdir, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { createImportSession } from '@/lib/db/queries/import';
+import { createImportSession, updateImportSession } from '@/lib/db/queries/import';
+import { query } from '@/lib/db/client';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 import {
   boundedBody, containedPath, MAX_BODY_SIZE,
   isMultipartFormData, storedCsvName, UploadLimitError, UploadValidationError, validateCsvBatch, writeCsvFile,
@@ -12,6 +15,9 @@ import {
 const UPLOAD_DIR = join(process.env.NODE_ENV === 'production' ? '/data' : process.cwd(), 'uploads', 'imports');
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
+  let sessionId: string | undefined;
   let sessionDir: string | undefined;
   let createdSessionDir = false;
   try {
@@ -47,8 +53,16 @@ export async function POST(request: NextRequest) {
     }
 
     const validFiles = validateCsvBatch(files);
+    const sourceNames = new Set<string>();
+    for (const file of validFiles) {
+      const name = file.name.normalize('NFKC').toLowerCase();
+      if (sourceNames.has(name)) {
+        throw new UploadValidationError('Duplicate CSV filenames are not accepted');
+      }
+      sourceNames.add(name);
+    }
 
-    const sessionId = await createImportSession();
+    sessionId = await createImportSession();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
       throw new Error('Invalid generated session ID');
     }
@@ -57,10 +71,18 @@ export async function POST(request: NextRequest) {
     await mkdir(sessionDir, { mode: 0o700 });
     createdSessionDir = true;
     const names: string[] = [];
+    const manifestFiles: Array<{ name: string; size: number; sha256: string }> = [];
     for (const file of validFiles) {
       const name = storedCsvName(file.name);
       await writeCsvFile(file, sessionDir, name);
       names.push(name);
+      manifestFiles.push({ name, size: file.size, sha256: await sha256File(file) });
+    }
+    await writeFile(containedPath(sessionDir, 'manifest.json'), JSON.stringify({ version: 1, files: manifestFiles }), {
+      flag: 'wx', mode: 0o600,
+    });
+    if (!await updateImportSession(sessionId, { total_files: names.length })) {
+      throw new Error('Import session disappeared before upload completed');
     }
 
     return NextResponse.json(
@@ -68,12 +90,42 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
-    if (sessionDir && createdSessionDir) await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+    // Both cleanup actions are idempotent; attempt both even if one fails.
+    const [sessionCleanup, fileCleanup] = await Promise.allSettled([
+      sessionId ? updateImportSession(sessionId, {
+        status: 'failed', completed_at: new Date(),
+        errors: [{ message: 'Upload failed before processing' }],
+      }) : Promise.resolve(),
+      sessionDir && createdSessionDir ? rm(sessionDir, { recursive: true, force: true }) : Promise.resolve(),
+    ]);
+    if (sessionCleanup.status === 'rejected' && sessionId) {
+      // Roll back a still-pending session if recording failure did not work.
+      await query('DELETE FROM import_sessions WHERE id = $1 AND status = $2', [sessionId, 'pending'])
+        .catch(() => console.error('Import session cleanup failed'));
+    }
+    if (fileCleanup.status === 'rejected' && sessionDir && createdSessionDir) {
+      await rm(sessionDir, { recursive: true, force: true })
+        .catch(() => console.error('Import upload directory cleanup failed'));
+    }
     const limit = error instanceof UploadLimitError || (error instanceof Error && error.message.includes('Upload body exceeds limit'));
     const invalid = error instanceof UploadValidationError;
     return NextResponse.json(
       { error: limit ? 'Upload exceeds allowed limits' : invalid ? error.message : 'Upload failed' },
       { status: limit ? 413 : invalid ? 400 : 500 }
     );
+  }
+}
+
+async function sha256File(file: File): Promise<string> {
+  const hash = createHash('sha256');
+  const reader = file.stream().getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return hash.digest('hex');
+      hash.update(value);
+    }
+  } finally {
+    reader.releaseLock();
   }
 }

@@ -1,6 +1,7 @@
 // Import pipeline: ordered multi-CSV processing (10-file dependency order)
 
 import { readFile, stat } from 'fs/promises';
+import { createHash } from 'crypto';
 import { basename } from 'path';
 import { PoolClient } from 'pg';
 import { ImportFileType, ImportSummary, ImportError } from './types';
@@ -59,13 +60,27 @@ interface FileInfo {
   sizeBytes: number;
 }
 
+export interface ImportContentSnapshot {
+  readonly bytes: Buffer;
+  readonly sha256: string;
+}
+
 export async function runImportPipeline(
   client: PoolClient,
   filePaths: string[],
   selfContactId: string,
   selfName: string = '',
-  existingSessionId?: string
+  existingSessionId?: string,
+  snapshots?: ReadonlyMap<string, ImportContentSnapshot>
 ): Promise<ImportSummary> {
+  if (snapshots) {
+    for (const path of filePaths) {
+      const snapshot = snapshots.get(path);
+      if (!snapshot || createHash('sha256').update(snapshot.bytes).digest('hex') !== snapshot.sha256) {
+        throw new Error('Import snapshot integrity mismatch');
+      }
+    }
+  }
   const startTime = Date.now();
   const allErrors: ImportError[] = [];
   let totalRecords = 0;
@@ -81,12 +96,12 @@ export async function runImportPipeline(
     if (!fileType) continue;
 
     try {
-      const fileStat = await stat(filePath);
+      const sizeBytes = snapshots ? snapshots.get(filePath)!.bytes.byteLength : (await stat(filePath)).size;
       files.push({
         path: filePath,
         filename,
         fileType,
-        sizeBytes: fileStat.size,
+        sizeBytes,
       });
     } catch {
       allErrors.push({ file: filename, message: 'File not found or unreadable' });
@@ -124,7 +139,9 @@ export async function runImportPipeline(
     );
 
     try {
-      const content = await readFile(file.path, 'utf-8');
+      const content = snapshots
+        ? snapshots.get(file.path)!.bytes.toString('utf-8')
+        : await readFile(file.path, 'utf-8');
 
       let fileResult: { totalRows: number; newRecords: number; updatedRecords?: number; skippedRecords: number; errors: ImportError[] };
 

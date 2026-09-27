@@ -1,4 +1,6 @@
 import { detectFileType, PROCESSING_ORDER } from '@/lib/import/pipeline';
+import { createHash } from 'crypto';
+import { join } from 'path';
 
 // --- Mocks for runImportPipeline's full dependency graph ---
 // (detectFileType/PROCESSING_ORDER above need none of this; only the
@@ -244,6 +246,48 @@ describe('Import Pipeline', () => {
       expect(summary.status).toBe('completed');
       expect(computeNaturalICP).toHaveBeenCalledTimes(1);
       resolveIcp();
+    });
+  });
+
+  describe('verified content snapshots', () => {
+    beforeEach(() => { jest.clearAllMocks(); });
+
+    it('consumes captured bytes after a same-length on-disk replacement', async () => {
+      const actualFs = jest.requireActual<typeof import('fs/promises')>('fs/promises');
+      const directory = join(process.cwd(), 'uploads', 'imports');
+      const path = join(directory, 'Connections-snapshot.csv');
+      const original = Buffer.from('original');
+      const hash = createHash('sha256').update(original).digest('hex');
+      await actualFs.mkdir(directory, { recursive: true });
+      await actualFs.writeFile(path, original);
+      const snapshots = new Map([[path, { bytes: original, sha256: hash }]]);
+      await actualFs.writeFile(path, 'replaced'); // Same length, after validation.
+      const client = { query: jest.fn().mockResolvedValue({ rows: [] }) } as unknown as import('pg').PoolClient;
+      const { computeNaturalICP } = await import('@/lib/scoring/natural-icp');
+      const { importConnections } = await import('@/lib/import/connections-importer');
+      const fsMock = await import('fs/promises');
+      const { runImportPipeline } = await import('@/lib/import/pipeline');
+      (computeNaturalICP as jest.Mock).mockResolvedValue(null);
+      try {
+        await runImportPipeline(client, [path], 'self-1', '', 'session-1', snapshots);
+        expect(importConnections).toHaveBeenCalledWith(client, 'original', 'session-1', 'self-1');
+        expect(fsMock.readFile).not.toHaveBeenCalled();
+        expect(fsMock.stat).not.toHaveBeenCalled();
+      } finally {
+        await actualFs.rm(path, { force: true });
+      }
+    });
+
+    it('rejects changed snapshot bytes before any database effect', async () => {
+      const path = join(process.cwd(), 'uploads', 'imports', 'Connections-snapshot.csv');
+      const snapshots = new Map([[path, {
+        bytes: Buffer.from('replaced'), sha256: createHash('sha256').update('original').digest('hex'),
+      }]]);
+      const client = { query: jest.fn() } as unknown as import('pg').PoolClient;
+      const { runImportPipeline } = await import('@/lib/import/pipeline');
+      await expect(runImportPipeline(client, [path], 'self-1', '', 'session-1', snapshots))
+        .rejects.toThrow('Import snapshot integrity mismatch');
+      expect(client.query).not.toHaveBeenCalled();
     });
   });
 });
