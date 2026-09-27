@@ -3,8 +3,9 @@
 //
 // Phase 1.5 — WS-4 per-target ICP plumbing (`08-phased-delivery.md` §3.4).
 // Lenses bundle a target with the ICP profiles used for scoring; see
-// `app/src/lib/targets/lens-service.ts` for the schema mapping (config JSONB
-// stores `icpProfileIds`). Gated behind `RESEARCH_FLAGS.targets` at the UI
+// `app/src/lib/targets/lens-service.ts` for the schema mapping
+// (research_target_icps.lens_id is canonical after migration 053).
+// Gated behind `RESEARCH_FLAGS.targets` at the UI
 // layer; the backend routes remain callable so scoring can thread targetId
 // through without flipping the flag on.
 

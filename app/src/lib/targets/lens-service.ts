@@ -1,5 +1,5 @@
-// Research Tools Sprint — WS-4 Phase 1.5 + WS-4 polish: per-target ICP
-// plumbing via lenses, now backed by migration 045 columns.
+// Per-target ICP selection through lenses. Migration 053 makes
+// research_target_icps.lens_id the canonical lens-to-ICP association.
 //
 // A "lens" is a saved view of a research target — a (target, config) bundle
 // stored in `research_lenses` (schema: `data/db/init/035-targets-schema.sql`).
@@ -7,51 +7,9 @@
 // that the same contact can score differently depending on which lens is
 // active for the target being researched.
 //
-// Migration 045 — what changed and why
-// ---------------------------------------------------------------------------
-// Phase 1.5 originally shipped against migration 035 as landed, which did
-// NOT have:
-//   - `research_target_icps.lens_id`       (target ↔ lens ↔ ICP triple)
-//   - `research_target_state.last_used_lens_id` (per-user active lens)
-//
-// The Phase 1.5 workaround stored the ICP-for-lens mapping inside
-// `research_lenses.config.icpProfileIds` JSONB, and used the row's
-// `is_default` bit as a stand-in for "which lens is active right now."
-// That workaround had two rough edges:
-//
-//   1. Activating a lens meant a transactional `is_default = FALSE` pass
-//      across every sibling lens for the target. That's a write per row for
-//      a per-user preference — the sibling rows never actually changed
-//      meaning.
-//   2. "Active lens" was global-per-target rather than per-user. Two users
-//      researching the same target could clobber each other's active lens.
-//
-// Migration 045 fixes both by introducing:
-//   - `research_target_icps.lens_id UUID NULL REFERENCES research_lenses(id)`
-//     — a real target ↔ lens ↔ ICP junction. Back-filled from each target's
-//     `is_default` lens so existing seed-lenses continue to resolve. Not
-//     yet used on the read path (Phase 1.5 `config.icpProfileIds` stays the
-//     source of truth until all callers migrate), but exposed so downstream
-//     consumers can opt in.
-//   - `research_target_state.last_used_lens_id UUID NULL REFERENCES
-//     research_lenses(id)` — the canonical "which lens is active for this
-//     user on this target" pointer.
-//
-// After 045 the `is_default` column on `research_lenses` is retained as a
-// hint ("primary lens for this target") but is NO LONGER used for the
-// active-lens read path. Reads now go:
-//
-//   1. `research_target_state.last_used_lens_id` for the current owner.
-//      Must match a lens whose `primary_target_id` is the target we're
-//      scoping; otherwise fall through.
-//   2. The target's `is_default = TRUE` lens (first row, oldest-wins).
-//   3. The oldest non-deleted lens for the target.
-//
-// Writes (`activateLensForTarget`) now update `last_used_lens_id` on the
-// state row. `is_default` is still opportunistically set — if the target
-// has no default lens yet, the activated lens becomes the default (so the
-// fallback path keeps working for anonymous / state-less callers). Existing
-// sibling `is_default = TRUE` rows are left alone.
+// Active lens selection uses research_target_state.last_used_lens_id, then
+// the default/oldest lens fallback. Null-lens ICP rows remain legacy target
+// associations and never become lens associations by inference.
 
 import { query, transaction } from '../db/client';
 import type { PoolClient } from 'pg';
@@ -70,11 +28,6 @@ export interface ResearchLens {
   updatedAt: string;
   /** Populated by migration 044 — non-null means the lens was soft-deleted. */
   deletedAt: string | null;
-}
-
-interface LensConfigWithIcps {
-  icpProfileIds?: string[];
-  [key: string]: unknown;
 }
 
 function rowToLens(row: Record<string, unknown>): ResearchLens {
@@ -182,7 +135,7 @@ async function readLastUsedLensIdForCurrentOwner(): Promise<string | null> {
 }
 
 /**
- * Resolve the "active" lens for a target. Resolution order (migration 045):
+ * Resolve the "active" lens for a target. Resolution order (migration 046):
  *
  *   1. `research_target_state.last_used_lens_id` for the current owner.
  *      Must be a non-deleted lens whose `primary_target_id` matches the
@@ -216,12 +169,10 @@ export async function getActiveLensForTarget(targetId: string): Promise<Research
 
 /**
  * Return the ICP profiles associated with the target's currently-active
- * lens. Lens ↔ ICP mapping is stored as `config.icpProfileIds: string[]`
- * (the Phase 1.5 workaround — migration 045 introduces
- * `research_target_icps.lens_id` but the read path continues to use the
- * JSONB config until all writers migrate).
+ * lens. The association is read from research_target_icps.lens_id. Legacy
+ * null-lens rows are deliberately excluded: they do not identify a lens.
  *
- * Returns `[]` if the target has no lens, the lens has no ICP ids, or the
+ * Returns `[]` if the target has no lens, the lens has no ICP rows, or the
  * referenced ICPs are all inactive. Callers must use that empty-array result
  * as a signal to fall back to the owner-default ICP list.
  */
@@ -229,27 +180,21 @@ export async function getActiveLensIcps(targetId: string): Promise<IcpProfile[]>
   const lens = await getActiveLensForTarget(targetId);
   if (!lens) return [];
 
-  const config = lens.config as LensConfigWithIcps;
-  const ids = Array.isArray(config.icpProfileIds)
-    ? config.icpProfileIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
-    : [];
-  if (ids.length === 0) return [];
-
   const res = await query<Record<string, unknown>>(
-    `SELECT id, name, description, is_active, criteria, weight_overrides,
-            created_at, updated_at
-     FROM icp_profiles
-     WHERE id = ANY($1::uuid[]) AND is_active = TRUE
-     ORDER BY name`,
-    [ids]
+    `SELECT ip.id, ip.name, ip.description, ip.is_active, ip.criteria,
+            ip.weight_overrides, ip.created_at, ip.updated_at
+     FROM research_target_icps rti
+     JOIN icp_profiles ip ON ip.id = rti.icp_profile_id
+     WHERE rti.target_id = $1 AND rti.lens_id = $2 AND ip.is_active = TRUE
+     ORDER BY ip.name`,
+    [targetId, lens.id]
   );
   return res.rows.map(mapIcpRow);
 }
 
 /**
- * Create a lens for a target. The lens's ICP association is stored on the
- * `config` JSONB as `icpProfileIds`. First lens for a target is automatically
- * marked default.
+ * Create a lens and its ICP associations atomically. First lens for a target
+ * is automatically marked default.
  */
 export async function createLensForTarget(input: {
   targetId: string;
@@ -263,32 +208,44 @@ export async function createLensForTarget(input: {
   const existing = await listLensesForTarget(input.targetId);
   const isDefault = existing.length === 0; // first lens wins default
 
-  const config: LensConfigWithIcps = {
-    ...(input.configExtras ?? {}),
-    icpProfileIds: input.icpProfileIds ?? [],
-  };
+  const { icpProfileIds: _legacyIds, ...config } = input.configExtras ?? {};
+  const icpIds = [...new Set(input.icpProfileIds ?? [])];
 
-  const res = await query<Record<string, unknown>>(
-    `INSERT INTO research_lenses
+  return transaction(async (client: PoolClient) => {
+    const res = await client.query<Record<string, unknown>>(
+      `INSERT INTO research_lenses
        (tenant_id, user_id, name, primary_target_id, secondary_target_id,
         config, is_default)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [
-      input.tenantId,
-      input.userId ?? null,
-      input.name,
-      input.targetId,
-      input.secondaryTargetId ?? null,
-      JSON.stringify(config),
-      isDefault,
-    ]
-  );
-  return rowToLens(res.rows[0]);
+      [
+        input.tenantId,
+        input.userId ?? null,
+        input.name,
+        input.targetId,
+        input.secondaryTargetId ?? null,
+        JSON.stringify(config),
+        isDefault,
+      ]
+    );
+    if (icpIds.length > 0) {
+      const inserted = await client.query(
+        `INSERT INTO research_target_icps (target_id, icp_profile_id, lens_id)
+         SELECT $1, ip.id, $2 FROM icp_profiles ip
+         WHERE ip.id = ANY($3::uuid[])
+         ON CONFLICT DO NOTHING`,
+        [input.targetId, res.rows[0].id, icpIds]
+      );
+      if (inserted.rowCount !== icpIds.length) {
+        throw new Error('One or more ICP profiles do not exist');
+      }
+    }
+    return rowToLens(res.rows[0]);
+  });
 }
 
 /**
- * Activate a lens for a target — after migration 045 this writes the
+ * Activate a lens for a target — after migration 046 this writes the
  * pointer to `research_target_state.last_used_lens_id` for the current
  * owner instead of flipping `is_default` across every sibling lens.
  *

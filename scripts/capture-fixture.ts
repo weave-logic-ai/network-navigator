@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
-import { redact, RULE_SET_VERSION } from './redaction.ts';
+import { redact, detectSurvivingPii, RULE_SET_VERSION } from './redaction.ts';
 
 type PageType =
   | 'PROFILE'
@@ -77,8 +77,8 @@ function usage(): string {
     '  --output-name <n>    Override filename stem (default: iso-shorthash)',
     '',
     'Modes:',
-    '  --dry-run            Print redaction hit counts + first 40 lines of',
-    '                       the diff, do not write files',
+    '  --dry-run            Print redaction hit counts + changed line numbers;',
+    '                       do not print capture content or write files',
     '  --help               Show this message',
     '',
     'Output:',
@@ -165,7 +165,7 @@ function redactUrl(raw: string): string {
 }
 
 function diffPreview(before: string, after: string, maxLines = 40): string {
-  // Minimal line-level diff: a / b markers for lines that differ.
+  // Even a partly redacted line may contain private content elsewhere on it.
   const beforeLines = before.split('\n');
   const afterLines = after.split('\n');
   const max = Math.max(beforeLines.length, afterLines.length);
@@ -175,9 +175,8 @@ function diffPreview(before: string, after: string, maxLines = 40): string {
     const bl = beforeLines[i] ?? '';
     const al = afterLines[i] ?? '';
     if (bl !== al) {
-      out.push(`- ${bl.slice(0, 160)}`);
-      out.push(`+ ${al.slice(0, 160)}`);
-      shown += 2;
+      out.push(String(i + 1));
+      shown++;
     }
   }
   return out.join('\n');
@@ -221,6 +220,10 @@ async function main(): Promise<void> {
   const preHash = sha256(raw);
   const { output, hits } = redact(raw);
   const totalHits = Object.values(hits).reduce((a, b) => a + b, 0);
+  const survivors = detectSurvivingPii(output);
+  if (survivors.length > 0) {
+    throw new Error(`Redaction left ${survivors.length} possible PII match(es); review source privately before capturing`);
+  }
 
   if (args.dryRun) {
     process.stdout.write(
@@ -229,7 +232,7 @@ async function main(): Promise<void> {
         `[dry-run] total substitutions=${totalHits}\n` +
         `[dry-run] per-rule hits=${JSON.stringify(hits)}\n` +
         `[dry-run] byte delta: ${raw.length} -> ${output.length}\n` +
-        `---- diff (first 40 changed lines) ----\n` +
+        `changed line numbers (first 40):\n` +
         `${diffPreview(raw, output)}\n`
     );
     return;
@@ -254,6 +257,7 @@ async function main(): Promise<void> {
     redactionHits: hits,
     redactionTotal: totalHits,
     expectedFields: [],
+    review: { status: 'pending' },
   };
 
   await writeFile(htmlPath, output, 'utf8');
@@ -262,7 +266,8 @@ async function main(): Promise<void> {
   process.stdout.write(
     `wrote ${path.relative(root, htmlPath)}\n` +
       `wrote ${path.relative(root, metaPath)}\n` +
-      `rule-set=${RULE_SET_VERSION} hits=${totalHits}\n`
+      `rule-set=${RULE_SET_VERSION} hits=${totalHits}\n` +
+      'Pending review: inspect HTML and metadata, set expectedFields, then record review.status="approved" and review.reviewedBy before tracking.\n'
   );
 }
 

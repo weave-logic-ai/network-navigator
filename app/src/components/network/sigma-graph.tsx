@@ -22,6 +22,7 @@ interface SigmaNode {
     score: number;
     degree: number;
     clusterId: string | null;
+    kind?: "contact" | "company";
   };
 }
 
@@ -38,6 +39,7 @@ interface SigmaEdge {
 interface GraphData {
   nodes: SigmaNode[];
   edges: SigmaEdge[];
+  focusNodeId: string | null;
   stats: {
     totalNodes: number;
     loadedNodes: number;
@@ -67,7 +69,7 @@ interface SigmaGraphProps {
    */
   highlightedCluster?: string | null;
   /**
-   * ADR-027 graph re-rooting. A `research_targets.id` (of `kind='contact'`)
+   * ADR-027 graph re-rooting. A contact or company `research_targets.id`
    * to center the graph on, in place of the default top-by-PageRank
    * listing. Per the ADR, this is normally the current *secondary* target
    * — passed straight through to `/api/graph/sigma-data?primaryTargetId=`,
@@ -76,7 +78,7 @@ interface SigmaGraphProps {
    * `showProvenanceEdges`/`onShowProvenanceEdgesChange` controlled-prop
    * pattern above: parent supplies the initial/external value, this
    * component mirrors it locally and reports back optimistically when
-   * shift-click sets a new secondary, so the parent doesn't need to poll.
+   * a node Focus action sets a new secondary, so the parent doesn't need to poll.
    */
   rootTargetId?: string | null;
   onRootTargetIdChange?: (next: string) => void;
@@ -90,6 +92,33 @@ const EDGE_TYPE_OPTIONS = [
   { value: "ENDORSED", label: "Endorsed" },
   { value: "RECOMMENDED", label: "Recommended" },
 ];
+
+/** One action from a selected graph node writes only the secondary target. */
+export async function focusGraphNode(
+  node: Pick<SigmaNode, "key" | "attributes">,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ ok: boolean; secondaryTargetId?: string }> {
+  if (node.attributes.kind !== "company") {
+    return setSecondaryTargetViaShiftClick(node.key, fetchImpl);
+  }
+  try {
+    const targetRes = await fetchImpl("/api/targets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "company", id: node.key }),
+    });
+    if (!targetRes.ok) return { ok: false };
+    const target = (await targetRes.json()) as { data: { id: string } };
+    const stateRes = await fetchImpl("/api/targets/state", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secondaryTargetId: target.data.id }),
+    });
+    return { ok: stateRes.ok, secondaryTargetId: target.data.id };
+  } catch {
+    return { ok: false };
+  }
+}
 
 export function SigmaGraph({
   nicheId,
@@ -122,12 +151,15 @@ export function SigmaGraph({
   const initializingRef = useRef(false);
   const mountedRef = useRef(true);
   const latestDataRef = useRef<GraphData | null>(null);
+  const requestSeqRef = useRef(0);
   const [data, setData] = useState<GraphData | null>(null);
   const [graphRevision, setGraphRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNode, setSelectedNode] = useState<SigmaNode | null>(null);
+  const [focusError, setFocusError] = useState<string | null>(null);
+  const [focusPending, setFocusPending] = useState(false);
   const [edgeTypes, setEdgeTypes] = useState<string[]>(
     initialEdgeTypes || EDGE_TYPE_OPTIONS.map((o) => o.value)
   );
@@ -139,7 +171,39 @@ export function SigmaGraph({
     () => new Set()
   );
 
+  const focusSelectedNode = useCallback(async (node: SigmaNode) => {
+    setFocusPending(true);
+    setFocusError(null);
+    const result = await focusGraphNode(node);
+    if (!mountedRef.current) return;
+    setFocusPending(false);
+    if (!result.ok || !result.secondaryTargetId) {
+      setFocusError("Could not focus this node. Please try again.");
+      return;
+    }
+    setActiveRootTargetId(result.secondaryTargetId);
+    onRootTargetIdChange?.(result.secondaryTargetId);
+    window.dispatchEvent(new CustomEvent("research-target-changed", {
+      detail: {
+        secondaryTargetId: result.secondaryTargetId,
+        secondaryTargetLabel: node.attributes.label,
+      },
+    }));
+    setSecondarySetFlash((prev) => new Set(prev).add(node.key));
+    window.setTimeout(() => {
+      if (!mountedRef.current) return;
+      setSecondarySetFlash((prev) => {
+        const next = new Set(prev);
+        next.delete(node.key);
+        return next;
+      });
+    }, 600);
+  }, [onRootTargetIdChange]);
+  const focusNodeRef = useRef(focusSelectedNode);
+  focusNodeRef.current = focusSelectedNode;
+
   const loadData = useCallback(async () => {
+    const requestSeq = ++requestSeqRef.current;
     setError(null);
     try {
       const params = new URLSearchParams();
@@ -152,11 +216,13 @@ export function SigmaGraph({
       const res = await fetch(`/api/graph/sigma-data?${params}`);
       if (!res.ok) throw new Error("Failed to load graph data");
       const json = await res.json();
-      setData(json.data);
+      if (requestSeq === requestSeqRef.current) setData(json.data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      if (requestSeq === requestSeqRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to load");
+      }
     } finally {
-      setLoading(false);
+      if (requestSeq === requestSeqRef.current) setLoading(false);
     }
   }, [limit, nicheId, edgeTypes, provenanceOn, activeRootTargetId]);
 
@@ -178,6 +244,8 @@ export function SigmaGraph({
   // cleared the secondary via the header breadcrumb.
   useEffect(() => {
     setActiveRootTargetId(rootTargetId);
+    setSearchQuery("");
+    setSelectedNode(null);
   }, [rootTargetId]);
 
   useEffect(() => {
@@ -243,6 +311,22 @@ export function SigmaGraph({
     }
   }, []);
 
+  const centerOnFocus = useCallback((
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sigma: any,
+    nextData: GraphData,
+  ) => {
+    const display = nextData.focusNodeId
+      ? sigma.getNodeDisplayData(nextData.focusNodeId)
+      : null;
+    const camera = sigma.getCamera();
+    if (display) {
+      camera.setState({ x: display.x, y: display.y, ratio: 0.5 });
+    } else if (!nextData.focusNodeId) {
+      camera.setState({ x: 0.5, y: 0.5, ratio: 1 });
+    }
+  }, []);
+
   // Initialize Sigma when data arrives — all imports are dynamic
   useEffect(() => {
     if (!data || !containerRef.current) return;
@@ -250,6 +334,7 @@ export function SigmaGraph({
     if (sigmaRef.current && graphRef.current) {
       applyDataToGraph(graphRef.current, data);
       sigmaRef.current.refresh();
+      centerOnFocus(sigmaRef.current, data);
       setGraphRevision((revision) => revision + 1);
       return;
     }
@@ -303,12 +388,8 @@ export function SigmaGraph({
           maxCameraRatio: 10,
         });
 
-        // Click handler. Plain click selects a node;
-        // shift-click sets the clicked node as the SECONDARY research target
-        // (WS-4 §3.2). The picker modal handles regular "pick a target" flows,
-        // so shift-click is the graph-native shortcut — no modal appears.
-        // We briefly flash the node amber to signal "secondary set"
-        // (Phase 4 Track I: 600 ms fade, via a setTimeout + node reducer).
+        // Plain click selects a node, exposing a single Focus action.
+        // Shift-click remains the graph shortcut for the same action.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         sigmaInstance.on("clickNode", (payload: any) => {
           const { node, event } = payload as {
@@ -319,43 +400,7 @@ export function SigmaGraph({
           const attrs = graph.getNodeAttributes(node);
 
           if (isShift) {
-            // Fire-and-forget; POST creates (or fetches) the contact target
-            // row, then PUT writes it as `secondary_target_id`. Silent on
-            // failure — the amber flash confirms the click was received.
-            //
-            // ADR-027: setting the secondary re-centers the graph, so once
-            // the target row exists we re-root on it optimistically (no
-            // need to wait for a state poll) and let the parent know so its
-            // own copy of "current secondary" stays in sync.
-            void setSecondaryTargetViaShiftClick(node).then((result) => {
-              if (result.ok && result.secondaryTargetId) {
-                setActiveRootTargetId(result.secondaryTargetId);
-                onRootTargetIdChange?.(result.secondaryTargetId);
-                window.dispatchEvent(new CustomEvent("research-target-changed", {
-                  detail: {
-                    secondaryTargetId: result.secondaryTargetId,
-                    secondaryTargetLabel: attrs.label,
-                  },
-                }));
-              }
-            });
-
-            // Amber highlight pulse — the node reducer reads this Set to
-            // override the node's color for a short window.
-            setSecondarySetFlash((prev) => {
-              const next = new Set(prev);
-              next.add(node);
-              return next;
-            });
-            window.setTimeout(() => {
-              setSecondarySetFlash((prev) => {
-                if (!prev.has(node)) return prev;
-                const next = new Set(prev);
-                next.delete(node);
-                return next;
-              });
-            }, 600);
-            sigmaInstance.refresh();
+            void focusNodeRef.current({ key: node, attributes: attrs as SigmaNode["attributes"] });
             return;
           }
 
@@ -376,6 +421,7 @@ export function SigmaGraph({
           applyDataToGraph(graph, latestDataRef.current);
           sigmaInstance.refresh();
         }
+        centerOnFocus(sigmaInstance, latestDataRef.current ?? initialData);
         setGraphRevision((revision) => revision + 1);
       } catch (err) {
         console.error("[sigma-graph] Failed to initialize:", err);
@@ -386,7 +432,7 @@ export function SigmaGraph({
     };
 
     void init();
-  }, [data, onNodeClick, onRootTargetIdChange, applyDataToGraph]);
+  }, [data, onNodeClick, applyDataToGraph, centerOnFocus]);
 
   // Search + shift-click flash + cluster highlight: the single node reducer
   // combines all three signals so the amber flash survives even when a
@@ -574,24 +620,37 @@ export function SigmaGraph({
                 {selectedNode.attributes.company}
               </p>
             )}
-            <div className="grid grid-cols-2 gap-1 mt-2 text-[10px]">
-              <span className="text-muted-foreground">PageRank</span>
-              <span>{selectedNode.attributes.pagerank.toFixed(6)}</span>
-              <span className="text-muted-foreground">Score</span>
-              <span>{(selectedNode.attributes.score * 100).toFixed(0)}%</span>
-              <span className="text-muted-foreground">Degree</span>
-              <span>{selectedNode.attributes.degree}</span>
-            </div>
+            {selectedNode.attributes.kind !== "company" && (
+              <div className="grid grid-cols-2 gap-1 mt-2 text-[10px]">
+                <span className="text-muted-foreground">PageRank</span>
+                <span>{selectedNode.attributes.pagerank.toFixed(6)}</span>
+                <span className="text-muted-foreground">Score</span>
+                <span>{(selectedNode.attributes.score * 100).toFixed(0)}%</span>
+                <span className="text-muted-foreground">Degree</span>
+                <span>{selectedNode.attributes.degree}</span>
+              </div>
+            )}
             <Button
-              variant="outline"
               size="sm"
               className="w-full mt-2 h-7 text-xs"
-              onClick={() => {
-                window.location.href = `/contacts/${selectedNode.key}`;
-              }}
+              disabled={focusPending}
+              onClick={() => void focusSelectedNode(selectedNode)}
             >
-              View Profile
+              {focusPending ? "Focusing..." : "Focus"}
             </Button>
+            {focusError && <p role="alert" className="mt-1 text-xs text-destructive">{focusError}</p>}
+            {selectedNode.attributes.kind !== "company" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full mt-2 h-7 text-xs"
+                onClick={() => {
+                  window.location.href = `/contacts/${selectedNode.key}`;
+                }}
+              >
+                View Profile
+              </Button>
+            )}
           </div>
         )}
       </div>

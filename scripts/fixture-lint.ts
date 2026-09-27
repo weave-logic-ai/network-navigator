@@ -6,6 +6,7 @@
 //   2. every *.meta.json carries the required keys
 //   3. the fixture's pageType matches the directory it lives in
 //   4. no PII regex still matches inside the committed HTML
+//   5. captured (non-synthetic) fixtures carry an explicit human review
 //
 // Exit code is 0 on pass, 1 on any violation (first failure collected, all
 // remaining failures still reported).
@@ -138,6 +139,21 @@ async function main(): Promise<void> {
         kind: 'stale-rule-set',
         detail: `fixture built with ruleSet=${String(meta.ruleSetVersion)}, code has ${RULE_SET_VERSION}`,
       });
+    }
+
+    if (meta.preRedactionSha256 !== 'synthetic-no-raw-input') {
+      const review = meta.review as Record<string, unknown> | undefined;
+      if (review?.status !== 'approved' ||
+          typeof review.reviewedBy !== 'string' ||
+          review.reviewedBy.trim().length === 0 ||
+          !Array.isArray(meta.expectedFields) ||
+          meta.expectedFields.length === 0) {
+        violations.push({
+          file: rel,
+          kind: 'review-pending',
+          detail: 'captured fixture needs review.status="approved", review.reviewedBy, and expectedFields',
+        });
+      }
     }
 
     // 4. PII residue scan

@@ -58,7 +58,17 @@ export class ProfileParser implements PageParser {
       fields.filter((f) => f.value !== null && f.value !== '').map((f) => f.field)
     );
     const fallbackFields = runFallbacks('PROFILE', $, url, filled);
-    fields.push(...fallbackFields);
+    for (const fallback of fallbackFields) {
+      const missingIndex = fields.findIndex(
+        (field) => field.field === fallback.field &&
+          (field.value === null || field.value === '')
+      );
+      if (missingIndex >= 0) {
+        fields[missingIndex] = fallback;
+      } else {
+        fields.push(fallback);
+      }
+    }
 
     // Build structured data
     const data = this.buildProfileData(fields);

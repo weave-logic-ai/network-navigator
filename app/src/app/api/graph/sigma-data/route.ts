@@ -14,12 +14,9 @@
 // for consistency with that route even though, per the ADR, it's semantically
 // "whatever target the view should center on" — in practice the caller
 // passes the current *secondary* target id (ADR-027 decision 3: secondary
-// re-centers the view, primary/self stays the default fallback). Only
-// `kind='contact'` targets actually re-root, matching `/api/graph/data`'s
-// v1 scope note — `kind='company'` and `kind='self'` fall through to the
-// existing top-by-PageRank listing (self has no `source_contact_id` /
-// `target_contact_id` identity to re-root a *contact* graph on; company
-// re-rooting is deferred the same way it was there).
+// re-centers the view, primary/self stays the default fallback). Contact
+// targets show their 1-hop neighborhood. Company targets show their linked
+// contacts around an explicit company node. Self uses the default listing.
 //
 // Deliberate adaptation vs. a literal port: `/api/graph/data` orders the
 // re-rooted neighborhood by `composite_score`; this route orders everything
@@ -62,14 +59,16 @@ export async function GET(request: NextRequest) {
       searchParams.get("includeProvenanceEdges") === "true";
     const primaryTargetIdParam = searchParams.get("primaryTargetId");
 
-    // Resolve the re-root target (see file header). Only `kind='contact'`
-    // targets re-root; everything else (missing target, `self`, `company`)
-    // falls through to the default top-by-PageRank listing below.
+    // Only a secondary contact or company can re-root the graph. Primary/self
+    // continues to use the default listing.
     let rootContactId: string | null = null;
+    let rootCompanyId: string | null = null;
     if (primaryTargetIdParam) {
       const target = await getTargetById(primaryTargetIdParam);
       if (target && target.kind === "contact") {
         rootContactId = getTargetEntityId(target);
+      } else if (target && target.kind === "company") {
+        rootCompanyId = getTargetEntityId(target);
       }
     }
 
@@ -141,6 +140,31 @@ export async function GET(request: NextRequest) {
         ORDER BY COALESCE(gm.pagerank, 0) DESC
         LIMIT $3`;
       nodesParams.push(rootContactId, minPagerank, limit);
+    } else if (rootCompanyId) {
+      // Company context comes from structured links, not a name comparison:
+      // current employees, work history, and explicit company edges.
+      // Keep the focal company visible even when it has no linked contacts.
+      nodesQuery = `
+        WITH neighborhood AS (
+          SELECT id FROM contacts WHERE current_company_id = $1
+          UNION
+          SELECT contact_id AS id FROM work_history WHERE company_id = $1
+          UNION
+          SELECT source_contact_id AS id FROM edges WHERE target_company_id = $1
+        )
+        SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
+               c.current_company, c.title,
+               gm.pagerank, gm.betweenness_centrality, top_cluster.cluster_id
+        FROM contacts c
+        INNER JOIN neighborhood n ON n.id = c.id
+        LEFT JOIN contact_scores cs ON cs.contact_id = c.id
+        LEFT JOIN graph_metrics gm ON gm.contact_id = c.id
+        ${clusterJoin}
+        WHERE c.is_archived = FALSE
+          AND COALESCE(gm.pagerank, 0) >= $2
+        ORDER BY COALESCE(gm.pagerank, 0) DESC
+        LIMIT $3`;
+      nodesParams.push(rootCompanyId, minPagerank, limit);
     } else if (nicheId) {
       nodesQuery = `
         SELECT c.id, c.full_name, cs.tier, c.degree, cs.composite_score,
@@ -215,11 +239,44 @@ export async function GET(request: NextRequest) {
           score: c.composite_score || 0,
           degree: c.degree,
           clusterId: c.cluster_id || null,
+          kind: "contact",
         },
       };
     });
 
+    if (rootCompanyId) {
+      const companyRes = await query<{ id: string; name: string }>(
+        `SELECT id, name FROM companies WHERE id = $1`,
+        [rootCompanyId]
+      );
+      const company = companyRes.rows[0];
+      if (company) {
+        nodes.push({
+          key: company.id,
+          attributes: {
+            label: company.name,
+            x: 0,
+            y: 0,
+            size: 24,
+            color: "#2563eb",
+            tier: "company",
+            company: null,
+            title: null,
+            pagerank: 0,
+            score: 0,
+            degree: nodesRes.rows.length,
+            clusterId: null,
+            kind: "company",
+          },
+        });
+      }
+    }
+
     // Get edges between loaded nodes
+    // A focused neighborhood can be arbitrarily far down the global edges
+    // table. Filter in SQL before the cap so its real edges are not lost to
+    // the first 20,000 unrelated rows.
+    const focused = Boolean(rootContactId || rootCompanyId);
     const edgesRes = await query<{
       id: string;
       source_contact_id: string;
@@ -231,8 +288,9 @@ export async function GET(request: NextRequest) {
        FROM edges
        WHERE target_contact_id IS NOT NULL
          AND edge_type = ANY($1)
+         ${focused ? "AND source_contact_id = ANY($2::uuid[]) AND target_contact_id = ANY($2::uuid[])" : ""}
        LIMIT 20000`,
-      [edgeTypeFilter]
+      focused ? [edgeTypeFilter, [...nodeIds]] : [edgeTypeFilter]
     );
 
     // Filter edges to only those between loaded nodes
@@ -251,6 +309,17 @@ export async function GET(request: NextRequest) {
         },
       }));
 
+    if (rootCompanyId && nodeIds.size > 0 && nodes.some((n) => n.key === rootCompanyId)) {
+      for (const contactId of nodeIds) {
+        edges.push({
+          key: `company-context:${rootCompanyId}:${contactId}`,
+          source: rootCompanyId,
+          target: contactId,
+          attributes: { type: "company-context", weight: 1 },
+        });
+      }
+    }
+
     // Stats
     const totalRes = await query<{ cnt: string }>(
       `SELECT COUNT(*)::text as cnt FROM contacts WHERE is_archived = FALSE`
@@ -264,6 +333,7 @@ export async function GET(request: NextRequest) {
       data: {
         nodes,
         edges,
+        focusNodeId: rootContactId || rootCompanyId,
         stats: {
           totalNodes: parseInt(totalRes.rows[0]?.cnt || "0", 10),
           loadedNodes: nodes.length,

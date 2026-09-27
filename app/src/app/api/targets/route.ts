@@ -1,3 +1,4 @@
+// GET  /api/targets?id=... — resolve a target for breadcrumb navigation
 // POST /api/targets — create (or fetch existing) target for a contact or company
 //
 // Body: { kind: 'contact' | 'company', id: string }
@@ -11,7 +12,29 @@ import {
   getOrCreateContactTarget,
   getOrCreateCompanyTarget,
   getDefaultTenantId,
+  getTargetById,
 } from '@/lib/targets/service';
+
+// The breadcrumb uses this lookup when a focus-change event carries an id
+// but no label (for example, Back to a previous secondary target).
+export async function GET(request: NextRequest) {
+  try {
+    const id = request.nextUrl.searchParams.get('id');
+    if (!id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return NextResponse.json({ error: 'Valid target id is required' }, { status: 400 });
+    }
+    const target = await getTargetById(id);
+    if (!target || target.tenantId !== await getDefaultTenantId()) {
+      return NextResponse.json({ error: 'Target not found' }, { status: 404 });
+    }
+    return NextResponse.json({ data: target });
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Failed to load target', details: error instanceof Error ? error.message : undefined },
+      { status: 500 }
+    );
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {

@@ -7,9 +7,9 @@ import { TierBadge } from "@/components/scoring/tier-badge";
 
 interface ContactSummary {
   id: string;
-  full_name: string | null;
-  current_company: string | null;
-  composite_score: number | null;
+  fullName: string | null;
+  currentCompany: string | null;
+  compositeScore: number | null;
   tier: string | null;
 }
 
@@ -37,7 +37,11 @@ export function TopContactsList() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">Top Contacts</CardTitle>
+        <CardTitle className="text-sm font-medium">
+          {contacts.some((contact) => contact.compositeScore !== null)
+            ? "Top Contacts"
+            : "Contacts"}
+        </CardTitle>
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -58,15 +62,15 @@ export function TopContactsList() {
               >
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate">
-                    {contact.full_name || "Unknown"}
+                    {contact.fullName || "Unknown"}
                   </p>
                   <p className="text-xs text-muted-foreground truncate">
-                    {contact.current_company || ""}
+                    {contact.currentCompany || ""}
                   </p>
                 </div>
                 <TierBadge
                   tier={contact.tier}
-                  score={contact.composite_score}
+                  score={contact.compositeScore}
                   showScore
                 />
               </Link>

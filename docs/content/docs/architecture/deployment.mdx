@@ -39,7 +39,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-ctox}
     volumes:
-      - ./db/init:/docker-entrypoint-initdb.d
+      - ./data/db/init:/docker-entrypoint-initdb.d
       - ./data/drives/db:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ctox} -d ${POSTGRES_DB:-ctox}"]
@@ -52,7 +52,7 @@ services:
 
 Key points:
 - Uses `ruvector-postgres` which includes the RUVECTOR extension for vector similarity search
-- Schema scripts in `db/init/` run automatically on first start (alphabetical order)
+- Schema scripts in `data/db/init/` run automatically on first start (alphabetical order)
 - Data persists in `./data/drives/db/` on the host
 - Health check uses `pg_isready` with 30-second start period for initial schema setup
 - `POSTGRES_PASSWORD` is required; compose will fail without it
@@ -343,12 +343,12 @@ docker compose restart app
 
 ## Upgrading Schema
 
-New SQL migration scripts are added to `db/init/` with incrementing numeric prefixes. These only run on first database initialization.
+New SQL migration scripts are added to `data/db/init/` with incrementing numeric prefixes. These only run on first database initialization. A copied or existing volume can be missing older migrations even when newer tables exist; check required tables and columns rather than assuming the highest filename was applied.
 
 For existing deployments, apply migrations manually:
 
 ```bash
-docker exec -i ctox-db psql -U ctox -d ctox < db/init/019-referral-scoring-schema.sql
+docker compose exec -T db psql -U "${POSTGRES_USER:-ctox}" -d "${POSTGRES_DB:-ctox}" -v ON_ERROR_STOP=1 -1 < data/db/init/019-referral-scoring-schema.sql
 ```
 
 Or connect directly:
@@ -356,3 +356,23 @@ Or connect directly:
 ```bash
 docker exec -it ctox-db psql -U ctox -d ctox
 ```
+
+### Isolated local demo
+
+The repo's demo override keeps database and app-data volumes separate from the default stack and binds the app to localhost on port 3751:
+
+```bash
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo build app
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo up -d
+curl http://127.0.0.1:3751/api/health
+```
+
+The two stacks share the built image name, but their containers and volumes are distinct. To stop the demo while retaining its data, use the same Compose arguments with `stop`. Avoid `down -v` unless you intend to discard the demo volumes.
+
+For an **existing** demo volume, init scripts do not rerun. Review the pending SQL against that volume before applying it. For example, after checking `research_target_icps` and backing up the database, apply migration 053 transactionally from the repo root:
+
+```bash
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -1' < data/db/init/053-lens-icp-canonical.sql
+```
+
+The local demo copy used for research-tool validation also lacked parts of migrations 018 and 019. Those were reconciled additively before scoring and dashboard checks; this is a reason to audit any copied volume before treating it as release evidence.

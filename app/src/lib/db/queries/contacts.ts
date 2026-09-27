@@ -49,6 +49,7 @@ interface ContactRow {
   company_name?: string | null;
   company_industry?: string | null;
   composite_score?: number | null;
+  referral_likelihood?: number | null;
   tier?: string | null;
 }
 
@@ -169,7 +170,7 @@ export async function listContacts(
   const dataParams = [...params, limit, offset];
   const dataResult = await query<ContactRow>(
     `SELECT c.*, co.name AS company_name, co.industry AS company_industry,
-            cs.composite_score, cs.tier
+            cs.composite_score, cs.referral_likelihood, cs.tier
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      LEFT JOIN contact_scores cs ON cs.contact_id = c.id
@@ -193,7 +194,7 @@ export async function listContacts(
 export async function getContactById(id: string): Promise<ContactRow | null> {
   const result = await query<ContactRow>(
     `SELECT c.*, co.name AS company_name, co.industry AS company_industry,
-            cs.composite_score, cs.tier
+            cs.composite_score, cs.referral_likelihood, cs.tier
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      LEFT JOIN contact_scores cs ON cs.contact_id = c.id

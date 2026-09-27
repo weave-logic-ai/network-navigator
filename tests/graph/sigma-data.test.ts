@@ -170,7 +170,10 @@ describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
     };
   }
 
-  function setupMockQueryWithTarget(row: Record<string, unknown> | null) {
+  function setupMockQueryWithTarget(
+    row: Record<string, unknown> | null,
+    nodeRows = NODE_ROWS
+  ) {
     const mockQuery = jest.requireMock('@/lib/db/client').query as jest.Mock;
     mockQuery.mockReset();
     mockQuery.mockImplementation((sql: unknown) => {
@@ -181,7 +184,10 @@ describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
       if (text.includes('cluster_memberships')) {
         // Both the re-rooted and default nodes queries join
         // cluster_memberships, so this one mock covers either shape.
-        return mockRows(NODE_ROWS);
+        return mockRows(nodeRows);
+      }
+      if (text.includes('FROM companies WHERE id')) {
+        return mockRows([{ id: 'co-1', name: 'Acme' }]);
       }
       if (text.includes('FROM edges')) {
         return mockRows([]);
@@ -221,6 +227,15 @@ describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
     );
     // rootContactId (resolved from the target's contact_id), minPagerank, limit
     expect(nodesCall![1]).toEqual(['c1', 0, 10]);
+    const edgeCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('SELECT id, source_contact_id, target_contact_id, edge_type, weight')
+    );
+    expect(String(edgeCall?.[0])).toContain('source_contact_id = ANY($2::uuid[])');
+    expect(edgeCall?.[1]).toEqual([
+      expect.any(Array),
+      ['c1', 'c2'],
+    ]);
+    expect((await res.json()).data.focusNodeId).toBe('c1');
   });
 
   it('falls through to the default top-PageRank listing for kind="self"', async () => {
@@ -239,9 +254,22 @@ describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
       String(c[0]).includes('WITH neighborhood')
     );
     expect(neighborhoodCall).toBeUndefined();
+    expect((await res.json()).data.focusNodeId).toBeNull();
   });
 
-  it('falls through to the default listing for kind="company"', async () => {
+  it('restores the default self graph after secondary is cleared', async () => {
+    const mockQuery = setupMockQueryWithTarget(null);
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const res = await GET(new Request(
+      'http://x/api/graph/sigma-data?limit=10',
+    ) as unknown as import('next/server').NextRequest);
+    const data = (await res.json()).data;
+    expect(data.focusNodeId).toBeNull();
+    expect(data.nodes.every((node: { attributes: { kind: string } }) => node.attributes.kind === 'contact')).toBe(true);
+    expect(mockQuery.mock.calls.find((call) => String(call[0]).includes('WITH neighborhood'))).toBeUndefined();
+  });
+
+  it('centers a company and returns its linked contacts as visible graph nodes', async () => {
     const mockQuery = setupMockQueryWithTarget(
       targetRow({ kind: 'company', contact_id: null, company_id: 'co-1' })
     );
@@ -256,7 +284,36 @@ describe('/api/graph/sigma-data re-rooting (?primaryTargetId=)', () => {
     const neighborhoodCall = mockQuery.mock.calls.find((c) =>
       String(c[0]).includes('WITH neighborhood')
     );
-    expect(neighborhoodCall).toBeUndefined();
+    expect(neighborhoodCall).toBeDefined();
+    expect(neighborhoodCall![1]).toEqual(['co-1', 0, 10]);
+    expect(String(neighborhoodCall![0])).toMatch(/current_company_id = \$1/);
+    expect(String(neighborhoodCall![0])).toMatch(/FROM work_history WHERE company_id = \$1/);
+    expect(String(neighborhoodCall![0])).toMatch(/target_company_id = \$1/);
+    expect(String(neighborhoodCall![0])).toMatch(/INNER JOIN neighborhood/);
+    const data = (await res.json()).data;
+    expect(data.focusNodeId).toBe('co-1');
+    expect(data.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'co-1', attributes: expect.objectContaining({ label: 'Acme', kind: 'company' }) }),
+      expect.objectContaining({ key: 'c1', attributes: expect.objectContaining({ kind: 'contact' }) }),
+    ]));
+    expect(data.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'co-1', target: 'c1', attributes: { type: 'company-context', weight: 1 } }),
+    ]));
+  });
+
+  it('keeps a company focal node visible when it has no linked contacts', async () => {
+    setupMockQueryWithTarget(
+      targetRow({ kind: 'company', contact_id: null, company_id: 'co-1' }),
+      []
+    );
+    const { GET } = await import('@/app/api/graph/sigma-data/route');
+    const res = await GET(new Request(
+      'http://x/api/graph/sigma-data?primaryTargetId=t1',
+    ) as unknown as import('next/server').NextRequest);
+    const data = (await res.json()).data;
+    expect(data.nodes).toHaveLength(1);
+    expect(data.nodes[0].key).toBe('co-1');
+    expect(data.edges).toHaveLength(0);
   });
 
   it('falls through to the default listing when the target id does not resolve', async () => {

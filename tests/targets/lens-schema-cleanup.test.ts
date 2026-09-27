@@ -18,6 +18,27 @@ const MIGRATION_PATH = path.resolve(
   __dirname,
   '../../data/db/init/046-lens-schema-cleanup.sql'
 );
+const CANONICAL_MIGRATION_PATH = path.resolve(
+  __dirname,
+  '../../data/db/init/053-lens-icp-canonical.sql'
+);
+
+describe('migration 053 — canonical lens ICP associations', () => {
+  const sql = fs.readFileSync(CANONICAL_MIGRATION_PATH, 'utf8');
+
+  it('allows the same ICP on two lenses while keeping one unscoped legacy row', () => {
+    expect(sql).toMatch(/DROP CONSTRAINT IF EXISTS research_target_icps_pkey/);
+    expect(sql).toMatch(/UNIQUE INDEX IF NOT EXISTS uq_research_target_icps_scoped\s+ON research_target_icps\(target_id, lens_id, icp_profile_id\)\s+WHERE lens_id IS NOT NULL/);
+    expect(sql).toMatch(/UNIQUE INDEX IF NOT EXISTS uq_research_target_icps_unscoped\s+ON research_target_icps\(target_id, icp_profile_id\)\s+WHERE lens_id IS NULL/);
+  });
+
+  it('restores legacy rows before copying only explicit config associations', () => {
+    expect(sql).toMatch(/conname = 'research_target_icps_pkey'/);
+    expect(sql).toMatch(/UPDATE research_target_icps SET lens_id = NULL WHERE lens_id IS NOT NULL/);
+    expect(sql).toMatch(/INSERT INTO research_target_icps \(target_id, icp_profile_id, lens_id\)/);
+    expect(sql).toMatch(/JOIN icp_profiles ip ON ip.id::text = lower\(listed.icp_id\)/);
+  });
+});
 
 describe('migration 046 — lens schema cleanup', () => {
   const sql = fs.readFileSync(MIGRATION_PATH, 'utf8');
