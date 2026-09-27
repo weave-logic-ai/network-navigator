@@ -13,6 +13,8 @@ log_dir="$app_root/../data/drives/ux-shell-e2e"
 fixture_port="${E2E_SHELL_FIXTURE_PORT:-3754}"
 app_port="${E2E_SHELL_APP_PORT:-3752}"
 browser_channel="${E2E_BROWSER_CHANNEL:-chrome}"
+operator_secret="$(openssl rand -hex 32)"
+disposable_database_url="postgresql://fixture:fixture@127.0.0.1:1/fixture"
 server_pid=""
 
 mkdir -p "$log_dir"
@@ -65,14 +67,16 @@ stop_server
 
 echo "Deployment research flags enabled"
 start_server enabled "$app_port" "$app_root" "/sources" \
+  DATABASE_URL="$disposable_database_url" LOCAL_OPERATOR_SECRET="$operator_secret" \
   RESEARCH_TARGETS=false RESEARCH_SOURCES=true RESEARCH_SNIPPETS=true RESEARCH_PARSER_TELEMETRY=true
-E2E_SHELL_RESEARCH=true E2E_BASE_URL="http://127.0.0.1:$app_port" E2E_BROWSER_CHANNEL="$browser_channel" \
-  "$playwright_bin" test e2e/scenarios/shell-navigation.spec.ts --workers=1 --reporter=line
+E2E_SHELL_RESEARCH=true E2E_BASE_URL="http://127.0.0.1:$app_port" E2E_BROWSER_CHANNEL="$browser_channel" E2E_OPERATOR_SECRET="$operator_secret" \
+  "$playwright_bin" test e2e/scenarios/shell-navigation.spec.ts --workers=1 --reporter=line --output "$log_dir/enabled-artifacts"
 stop_server
 
 echo "Deployment research flags disabled"
 start_server disabled "$app_port" "$app_root" "/sources" \
+  DATABASE_URL="$disposable_database_url" LOCAL_OPERATOR_SECRET="$operator_secret" \
   RESEARCH_TARGETS=false RESEARCH_SOURCES=false RESEARCH_SNIPPETS=false RESEARCH_PARSER_TELEMETRY=false
-E2E_SHELL_RESEARCH=false E2E_BASE_URL="http://127.0.0.1:$app_port" E2E_BROWSER_CHANNEL="$browser_channel" \
-  "$playwright_bin" test e2e/scenarios/shell-navigation.spec.ts --workers=1 --reporter=line
+E2E_SHELL_RESEARCH=false E2E_BASE_URL="http://127.0.0.1:$app_port" E2E_BROWSER_CHANNEL="$browser_channel" E2E_OPERATOR_SECRET="$operator_secret" \
+  "$playwright_bin" test e2e/scenarios/shell-navigation.spec.ts --workers=1 --reporter=line --output "$log_dir/disabled-artifacts"
 stop_server

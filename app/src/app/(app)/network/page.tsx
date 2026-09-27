@@ -34,6 +34,7 @@ export default function NetworkPage() {
   const rootChangedRef = useRef(false);
   const [rootHistory, setRootHistory] = useState<(string | null)[]>([]);
   const [backPending, setBackPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const handleRootTargetIdChange = useCallback((next: string | null) => {
     if (rootTargetIdRef.current === next) return;
@@ -86,13 +87,14 @@ export default function NetworkPage() {
     if ((!rootTargetIdRef.current && rootHistory.length === 0) || backPending) return;
     const previous = rootHistory.length > 0 ? rootHistory[rootHistory.length - 1] : null;
     setBackPending(true);
+    setActionError(null);
     try {
       const response = await fetch("/api/targets/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ secondaryTargetId: previous }),
       });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error("Could not restore the previous network focus. Try again.");
       setRootHistory((history) => history.slice(0, -1));
       rootTargetIdRef.current = previous;
       setRootTargetId(previous);
@@ -100,7 +102,7 @@ export default function NetworkPage() {
         detail: { secondaryTargetId: previous },
       }));
     } catch {
-      // Preserve the current focus so Back can be retried.
+      setActionError("Could not restore the previous network focus. Try again.");
     } finally {
       setBackPending(false);
     }
@@ -108,23 +110,25 @@ export default function NetworkPage() {
 
   const handleCompute = useCallback(async () => {
     setComputing(true);
+    setActionError(null);
     try {
-      await fetch("/api/graph/compute", { method: "POST" });
+      const response = await fetch("/api/graph/compute", { method: "POST" });
+      if (!response.ok) throw new Error("Graph computation failed. Try again.");
       setRefreshKey((k) => k + 1);
     } catch {
-      // silent
+      setActionError("Graph computation failed. Try again.");
     } finally {
       setComputing(false);
     }
   }, []);
 
   return (
-    <div className="flex min-w-0 h-[calc(100vh-7rem)] flex-col">
+    <div className="flex min-h-full min-w-0 flex-col">
       <PageHeader
         title="Network Graph"
         description="Visualize your professional network"
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {activeTab === "graph" && (
               <>
                 <Button variant="outline" size="sm" onClick={() => setClusterSidebarOpen(true)}>
@@ -139,10 +143,14 @@ export default function NetworkPage() {
           </div>
         }
       />
+      <div role="status" aria-live="polite" className="sr-only">
+        {computing ? "Computing graph" : backPending ? "Restoring network focus" : ""}
+      </div>
+      {actionError && <p role="alert" className="mb-2 text-sm text-destructive">{actionError}</p>}
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
-        <div className="min-w-0 w-full overflow-x-auto">
-        <TabsList className="mx-0 w-max">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-[32rem] min-w-0 w-full flex-1 flex-col">
+        <div role="region" aria-label="Network views" tabIndex={0} className="min-w-0 w-full shrink-0 overflow-x-auto pb-1">
+          <TabsList className="mx-0 w-max justify-start">
           <TabsTrigger value="graph" className="gap-1.5">
             <Network className="h-3.5 w-3.5" />
             Graph
@@ -159,11 +167,11 @@ export default function NetworkPage() {
             <Brain className="h-3.5 w-3.5" />
             Knowledge
           </TabsTrigger>
-        </TabsList>
+          </TabsList>
         </div>
 
-        <TabsContent value="graph" className="hidden min-h-0 flex-1 gap-4 overflow-hidden mt-4 data-[state=active]:flex">
-          <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
+        <TabsContent value="graph" className="mt-4 hidden min-w-0 flex-1 data-[state=active]:block">
+          <div className="relative min-w-0 rounded-lg border bg-background">
             {(rootTargetId || rootHistory.length > 0) && (
               <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
                 <Button variant="ghost" size="sm" disabled={backPending} onClick={handleBack}>
@@ -185,20 +193,20 @@ export default function NetworkPage() {
           </div>
         </TabsContent>
 
-        <TabsContent value="taxonomy" className="min-h-0 flex-1 overflow-hidden mt-4 data-[state=inactive]:hidden">
-          <div className="h-full rounded-lg border bg-background overflow-hidden">
+        <TabsContent value="taxonomy" className="mt-4 min-h-0 min-w-0 flex-1 overflow-auto data-[state=inactive]:hidden">
+          <div className="h-full min-h-0 min-w-0 rounded-lg border bg-background">
             <TaxonomyGraph />
           </div>
         </TabsContent>
 
-        <TabsContent value="conversations" className="min-h-0 flex-1 overflow-hidden mt-4 data-[state=inactive]:hidden">
-          <div className="h-full rounded-lg border bg-background overflow-hidden">
+        <TabsContent value="conversations" className="mt-4 min-h-0 min-w-0 flex-1 overflow-auto data-[state=inactive]:hidden">
+          <div className="h-full min-h-0 min-w-0 rounded-lg border bg-background">
             <ConversationGraph />
           </div>
         </TabsContent>
 
-        <TabsContent value="knowledge" className="min-h-0 flex-1 overflow-y-auto mt-4 data-[state=inactive]:hidden lg:overflow-hidden">
-          <div className="min-h-full rounded-lg border bg-background lg:h-full lg:overflow-hidden">
+        <TabsContent value="knowledge" className="mt-4 min-h-0 min-w-0 flex-1 overflow-y-auto data-[state=inactive]:hidden lg:overflow-hidden">
+          <div className="min-h-full min-w-0 rounded-lg border bg-background lg:h-full lg:overflow-hidden">
             <KnowledgeGraph />
           </div>
         </TabsContent>

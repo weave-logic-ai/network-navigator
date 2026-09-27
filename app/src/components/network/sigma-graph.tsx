@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -159,6 +160,7 @@ export function SigmaGraph({
     rootTargetId
   );
   const containerRef = useRef<HTMLDivElement>(null);
+  const selectedNodeCardRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sigmaRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -173,6 +175,9 @@ export function SigmaGraph({
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNode, setSelectedNode] = useState<SigmaNode | null>(null);
+  useEffect(() => {
+    if (selectedNode) selectedNodeCardRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedNode]);
   const [focusError, setFocusError] = useState<string | null>(null);
   const [focusPending, setFocusPending] = useState(false);
   const [edgeTypes, setEdgeTypes] = useState<string[]>(
@@ -397,6 +402,26 @@ export function SigmaGraph({
           labelRenderedSizeThreshold: 8,
           labelSize: 12,
           labelWeight: "bold",
+          defaultDrawNodeLabel: (context, node, settings) => {
+            if (!node.label) return;
+            const canvasWidth = context.canvas.clientWidth;
+            const padding = 4;
+            context.font = `${settings.labelWeight} ${settings.labelSize}px ${settings.labelFont}`;
+            context.fillStyle = settings.labelColor.attribute
+              ? String(node[settings.labelColor.attribute] ?? settings.labelColor.color ?? "#000")
+              : settings.labelColor.color ?? "#000";
+            let label = node.label;
+            while (label.length > 1 && context.measureText(label).width > canvasWidth - padding * 2) {
+              label = `${label.slice(0, -2)}…`;
+            }
+            const labelWidth = context.measureText(label).width;
+            const right = node.x + node.size + 3;
+            const left = node.x - node.size - 3 - labelWidth;
+            const x = right + labelWidth <= canvasWidth - padding
+              ? right
+              : left >= padding ? left : Math.max(padding, canvasWidth - padding - labelWidth);
+            context.fillText(label, x, node.y + settings.labelSize / 3);
+          },
           defaultEdgeColor: "#e2e8f0",
           defaultNodeColor: "#94a3b8",
           minCameraRatio: 0.1,
@@ -529,7 +554,7 @@ export function SigmaGraph({
 
   if (loading) {
     return (
-      <div className="h-[600px] flex items-center justify-center text-muted-foreground">
+      <div role="status" className="h-[600px] flex items-center justify-center text-muted-foreground">
         <Loader2 className="h-5 w-5 animate-spin mr-2" />
         Loading graph data...
       </div>
@@ -538,7 +563,7 @@ export function SigmaGraph({
 
   if (error) {
     return (
-      <div className="h-[600px] flex items-center justify-center text-destructive">
+      <div role="alert" className="h-[600px] flex items-center justify-center text-destructive">
         {error}
       </div>
     );
@@ -548,9 +573,10 @@ export function SigmaGraph({
     <div className="space-y-2 p-2" data-graph-revision={graphRevision}>
       {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
+        <div className="relative min-w-0 basis-full sm:basis-auto sm:min-w-[200px] sm:max-w-sm sm:flex-1">
           <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
           <Input
+            aria-label="Search graph contacts"
             placeholder="Search contacts..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -558,13 +584,13 @@ export function SigmaGraph({
           />
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleZoomIn}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Zoom graph in" onClick={handleZoomIn}>
             <ZoomIn className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleZoomOut}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Zoom graph out" onClick={handleZoomOut}>
             <ZoomOut className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleReset}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Reset graph view" onClick={handleReset}>
             <Maximize2 className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -586,6 +612,7 @@ export function SigmaGraph({
                 ? "bg-primary/10 border-primary/30 text-primary"
                 : "bg-muted/30 border-border text-muted-foreground"
             }`}
+            aria-pressed={edgeTypes.includes(opt.value)}
             onClick={() => toggleEdgeType(opt.value)}
           >
             {opt.label}
@@ -611,14 +638,14 @@ export function SigmaGraph({
       </div>
 
       {/* Graph container */}
-      <div className="relative border rounded-lg overflow-hidden bg-background">
+      <div className="relative min-w-0 border rounded-lg overflow-hidden bg-background">
         <div ref={containerRef} className="w-full h-[550px]" />
 
         {/* Selected node tooltip */}
         {selectedNode && (
-          <div className="absolute top-4 right-4 bg-background border rounded-lg shadow-lg p-3 w-60 z-10">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="font-medium text-sm truncate">
+          <div ref={selectedNodeCardRef} role="region" aria-label="Selected graph node" className="absolute inset-x-2 top-2 z-10 max-h-[calc(100%-1rem)] overflow-y-auto rounded-lg border bg-background p-3 shadow-lg sm:inset-x-auto sm:right-4 sm:top-4 sm:w-60">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 mb-1">
+              <span className="min-w-0 break-words font-medium text-sm">
                 {selectedNode.attributes.label}
               </span>
               <Badge variant="secondary" className="text-[10px]">
@@ -626,12 +653,12 @@ export function SigmaGraph({
               </Badge>
             </div>
             {selectedNode.attributes.title && (
-              <p className="text-xs text-muted-foreground truncate">
+              <p className="break-words text-xs text-muted-foreground">
                 {selectedNode.attributes.title}
               </p>
             )}
             {selectedNode.attributes.company && (
-              <p className="text-xs text-muted-foreground truncate">
+              <p className="break-words text-xs text-muted-foreground">
                 {selectedNode.attributes.company}
               </p>
             )}
@@ -669,6 +696,26 @@ export function SigmaGraph({
           </div>
         )}
       </div>
+      <details className="rounded-lg border p-3 text-sm">
+        <summary className="cursor-pointer font-medium">Graph contacts and companies ({data?.nodes.length ?? 0})</summary>
+        <p className="mt-2 text-xs text-muted-foreground">Showing up to 50 matching nodes. Use the graph search to narrow this list.</p>
+        <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+          {data?.nodes
+            .filter((node) => node.attributes.label.toLowerCase().includes(searchQuery.toLowerCase()))
+            .slice(0, 50)
+            .map((node) => (
+              <li key={node.key}>
+                <button type="button" className="mr-2 rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => setSelectedNode(node)} aria-label={`Select ${node.attributes.label} in graph`}>Select</button>
+                {node.attributes.kind === "company" ? node.attributes.label : (
+                  <Link href={`/contacts/${encodeURIComponent(node.key)}`} className="rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                    {node.attributes.label}
+                  </Link>
+                )}
+                {node.attributes.company && <span className="text-muted-foreground"> — {node.attributes.company}</span>}
+              </li>
+            ))}
+        </ul>
+      </details>
     </div>
   );
 }

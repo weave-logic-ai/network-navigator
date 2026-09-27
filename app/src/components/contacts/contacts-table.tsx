@@ -146,7 +146,7 @@ export function ContactsTable() {
                 ) : contacts.map((contact) => (
                   <TableRow key={contact.id}>
                     <TableCell className="font-medium">
-                      <Link href={`/contacts/${contact.id}`} className="underline-offset-2 hover:underline focus-visible:underline">
+                      <Link href={`/contacts/${encodeURIComponent(contact.id)}`} className="inline-block rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
                         {contact.fullName ||
                         `${contact.firstName ?? ""} ${contact.lastName ?? ""}`.trim() ||
                         "Unknown"}
