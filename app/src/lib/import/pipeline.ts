@@ -22,21 +22,12 @@ import { importCompanyFollows } from './company-follows-importer';
 import { generateEmbeddings } from './embedding-generator';
 import { seedTaxonomyIfEmpty } from '../taxonomy/seed';
 import { computeNaturalICP } from '../scoring/natural-icp';
+import { detectContactFileType } from './mapping-preview';
+import { parseCsv } from './csv-parser';
 
 // File type detection from filename
 function detectFileType(filename: string): ImportFileType | null {
-  const lower = filename.toLowerCase();
-  if (lower.includes('connection')) return 'connections';
-  if (lower.includes('message')) return 'messages';
-  if (lower.includes('invitation')) return 'invitations';
-  if (lower.includes('endorsement')) return 'endorsements';
-  if (lower.includes('recommendation')) return 'recommendations';
-  if (lower.includes('position')) return 'positions';
-  if (lower.includes('education')) return 'education';
-  if (lower.includes('skill')) return 'skills';
-  if (lower.includes('company') && lower.includes('follow')) return 'company_follows';
-  if (lower.includes('profile')) return 'profile';
-  return null;
+  return detectContactFileType(filename);
 }
 
 // Processing order for dependency resolution
@@ -126,6 +117,21 @@ export async function runImportPipeline(
   const sortedFiles = files.sort(
     (a, b) => PROCESSING_ORDER.indexOf(a.fileType) - PROCESSING_ORDER.indexOf(b.fileType)
   );
+  // Only the captured Profile.csv identifies the owner for this export. A
+  // caller-supplied name (or the synthetic self contact) is not proof.
+  let verifiedSelfName = '';
+  const profileFile = sortedFiles.find(file => file.fileType === 'profile');
+  if (profileFile) {
+    const profileContent = snapshots
+      ? snapshots.get(profileFile.path)!.bytes.toString('utf-8')
+      : await readFile(profileFile.path, 'utf-8');
+    const profile = parseCsv(profileContent, { preambleLines: 0 });
+    const first = profile.rows[0]?.first_name?.trim();
+    const last = profile.rows[0]?.last_name?.trim();
+    if (profile.rows.length === 1 && profile.errors.length === 0 && first && last) {
+      verifiedSelfName = `${first} ${last}`;
+    }
+  }
 
   let processedCount = 0;
 
@@ -150,7 +156,13 @@ export async function runImportPipeline(
           fileResult = await importConnections(client, content, sessionId, selfContactId);
           break;
         case 'messages':
-          fileResult = await importMessages(client, content, sessionId, selfContactId, selfName);
+          if (verifiedSelfName) {
+            fileResult = await importMessages(client, content, sessionId, selfContactId, verifiedSelfName);
+          } else {
+            const rowCount = parseCsv(content).rowCount;
+            fileResult = { totalRows: rowCount, newRecords: 0, skippedRecords: rowCount,
+              errors: [{ file: file.filename, message: 'Messages skipped: a valid Profile.csv with owner first and last name is required' }] };
+          }
           break;
         case 'invitations':
           fileResult = await importInvitations(client, content, selfContactId);
@@ -190,7 +202,7 @@ export async function runImportPipeline(
       await updateImportFileRecord(client, fileRecordId, {
         recordCount: fileResult.totalRows,
         processedCount: fileResult.newRecords + (fileResult.updatedRecords ?? 0) + fileResult.skippedRecords,
-        status: fileResult.errors.length > 0 ? 'completed_with_errors' : 'completed',
+        status: file.fileType === 'profile' ? 'skipped' : fileResult.errors.length > 0 ? 'completed_with_errors' : 'completed',
         errors: fileResult.errors,
       });
     } catch (err) {
@@ -252,7 +264,7 @@ export async function runImportPipeline(
   });
 
   // Complete session
-  const finalStatus = allErrors.length > 0 && newRecords === 0 ? 'failed' : 'completed';
+  const finalStatus = allErrors.length > 0 ? 'failed' : 'completed';
   await completeSession(client, sessionId, finalStatus, allErrors);
 
   return {

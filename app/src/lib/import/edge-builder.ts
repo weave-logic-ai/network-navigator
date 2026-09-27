@@ -48,6 +48,25 @@ export async function createConnectionEdge(
   contactId: string,
   connectedOn?: string
 ): Promise<string> {
+  // Connections importer holds a row transaction. Serialize this logical edge
+  // there because the existing edges table has no source/target/type constraint.
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+    [`connection-edge:${selfContactId}:${contactId}`]);
+  const existing = await client.query<{ id: string }>(
+    `SELECT id FROM edges WHERE source_contact_id = $1 AND target_contact_id = $2
+     AND edge_type = 'CONNECTED_TO' LIMIT 1`,
+    [selfContactId, contactId]
+  );
+  if (existing.rows.length) {
+    if (connectedOn?.trim()) {
+      await client.query(
+        `UPDATE edges SET properties = jsonb_set(COALESCE(properties, '{}'::jsonb),
+           '{connected_on}', to_jsonb($2::text)) WHERE id = $1`,
+        [existing.rows[0].id, connectedOn.trim()]
+      );
+    }
+    return existing.rows[0].id;
+  }
   return createEdge(client, {
     sourceContactId: selfContactId,
     targetContactId: contactId,

@@ -2,30 +2,16 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { readdir, stat } from 'fs/promises';
-import { join, resolve, basename } from 'path';
+import { join, basename } from 'path';
 import { getPool } from '@/lib/db/client';
 import { runImportPipeline, detectFileType } from '@/lib/import/pipeline';
 import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
 import { query as dbQuery } from '@/lib/db/client';
+import { allowedImportDirectory, readAllowedImportFile, validateDirectoryBatch } from '@/lib/import/directory-path';
+import { MAX_TOTAL_SIZE, UploadLimitError } from '@/lib/import/upload-boundary';
+import { createHash } from 'crypto';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Allowed directory prefixes (absolute paths only)
-const ALLOWED_PREFIXES = [
-  '/home/aepod/dev/ctox/data/',
-  '/data/',
-];
-
-function isPathAllowed(dirPath: string): boolean {
-  const resolved = resolve(dirPath);
-
-  // Reject paths with traversal sequences
-  if (dirPath.includes('..')) {
-    return false;
-  }
-
-  return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
-}
 
 export async function POST(request: NextRequest) {
   let client;
@@ -50,28 +36,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Resolve relative "data/" paths to absolute
-    let resolvedPath = directoryPath;
-    if (directoryPath.startsWith('data/')) {
-      // Try container path first, then host path
-      const containerPath = resolve('/', directoryPath);
-      const hostPath = resolve('/home/aepod/dev/ctox', directoryPath);
-      resolvedPath = containerPath;
-      // Fallback to host path if container path doesn't match allowed prefixes
-      if (!isPathAllowed(containerPath) && isPathAllowed(hostPath)) {
-        resolvedPath = hostPath;
-      }
-    } else {
-      resolvedPath = resolve(directoryPath);
-    }
-
-    // --- Security: path allowlist ---
-
-    if (!isPathAllowed(resolvedPath)) {
+    const resolvedPath = await allowedImportDirectory(directoryPath);
+    if (!resolvedPath) {
       return NextResponse.json(
         {
           error: 'Directory path is not allowed',
-          details: 'Path must be under /home/aepod/dev/ctox/data/',
+          details: 'Path must be under an allowed data directory',
         },
         { status: 403 }
       );
@@ -110,12 +80,29 @@ export async function POST(request: NextRequest) {
 
     // Filter to files the pipeline recognizes
     const recognizedPaths: string[] = [];
+    const snapshots = new Map<string, { bytes: Buffer; sha256: string }>();
     const skippedFiles: string[] = [];
+    let remainingBytes = MAX_TOTAL_SIZE;
+
+    const selectedPaths = csvFiles.filter(name => detectFileType(name))
+      .map(name => join(resolvedPath, name));
+    try { await validateDirectoryBatch(resolvedPath, selectedPaths); }
+    catch (error) {
+      if (error instanceof UploadLimitError) throw error;
+      return NextResponse.json({ error: 'CSV file path is not allowed or changed' }, { status: 403 });
+    }
 
     for (const filename of csvFiles) {
       const fileType = detectFileType(filename);
       if (fileType) {
-        recognizedPaths.push(join(resolvedPath, filename));
+        const path = join(resolvedPath, filename);
+        let bytes: Buffer;
+        try { bytes = await readAllowedImportFile(resolvedPath, path, remainingBytes); }
+        catch (error) { if (error instanceof UploadLimitError) throw error;
+          return NextResponse.json({ error: `CSV file path is not allowed or changed: ${filename}` }, { status: 403 }); }
+        remainingBytes -= bytes.byteLength;
+        snapshots.set(path, { bytes, sha256: createHash('sha256').update(bytes).digest('hex') });
+        recognizedPaths.push(path);
       } else {
         skippedFiles.push(filename);
       }
@@ -140,7 +127,7 @@ export async function POST(request: NextRequest) {
       client,
       recognizedPaths,
       selfContactId,
-      selfName || ''
+      selfName || '', undefined, snapshots
     );
 
     // Trigger auto-scoring for recently created/updated contacts
@@ -167,6 +154,9 @@ export async function POST(request: NextRequest) {
       scoringTriggered,
     });
   } catch (error) {
+    if (error instanceof UploadLimitError) {
+      return NextResponse.json({ error: error.message }, { status: 413 });
+    }
     return NextResponse.json(
       {
         error: 'Import from directory failed',

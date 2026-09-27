@@ -79,7 +79,8 @@ export async function completeSession(
 ): Promise<void> {
   await client.query(
     `UPDATE import_sessions
-     SET status = $1, completed_at = now_utc(), errors = COALESCE($3, errors)
+     SET status = $1, completed_at = now_utc(), errors = COALESCE($3, errors),
+         error_count = CASE WHEN $3::jsonb IS NULL THEN error_count ELSE jsonb_array_length($3::jsonb) END
      WHERE id = $2`,
     [status, sessionId, errors ? JSON.stringify(errors) : null]
   );

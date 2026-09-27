@@ -94,6 +94,7 @@ export async function POST(request: NextRequest) {
     const [sessionCleanup, fileCleanup] = await Promise.allSettled([
       sessionId ? updateImportSession(sessionId, {
         status: 'failed', completed_at: new Date(),
+        error_count: 1,
         errors: [{ message: 'Upload failed before processing' }],
       }) : Promise.resolve(),
       sessionDir && createdSessionDir ? rm(sessionDir, { recursive: true, force: true }) : Promise.resolve(),

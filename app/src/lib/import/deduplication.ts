@@ -6,13 +6,39 @@ import { DedupResult, FieldChange } from './types';
 import { reconcileContactIdentity } from '../contacts/identity-lifecycle';
 import type { ContactIdentityRow } from '../contacts/identity';
 
+// Keep the connection import and historical lookup on the same identity rule.
+// In particular, /profile/view is identified by its id query parameter.
+export function normalizedLinkedInProfileUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    const host = url.hostname.toLowerCase();
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port
+      || (host !== 'linkedin.com' && !host.endsWith('.linkedin.com'))) return null;
+    const path = url.pathname.replace(/\/+$/, '');
+    if (!/^\/(?:in|pub|profile)\/[\w%.-]+(?:\/.*)?$/i.test(path)) return null;
+    const legacyView = /^\/profile\/view$/i.test(path);
+    const id = url.searchParams.get('id')?.trim();
+    if (legacyView && (!id || !/^[\w.-]+$/.test(id))) return null;
+    const canonicalHost = host === 'www.linkedin.com' ? 'linkedin.com' : host;
+    return `https://${canonicalHost}${path.toLowerCase()}${legacyView ? `?id=${encodeURIComponent(id!)}` : ''}`;
+  } catch { return null; }
+}
+
+function legacyUrlPattern(canonical: string): string {
+  const url = new URL(canonical);
+  const host = url.hostname === 'linkedin.com' ? '(www\\.)?linkedin\\.com' : url.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const path = url.pathname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return `^https?://${host}${path}(?:[/?#]|$)`;
+}
+
 export function computeDedupHash(
   linkedinUrl: string,
   fullName: string,
   title: string,
-  companyName: string
+  companyName: string,
+  email: string = ''
 ): string {
-  const input = [linkedinUrl, fullName, title, companyName]
+  const input = [linkedinUrl, fullName, title, companyName, email]
     .map((s) => (s || '').toLowerCase().trim())
     .join('|');
   return createHash('sha256').update(input).digest('hex');
@@ -95,20 +121,30 @@ export async function deduplicateContact(
   client: PoolClient,
   incoming: IncomingContact
 ): Promise<DedupResult> {
-  // Check existing contacts by linkedin_url (primary dedup key)
-  const existingResult = await client.query<ExistingContact>(
+  const linkedinUrl = normalizedLinkedInProfileUrl(incoming.linkedinUrl);
+  if (!linkedinUrl) throw new Error('Invalid LinkedIn profile URL');
+  // Search historical spellings even when a canonical row exists. Otherwise
+  // an old duplicate remains invisible and an arbitrary contact receives data.
+  let existingResult = await client.query<ExistingContact>(
     `SELECT id, linkedin_url, first_name, last_name, full_name, headline, title,
             current_company, current_company_id, location, about, email, phone,
             tags, dedup_hash
-     FROM contacts WHERE linkedin_url = $1`,
-    [incoming.linkedinUrl]
+     FROM contacts WHERE lower(btrim(linkedin_url)) ~ $1
+     ORDER BY id`,
+    [legacyUrlPattern(linkedinUrl)]
   );
+  existingResult.rows = existingResult.rows.filter(row => normalizedLinkedInProfileUrl(row.linkedin_url) === linkedinUrl);
+  if (existingResult.rows.length > 1) {
+    const ids = existingResult.rows.map(row => row.id).sort();
+    throw new Error(`LinkedIn URL collision: ${ids.length} contacts match this profile (${ids.join(', ')}); resolve duplicates before import`);
+  }
 
   const dedupHash = computeDedupHash(
-    incoming.linkedinUrl,
+    linkedinUrl,
     incoming.fullName || '',
     incoming.title || '',
-    incoming.currentCompany || ''
+    incoming.currentCompany || '',
+    incoming.email || ''
   );
 
   if (existingResult.rows.length === 0) {
@@ -119,9 +155,10 @@ export async function deduplicateContact(
         current_company, current_company_id, location, about, email, phone,
         tags, dedup_hash
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      ON CONFLICT (linkedin_url) DO NOTHING
       RETURNING id`,
       [
-        incoming.linkedinUrl,
+        linkedinUrl,
         incoming.firstName || null,
         incoming.lastName || null,
         incoming.fullName || null,
@@ -138,18 +175,30 @@ export async function deduplicateContact(
       ]
     );
 
-    return {
-      action: 'created',
-      contactId: insertResult.rows[0].id,
-      changes: [],
-      isJobChange: false,
-    };
+    if (insertResult.rows.length > 0) {
+      return {
+        action: 'created',
+        contactId: insertResult.rows[0].id,
+        changes: [],
+        isJobChange: false,
+      };
+    }
+    // Another import inserted the same canonical URL while we were reading.
+    existingResult = await client.query<ExistingContact>(
+      `SELECT id, linkedin_url, first_name, last_name, full_name, headline, title,
+              current_company, current_company_id, location, about, email, phone,
+              tags, dedup_hash
+       FROM contacts WHERE linkedin_url = $1`,
+      [linkedinUrl]
+    );
+    if (existingResult.rows.length === 0) throw new Error('Concurrent contact insert could not be reread');
   }
 
   const existing = existingResult.rows[0];
 
-  // Check if the dedup hash is the same (no changes)
-  if (existing.dedup_hash === dedupHash) {
+  // Compare supplied fields even when an older hash omitted them.
+  const changes = computeFieldDiff(existing, incoming);
+  if (existing.dedup_hash === dedupHash && changes.length === 0) {
     return {
       action: 'skipped',
       contactId: existing.id,
@@ -157,9 +206,6 @@ export async function deduplicateContact(
       isJobChange: false,
     };
   }
-
-  // Compute field-level diff
-  const changes = computeFieldDiff(existing, incoming);
 
   if (changes.length === 0) {
     // Hash changed but no meaningful field changes (e.g., normalization difference)

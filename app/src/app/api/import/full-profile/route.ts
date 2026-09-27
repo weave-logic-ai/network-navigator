@@ -2,21 +2,13 @@
 // Parses all CSV files to build a versioned owner profile for ICP/niche context
 
 import { NextRequest, NextResponse } from 'next/server';
-import { stat } from 'fs/promises';
-import { resolve } from 'path';
+import { readdir, stat } from 'fs/promises';
+import { join } from 'path';
 import { getPool } from '@/lib/db/client';
-import { importFullProfile } from '@/lib/import/profile-importer';
-
-const ALLOWED_PREFIXES = [
-  '/home/aepod/dev/ctox/data/',
-  '/data/',
-];
-
-function isPathAllowed(dirPath: string): boolean {
-  const resolved = resolve(dirPath);
-  if (dirPath.includes('..')) return false;
-  return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
-}
+import { importFullProfile, OwnerProfileImportError } from '@/lib/import/profile-importer';
+import { allowedImportDirectory, readAllowedImportFile, validateDirectoryBatch } from '@/lib/import/directory-path';
+import { MAX_TOTAL_SIZE, UploadLimitError } from '@/lib/import/upload-boundary';
+import { detectDeepFileType } from '@/lib/import/profile-importer';
 
 // GET - fetch current owner profile
 export async function GET() {
@@ -54,23 +46,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Resolve relative "data/" paths
-    let resolvedPath = directoryPath;
-    if (directoryPath.startsWith('data/')) {
-      // Try container path first, then host path
-      const containerPath = resolve('/', directoryPath);
-      const hostPath = resolve('/home/aepod/dev/ctox', directoryPath);
-      resolvedPath = containerPath;
-      if (!isPathAllowed(containerPath) && isPathAllowed(hostPath)) {
-        resolvedPath = hostPath;
-      }
-    } else {
-      resolvedPath = resolve(directoryPath);
-    }
-
-    if (!isPathAllowed(resolvedPath)) {
+    const resolvedPath = await allowedImportDirectory(directoryPath);
+    if (!resolvedPath) {
       return NextResponse.json(
-        { error: 'Directory path not allowed', details: 'Path must be under /home/aepod/dev/ctox/data/' },
+        { error: 'Directory path not allowed', details: 'Path must be under an allowed data directory' },
         { status: 403 }
       );
     }
@@ -93,11 +72,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const entries = await readdir(resolvedPath);
+    if (!entries.some(name => name.toLowerCase() === 'profile.csv')) {
+      return NextResponse.json({ error: 'Profile.csv is required for owner profile import' }, { status: 400 });
+    }
+    const snapshots = new Map<string, Buffer>();
+    let remainingBytes = MAX_TOTAL_SIZE;
+    const selectedNames = entries.filter(name => detectDeepFileType(name));
+    try { await validateDirectoryBatch(resolvedPath, selectedNames.map(name => join(resolvedPath, name))); }
+    catch (error) {
+      if (error instanceof UploadLimitError) throw error;
+      return NextResponse.json({ error: 'CSV file path is not allowed or changed' }, { status: 403 });
+    }
+    for (const name of selectedNames) {
+      try {
+        const bytes = await readAllowedImportFile(resolvedPath, join(resolvedPath, name), remainingBytes);
+        snapshots.set(name, bytes);
+        remainingBytes -= bytes.byteLength;
+      } catch (error) {
+        if (error instanceof UploadLimitError) throw error;
+        if (name.toLowerCase() === 'profile.csv') {
+          return NextResponse.json({ error: `CSV file path is not allowed or changed: ${name}` }, { status: 403 });
+        }
+        // The importer receives the complete directory listing. A missing
+        // supplemental snapshot becomes a reported skipped file there.
+      }
+    }
+
     // Run the full profile import
     const pool = getPool();
     client = await pool.connect();
 
-    const result = await importFullProfile(client, resolvedPath);
+    const result = await importFullProfile(client, resolvedPath, snapshots, entries);
 
     return NextResponse.json({
       data: {
@@ -106,13 +112,18 @@ export async function POST(request: NextRequest) {
         selfName: result.selfName,
         importedFiles: result.importedFiles,
         skippedFiles: result.skippedFiles,
+        diagnostics: result.diagnostics,
         totalFiles: result.importedFiles.length,
       },
     });
   } catch (error) {
+    if (error instanceof UploadLimitError) {
+      return NextResponse.json({ error: error.message }, { status: 413 });
+    }
     return NextResponse.json(
-      { error: 'Full profile import failed', details: error instanceof Error ? error.message : undefined },
-      { status: 500 }
+      { error: error instanceof OwnerProfileImportError ? error.message : 'Full profile import failed',
+        details: error instanceof Error ? error.message : undefined },
+      { status: error instanceof OwnerProfileImportError ? 422 : 500 }
     );
   } finally {
     if (client) client.release();

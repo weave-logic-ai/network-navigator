@@ -2,8 +2,11 @@ import { randomUUID } from 'crypto';
 import { open } from 'fs/promises';
 import { basename, relative, resolve, sep } from 'path';
 import { MIMEType } from 'node:util';
+import { detectContactFileType } from './mapping-preview';
 
-export const MAX_FILES = 10;
+// Covers every named owner export CSV (including legacy aliases) with room for
+// contact CSVs; the independent 100 MB aggregate cap still bounds memory use.
+export const MAX_FILES = 32;
 export const MAX_FILE_SIZE = 50 * 1024 * 1024;
 export const MAX_TOTAL_SIZE = 100 * 1024 * 1024;
 // Allow multipart framing and field headers, but cap it independently of Content-Length.
@@ -83,6 +86,7 @@ export function validateCsv(file: File): void {
     throw new UploadValidationError('Only CSV content types are accepted');
   }
   if (file.size > MAX_FILE_SIZE) throw new UploadLimitError('CSV file exceeds 50 MB limit');
+  if (!detectContactFileType(file.name)) throw new UploadValidationError('Unsupported LinkedIn CSV filename');
 }
 
 export function validateCsvBatch(entries: FormDataEntryValue[]): File[] {

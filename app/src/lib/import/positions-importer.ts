@@ -48,48 +48,53 @@ export async function importPositions(
       const endDate = endDateStr ? new Date(endDateStr) : null;
       const isCurrent = !endDate || isNaN(endDate.getTime());
 
-      // Resolve company
-      const companyRecord = await companyResolver.resolve(companyName);
-
-      // Insert work history
-      await client.query(
-        `INSERT INTO work_history (contact_id, company_id, company_name, title, start_date, end_date, is_current, description, source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'csv')`,
-        [
-          selfContactId,
-          companyRecord?.id || null,
-          companyName || 'Unknown',
-          title || 'Unknown',
-          startDate && !isNaN(startDate.getTime()) ? startDate : null,
-          endDate && !isNaN(endDate.getTime()) ? endDate : null,
-          isCurrent,
-          description || null,
-        ]
-      );
-
-      // Create appropriate edge
-      if (companyRecord) {
-        if (isCurrent) {
-          await createWorksAtEdge(client, selfContactId, companyRecord.id, title);
-        } else {
-          await createWorkedAtEdge(
-            client,
-            selfContactId,
-            companyRecord.id,
-            title,
-            startDateStr,
-            endDateStr
-          );
+      const normalizedStart = startDate && !isNaN(startDate.getTime()) ? startDate : null;
+      const normalizedEnd = endDate && !isNaN(endDate.getTime()) ? endDate : null;
+      const values = [selfContactId, companyName || 'Unknown', title || 'Unknown', normalizedStart,
+        normalizedEnd, isCurrent, description || null];
+      await client.query('BEGIN');
+      try {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [JSON.stringify(values)]);
+        const existing = await client.query(
+          `SELECT id FROM work_history WHERE contact_id = $1 AND company_name = $2 AND title = $3
+           AND start_date IS NOT DISTINCT FROM $4 AND end_date IS NOT DISTINCT FROM $5
+           AND is_current = $6 AND description IS NOT DISTINCT FROM $7 AND source = 'csv' LIMIT 1`, values
+        );
+        if (existing.rows.length) {
+          result.skippedRecords++;
+          await client.query('COMMIT');
+          continue;
         }
-      }
+        const companyRecord = await companyResolver.resolve(companyName);
+        await client.query(
+          `INSERT INTO work_history (contact_id, company_id, company_name, title, start_date, end_date, is_current, description, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'csv')`,
+          [selfContactId, companyRecord?.id || null, companyName || 'Unknown', title || 'Unknown',
+            normalizedStart, normalizedEnd, isCurrent, description || null]
+        );
 
-      result.newRecords++;
+        // Create appropriate edge only for a new position.
+        if (companyRecord) {
+          if (isCurrent) {
+            await createWorksAtEdge(client, selfContactId, companyRecord.id, title);
+          } else {
+            await createWorkedAtEdge(client, selfContactId, companyRecord.id, title, startDateStr, endDateStr);
+          }
+        }
+        await client.query('COMMIT');
+        result.newRecords++;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        companyResolver.clearCache();
+        throw error;
+      }
     } catch (err) {
       result.errors.push({
         file: 'Positions.csv',
         row: i + 1,
         message: err instanceof Error ? err.message : 'Unknown error',
       });
+      result.skippedRecords++;
     }
   }
 
