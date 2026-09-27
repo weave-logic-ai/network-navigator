@@ -21,6 +21,9 @@ interface PipelineContact {
   state: string;
   last_action_at: string | null;
   outreach_state_id: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  event_version: number;
 }
 
 const STAGES = [
@@ -63,10 +66,11 @@ function displayName(contact: PipelineContact): string {
 interface KanbanColumnProps {
   stage: string;
   contacts: PipelineContact[];
-  onMoveContact: (contactId: string, outreachStateId: string, newStage: string) => void;
+  showCampaign?: boolean;
+  onMoveContact: (contactId: string, outreachStateId: string, campaignId: string | null, newStage: string, eventVersion: number) => void;
 }
 
-export function KanbanColumn({ stage, contacts, onMoveContact }: KanbanColumnProps) {
+export function KanbanColumn({ stage, contacts, showCampaign = false, onMoveContact }: KanbanColumnProps) {
   const otherStages = STAGES.filter((s) => s !== stage);
 
   return (
@@ -79,13 +83,18 @@ export function KanbanColumn({ stage, contacts, onMoveContact }: KanbanColumnPro
       </div>
       <div className="flex flex-col gap-2">
         {contacts.map((contact) => (
-          <Card key={contact.id} className="shadow-sm">
+          <Card key={contact.outreach_state_id} className="shadow-sm">
             <CardHeader className="p-3 pb-1">
               <CardTitle className="text-sm font-medium leading-tight">
                 {displayName(contact)}
               </CardTitle>
             </CardHeader>
             <CardContent className="px-3 pb-3 pt-0">
+              {showCampaign && (
+                <p className="mb-1 text-xs font-medium text-foreground" aria-label={`Campaign: ${contact.campaign_name ?? "No campaign"}`}>
+                  Campaign: {contact.campaign_name ?? "No campaign"}
+                </p>
+              )}
               {contact.title && (
                 <p className="text-xs text-muted-foreground truncate">
                   {contact.title}
@@ -109,7 +118,7 @@ export function KanbanColumn({ stage, contacts, onMoveContact }: KanbanColumnPro
                 </div>
                 <Select
                   onValueChange={(val) =>
-                    onMoveContact(contact.id, contact.outreach_state_id, val)
+                    onMoveContact(contact.id, contact.outreach_state_id, contact.campaign_id, val, contact.event_version)
                   }
                 >
                   <SelectTrigger className="h-6 w-[90px] text-[10px]">

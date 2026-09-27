@@ -3,8 +3,11 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { listCampaigns, createCampaign } from '@/lib/db/queries/outreach';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const campaigns = await listCampaigns();
     return NextResponse.json({ data: campaigns });
@@ -17,6 +20,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = await request.json();
 

@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { listContacts, createContact } from '@/lib/db/queries/contacts';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -14,6 +15,8 @@ function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const { searchParams } = new URL(request.url);
 
@@ -32,6 +35,10 @@ export async function GET(request: NextRequest) {
     const tags = tagsParam ? tagsParam.split(',').map((t) => t.trim()) : undefined;
     const icpId = searchParams.get('icpId') || undefined;
     const nicheId = searchParams.get('nicheId') || undefined;
+    const campaignId = searchParams.get('campaign_id') || undefined;
+    if (campaignId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(campaignId)) {
+      return NextResponse.json({ error: 'Invalid campaign ID' }, { status: 400 });
+    }
 
     const result = await listContacts({
       page,
@@ -45,6 +52,7 @@ export async function GET(request: NextRequest) {
       search,
       icpId,
       nicheId,
+      campaignId,
     });
 
     return NextResponse.json({

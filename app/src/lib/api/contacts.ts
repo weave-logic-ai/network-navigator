@@ -12,6 +12,7 @@ export function buildContactsUrl(params: ContactListParams = {}): string {
   if (params.tier) searchParams.set("tier", params.tier);
   if (params.enrichmentStatus)
     searchParams.set("enrichment_status", params.enrichmentStatus);
+  if (params.campaignId) searchParams.set("campaign_id", params.campaignId);
 
   const qs = searchParams.toString();
   return `/api/contacts${qs ? `?${qs}` : ""}`;

@@ -65,7 +65,7 @@ export function ContactsTable() {
     );
   }
 
-  if (!isLoading && contacts.length === 0 && !params.search && !params.tier && !params.enrichmentStatus) {
+  if (!isLoading && contacts.length === 0 && !params.search && !params.tier && !params.enrichmentStatus && !params.campaignId) {
     return (
       <div className="rounded-md border p-12 text-center">
         <p className="mb-4 text-muted-foreground">
@@ -97,11 +97,14 @@ export function ContactsTable() {
               ? status : undefined,
           })
         }
+        campaignId={params.campaignId ?? ""}
+        onCampaignChange={(campaignId) => updateParams({ campaignId: campaignId === "latest" ? undefined : campaignId })}
         onClearFilters={() =>
           updateParams({
             search: undefined,
             tier: undefined,
             enrichmentStatus: undefined,
+            campaignId: undefined,
           })
         }
       />
@@ -123,7 +126,8 @@ export function ContactsTable() {
                       {col.key === "tier" ? "Tier" : col.key === "compositeScore" ? "Score /100" : col.label}
                       <ArrowUpDown aria-hidden="true" className="h-3 w-3 text-muted-foreground" />
                     </button>
-                  ) : col.label}
+                  ) : col.key === "outreachStage" && params.campaignId
+                    ? "Outreach stage (selected campaign)" : col.label}
                 </TableHead>
               ))}
             </TableRow>
@@ -193,7 +197,7 @@ export function ContactsTable() {
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">
-                        {contact.outreachState ?? "not_started"}
+                        {contact.outreachStage ?? "No outreach"}
                       </Badge>
                     </TableCell>
                   </TableRow>

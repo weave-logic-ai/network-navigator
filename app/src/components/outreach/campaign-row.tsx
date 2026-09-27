@@ -27,14 +27,10 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "outline" | "dest
 interface CampaignRowProps {
   campaign: Campaign;
   onEdit: (campaign: Campaign) => void;
+  onAudience: (campaign: Campaign) => void;
 }
 
-export function CampaignRow({ campaign, onEdit }: CampaignRowProps) {
-  const responseRate =
-    campaign.sent_count > 0
-      ? ((campaign.response_count / campaign.sent_count) * 100).toFixed(1)
-      : "0.0";
-
+export function CampaignRow({ campaign, onEdit, onAudience }: CampaignRowProps) {
   return (
     <TableRow>
       <TableCell className="font-medium">{campaign.name}</TableCell>
@@ -46,8 +42,8 @@ export function CampaignRow({ campaign, onEdit }: CampaignRowProps) {
       <TableCell className="text-right">{campaign.target_count}</TableCell>
       <TableCell className="text-right">{campaign.sent_count}</TableCell>
       <TableCell className="text-right">{campaign.response_count}</TableCell>
-      <TableCell className="text-right">{responseRate}%</TableCell>
       <TableCell>
+        <Button variant="outline" size="sm" onClick={() => onAudience(campaign)}>Audience</Button>
         <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onEdit(campaign)}>
           <Pencil className="h-3.5 w-3.5" />
         </Button>

@@ -1,38 +1,18 @@
 // GET /api/outreach/pipeline - contacts grouped by outreach stage for Kanban
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getPipelineContacts, type PipelineContact } from '@/lib/db/queries/outreach';
-
-const PIPELINE_STAGES = [
-  'not_started', 'contacted', 'replied',
-  'meeting_booked', 'won', 'lost',
-] as const;
-
-// Map DB state values to pipeline stage names (DB uses sent/opened/etc.)
-function mapStateToPipelineStage(state: string): string {
-  switch (state) {
-    case 'not_started':
-    case 'queued':
-      return 'not_started';
-    case 'sent':
-    case 'opened':
-      return 'contacted';
-    case 'replied':
-    case 'accepted':
-      return 'replied';
-    case 'declined':
-    case 'bounced':
-    case 'opted_out':
-      return 'lost';
-    default:
-      return state;
-  }
-}
+import { getPipelineContacts, type PipelineContact, PIPELINE_STAGES } from '@/lib/db/queries/outreach';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const { searchParams } = new URL(request.url);
     const campaignId = searchParams.get('campaign_id') || undefined;
+    if (campaignId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(campaignId)) {
+      return NextResponse.json({ error: 'Invalid campaign ID' }, { status: 400 });
+    }
 
     const contacts = await getPipelineContacts(campaignId);
 
@@ -43,12 +23,9 @@ export async function GET(request: NextRequest) {
     }
 
     for (const contact of contacts) {
-      const stage = mapStateToPipelineStage(contact.state);
+      const stage = contact.pipeline_stage;
       if (stages[stage]) {
         stages[stage].push(contact);
-      } else {
-        // Fallback for custom states like meeting_booked, won
-        stages[stage] = [contact];
       }
     }
 

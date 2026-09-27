@@ -5,12 +5,25 @@ import { listContacts } from '@/lib/db/queries/contacts';
 import { query } from '@/lib/db/client';
 
 jest.mock('@/lib/db/client', () => ({ query: jest.fn() }));
+jest.mock('@/lib/auth/local-request-boundary', () => ({ requireLocalDashboardRequest: jest.fn().mockResolvedValue(null) }));
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
 const request = (url: string) => ({ url }) as NextRequest;
 
 describe('Contacts list contract', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  it('passes a selected campaign from the table URL into the scoped stage query', async () => {
+    const campaignId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    const response = await GET(request(`http://localhost${buildContactsUrl({ campaignId })}`));
+    expect(response.status).toBe(200);
+    expect(mockQuery.mock.calls[0][0]).toContain('member.campaign_id = $1');
+    expect(mockQuery.mock.calls[0][1]).toEqual([campaignId]);
+    expect(mockQuery.mock.calls[1][0]).toContain('AND campaign_id = $2');
+    expect(mockQuery.mock.calls[1][1]).toEqual([campaignId, campaignId, 20, 0]);
+  });
 
   it('sends the table sort and filter names through the route to the query', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] } as never)
@@ -61,7 +74,10 @@ describe('Contacts list contract', () => {
     expect(data).toContain('FROM enrichment_transactions et');
     expect(data).toContain('cs.referral_tier');
     expect(data).toContain('os.state AS outreach_state');
-    expect(data).toContain('ORDER BY updated_at DESC, id DESC LIMIT 1');
+    expect(data).toContain('presentation.pipeline_stage AS outreach_stage');
+    expect(data).toContain('ORDER BY event_order DESC LIMIT 1');
+    expect(data).toContain('MAX(oe.event_order)');
+    expect(data).not.toContain('MAX(oe.created_at)');
   });
 
   it('searches the first and last name used by the table fallback', async () => {

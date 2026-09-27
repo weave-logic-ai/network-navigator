@@ -5,16 +5,19 @@ import { POST as applyEnrichment } from '@/app/api/enrichment/apply/route';
 import { query, shutdown } from '@/lib/db/client';
 import { listContacts } from '@/lib/db/queries/contacts';
 import { recordTransaction } from '@/lib/db/queries/enrichment';
+import { createOperatorSession, OPERATOR_COOKIE } from '@/lib/auth/operator-session';
 
 jest.mock('@/lib/scoring/auto-score', () => ({ triggerAutoScore: jest.fn() }));
 
 const safeDatabase = process.env.DATABASE_URL ===
   'postgresql://u2test@127.0.0.1:55432/u2_fixture';
 const integration = safeDatabase ? describe : describe.skip;
+const priorOperatorSecret = process.env.LOCAL_OPERATOR_SECRET;
 
 integration('Contacts list on disposable Postgres', () => {
   beforeAll(async () => {
-    await query(`DROP TABLE IF EXISTS outreach_states, person_enrichments, enrichment_transactions,
+    process.env.LOCAL_OPERATOR_SECRET = 'synthetic-operator-secret-for-u2-tests';
+    await query(`DROP TABLE IF EXISTS outreach_events, outreach_states, person_enrichments, enrichment_transactions,
       enrichment_providers, contact_scores, contacts, companies;
       CREATE TABLE companies (id uuid PRIMARY KEY, name text, industry text);
       CREATE TABLE contacts (id uuid PRIMARY KEY, full_name text, first_name text, last_name text,
@@ -24,7 +27,11 @@ integration('Contacts list on disposable Postgres', () => {
       CREATE TABLE contact_scores (contact_id uuid PRIMARY KEY, composite_score real, tier text,
         referral_likelihood real, referral_tier text);
       CREATE TABLE person_enrichments (contact_id uuid, enriched_fields text[], expires_at timestamptz);
-      CREATE TABLE outreach_states (id uuid PRIMARY KEY, contact_id uuid, state text, updated_at timestamptz);
+      CREATE TABLE outreach_states (id uuid PRIMARY KEY, contact_id uuid, campaign_id uuid,
+        state text, last_action_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz);
+      CREATE TABLE outreach_events (id uuid PRIMARY KEY, outreach_state_id uuid, event_type text,
+        event_order bigint GENERATED ALWAYS AS IDENTITY,
+        event_data jsonb, created_at timestamptz);
       CREATE TABLE enrichment_providers (id uuid PRIMARY KEY, name text);
       CREATE TABLE enrichment_transactions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         provider_id uuid NOT NULL REFERENCES enrichment_providers(id), contact_id uuid REFERENCES contacts(id),
@@ -53,12 +60,16 @@ integration('Contacts list on disposable Postgres', () => {
       ('00000000-0000-0000-0000-000000000003',ARRAY['email'],'2020-01-01'),
       ('00000000-0000-0000-0000-000000000004',ARRAY['location'],'2999-01-01');
       INSERT INTO enrichment_providers VALUES ('20000000-0000-0000-0000-000000000001','fixture');
-      INSERT INTO outreach_states VALUES
-      ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','queued','2024-01-01'),
-      ('10000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000001','replied','2024-01-02');`);
+      INSERT INTO outreach_states (id, contact_id, state, created_at, updated_at) VALUES
+      ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','queued','2024-01-01','2024-01-01'),
+      ('10000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000001','replied','2024-01-02','2024-01-02');`);
   });
 
-  afterAll(async () => { await shutdown(); });
+  afterAll(async () => {
+    if (priorOperatorSecret === undefined) delete process.env.LOCAL_OPERATOR_SECRET;
+    else process.env.LOCAL_OPERATOR_SECRET = priorOperatorSecret;
+    await shutdown();
+  });
 
   it.each([
     ['tier', ['Dee', 'Cal', 'Bea', 'Ada', 'Zed'], ['Ada', 'Bea', 'Cal', 'Dee', 'Zed']],
@@ -79,7 +90,11 @@ integration('Contacts list on disposable Postgres', () => {
     'returns 200 and created_at order for inherited API sort key %s',
     async (sort) => {
       const url = `http://localhost/api/contacts?${new URLSearchParams({ sort_by: sort })}`;
-      const response = await GET({ url } as NextRequest);
+      const cookie = await createOperatorSession();
+      const response = await GET(new (await import('../../app/node_modules/next/server')).NextRequest(url, {
+        headers: { host: 'localhost', origin: 'http://localhost', 'sec-fetch-site': 'same-origin',
+          cookie: `${OPERATOR_COOKIE}=${cookie}` },
+      }));
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.data.map((contact: { fullName: string }) => contact.fullName))
