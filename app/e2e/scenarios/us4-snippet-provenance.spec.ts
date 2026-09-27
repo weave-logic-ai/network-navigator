@@ -1,10 +1,12 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { expect, test } from '@playwright/test';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { expect, request as requestFactory } from '@playwright/test';
 import { Pool } from 'pg';
-import { createScenarioFixture, type ScenarioFixture } from './helpers';
+import { createScenarioFixture, focusScenarioTarget, scenarioTest as test, type ScenarioFixture } from './helpers';
 
 test.describe.serial('US-4 image evidence provenance', () => {
-  test.skip(!process.env.E2E_DATABASE_URL, 'Requires a dedicated E2E_DATABASE_URL');
+  test.skip(!process.env.E2E_DATABASE_URL || !process.env.E2E_OPERATOR_SECRET ||
+    !process.env.E2E_EXTENSION_ORIGIN,
+  'Requires a dedicated E2E_DATABASE_URL, E2E_OPERATOR_SECRET and allowlisted E2E_EXTENSION_ORIGIN');
 
   let fixture: ScenarioFixture;
   let pool: Pool;
@@ -18,7 +20,7 @@ test.describe.serial('US-4 image evidence provenance', () => {
     fixture = await createScenarioFixture();
     pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL });
     extensionId = randomUUID();
-    token = `ext_${randomUUID()}`;
+    token = `ext_${randomBytes(32).toString('base64url')}`;
     await pool.query(
       `INSERT INTO extension_tokens (token_hash, extension_id, display_prefix)
        VALUES ($1, $2, $3)`,
@@ -40,16 +42,14 @@ test.describe.serial('US-4 image evidence provenance', () => {
     }
   });
 
-  test('an image over 1 MB saves, renders, and links to its target', async ({ request, page }) => {
+  test('an image over 1 MB saves, renders, and links to its target', async ({ scenarioRequest: request, page }) => {
     const targetResponse = await request.post('/api/targets', {
       data: { kind: 'contact', id: fixture.firstContactId },
     });
     expect(targetResponse.status(), await targetResponse.text()).toBe(200);
     targetId = (await targetResponse.json()).data.id as string;
 
-    const selected = await request.put('/api/targets/state', {
-      data: { secondaryTargetId: targetId },
-    });
+    const selected = await focusScenarioTarget(request, targetId);
     expect(selected.ok()).toBe(true);
 
     // A valid tiny PNG plus trailing bytes exercises the database's 5 MB
@@ -59,17 +59,30 @@ test.describe.serial('US-4 image evidence provenance', () => {
       'base64'
     );
     const image = Buffer.concat([png, Buffer.alloc(1_100_000 - png.length)]);
-    const saved = await request.post('/api/extension/snippet', {
-      headers: { 'x-extension-token': token },
-      data: {
-        kind: 'image', targetKind: 'contact', targetId,
-        imageBytes: image.toString('base64'), mimeType: 'image/png',
-        sourceUrl: 'https://www.sec.gov/Archives/fixture-10k',
-        pageType: 'DOCUMENT', tagSlugs: [], note: 'Scenario evidence',
-      },
+    // Extension-token routes have a separate principal from the dashboard.
+    const extensionRequest = await requestFactory.newContext({
+      baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000',
+      extraHTTPHeaders: { origin: process.env.E2E_EXTENSION_ORIGIN! },
     });
-    expect(saved.status(), await saved.text()).toBe(200);
-    const result = await saved.json() as { causalNodeId: string; blobId: string; success: boolean };
+    let savedStatus = 0;
+    let savedText = '';
+    try {
+      const saved = await extensionRequest.post('/api/extension/snippet', {
+        headers: { 'x-extension-token': token },
+        data: {
+          kind: 'image', targetKind: 'contact', targetId,
+          imageBytes: image.toString('base64'), mimeType: 'image/png',
+          sourceUrl: 'https://www.sec.gov/Archives/fixture-10k',
+          pageType: 'DOCUMENT', tagSlugs: [], note: 'Scenario evidence',
+        },
+      });
+      savedStatus = saved.status();
+      savedText = await saved.text();
+    } finally {
+      await extensionRequest.dispose();
+    }
+    expect(savedStatus, savedText).toBe(200);
+    const result = JSON.parse(savedText) as { causalNodeId: string; blobId: string; success: boolean };
     expect(result.success).toBe(true);
     snippetNodeId = result.causalNodeId;
     blobId = result.blobId;

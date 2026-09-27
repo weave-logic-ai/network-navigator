@@ -102,7 +102,8 @@ it('previews different lens criteria and never writes or emits', async () => {
   expect(a.score.referralDimensions).toHaveLength(6);
   expect(a.basis.referralBaselines).toEqual({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 });
   expect(mockedLens).toHaveBeenCalledTimes(2);
-  expect(mockedLens).toHaveBeenNthCalledWith(1, targetA, snapshotClient);
+  expect(mockedLens).toHaveBeenNthCalledWith(1, targetA,
+    { tenantId: 'tenant-a', ownerId: 'owner-a' }, snapshotClient);
   expect(mockedQueries.getContactScoringData).toHaveBeenCalledWith(contactId, snapshotClient);
   expect(resolveTaxonomyChain).toHaveBeenCalledWith('icp-a', snapshotClient);
   expect(mockedQueries.getDefaultWeightProfile).toHaveBeenCalledWith(snapshotClient);

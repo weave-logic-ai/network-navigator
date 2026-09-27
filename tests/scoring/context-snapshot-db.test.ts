@@ -41,7 +41,10 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
     RESEARCH_FLAGS.targets = true;
     await pool.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;
       CREATE TABLE owner_profiles (id uuid, is_current boolean);
-      CREATE TABLE research_target_state (user_id uuid, last_used_lens_id uuid);
+      CREATE TABLE research_target_state (
+        tenant_id uuid, user_id uuid, primary_target_id uuid,
+        secondary_target_id uuid, last_used_lens_id uuid
+      );
       CREATE TABLE research_targets (id uuid, tenant_id uuid, kind text, owner_id uuid, contact_id uuid);
       CREATE TABLE research_lenses (
         id uuid, tenant_id uuid, user_id uuid, name text, primary_target_id uuid,
@@ -127,7 +130,9 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
     `);
     await pool.query(`
       INSERT INTO owner_profiles VALUES ('550e8400-e29b-41d4-a716-446655440030', true);
-      INSERT INTO research_target_state VALUES ('550e8400-e29b-41d4-a716-446655440030', '${lensA}');
+      INSERT INTO research_target_state
+        (tenant_id, user_id, primary_target_id, last_used_lens_id)
+        VALUES ('${tenantA}', '${ownerA}', '${targetId}', '${lensA}');
       INSERT INTO research_lenses VALUES
         ('${lensA}', '${tenantA}', '${ownerA}', 'A', '${targetId}', NULL, '{}', true, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', NULL),
         ('${lensB}', '${tenantA}', '${ownerA}', 'B', '${targetId}', NULL, '{}', false, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', NULL);

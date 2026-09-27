@@ -723,29 +723,32 @@ async function flushSnippetQueueOnce(): Promise<void> {
 // Permission Change Listeners (WS-3 Phase 6 §7)
 // ============================================================
 
+async function reconcilePermissions(): Promise<string[] | null> {
+  try {
+    return await syncApprovedOriginsFromChrome();
+  } catch (error) {
+    // The 30-second health alarm retries even when Chrome's permission API
+    // briefly fails. Never replace native state with a stale storage mirror.
+    logger.warn('Permission reconciliation failed; retrying on health alarm:', error);
+    return null;
+  }
+}
+
 // Listen for origin revokes from chrome://extensions so the sidebar's
 // `approvedOrigins` storage key stays aligned. The sidebar subscribes to
 // `storage.onChanged` and re-renders automatically when we rewrite the key.
 chrome.permissions.onRemoved.addListener(async (perms) => {
   const origins = perms?.origins ?? [];
   if (origins.length === 0) return;
-  const next = await import('./shared/approved-origins').then((m) =>
-    m.removeApprovedOrigins(origins)
-  );
-  logger.info(
-    `Permissions revoked: ${origins.join(', ')}; approved list now ${next.length}`
-  );
+  const next = await reconcilePermissions();
+  if (next) logger.info(`Permissions revoked: ${origins.join(', ')}; approved list now ${next.length}`);
 });
 
 chrome.permissions.onAdded.addListener(async (perms) => {
   const origins = perms?.origins ?? [];
   if (origins.length === 0) return;
-  const next = await import('./shared/approved-origins').then((m) =>
-    m.addApprovedOrigins(origins)
-  );
-  logger.info(
-    `Permissions granted: ${origins.join(', ')}; approved list now ${next.length}`
-  );
+  const next = await reconcilePermissions();
+  if (next) logger.info(`Permissions granted: ${origins.join(', ')}; approved list now ${next.length}`);
 });
 
 // ============================================================
@@ -833,6 +836,7 @@ async function setupWebSocketHandlers(): Promise<void> {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === HEALTH_CHECK_ALARM) {
+    await reconcilePermissions();
     await performHealthCheck();
   }
   if (alarm.name === QUEUE_FLUSH_ALARM) {
@@ -899,7 +903,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
   // Reconcile approved-origins with Chrome's native permission state in case
   // the user revoked an origin while the SW was asleep (WS-3 Phase 6 §7).
-  await syncApprovedOriginsFromChrome();
+  await reconcilePermissions();
 
   // Drain any pending snippets from the previous session (WS-3 Phase 6 §10).
   await processSnippetQueue();
@@ -912,7 +916,7 @@ performHealthCheck().catch(() => {});
 processRetryQueue().catch(() => {});
 
 // WS-3 Phase 6 §7 — reconcile approved origins on SW load.
-syncApprovedOriginsFromChrome().catch(() => {});
+void reconcilePermissions();
 
 // WS-3 Phase 6 §10 — drain offline snippet queue on SW load.
 processSnippetQueue().catch(() => {});

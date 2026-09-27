@@ -218,7 +218,9 @@ export async function previewContactForTarget(
     );
     const scope = boundary.rows[0];
     if (!scope) throw new LensPreviewError('Scoring context not found', 404);
-    const lens = await getActiveLensForTarget(targetId, client);
+    const lens = await getActiveLensForTarget(targetId, {
+      tenantId: scope.tenant_id, ownerId: scope.owner_id,
+    }, client);
     if (!lens || lens.tenantId !== scope.tenant_id ||
         lens.userId !== scope.owner_id || lens.primaryTargetId !== targetId) {
       throw new LensPreviewError('Scoring context not found', 404);

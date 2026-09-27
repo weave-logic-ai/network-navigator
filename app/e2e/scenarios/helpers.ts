@@ -1,5 +1,59 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { request as requestFactory, test as baseTest,
+  type APIRequestContext, type APIResponse, type BrowserContext } from '@playwright/test';
+import { OPERATOR_COOKIE } from '../../src/lib/auth/operator-session';
+
+/** Unlock against the actual app with a secret configured only on the E2E server. */
+export async function authenticatedScenarioRequest(
+  context?: BrowserContext,
+  baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:3000',
+): Promise<APIRequestContext> {
+  const secret = process.env.E2E_OPERATOR_SECRET;
+  if (!secret || secret.length < 32) throw new Error('E2E_OPERATOR_SECRET is required');
+  const url = new URL(baseURL);
+  if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('Scenario app must use a loopback HTTP origin');
+  }
+  const origin = url.origin;
+  const api = await requestFactory.newContext({ baseURL: origin,
+    extraHTTPHeaders: { origin, 'sec-fetch-site': 'same-origin' } });
+  try {
+    const unlocked = await api.post('/api/operator/unlock', { data: { secret } });
+    if (!unlocked.ok()) throw new Error(`Scenario operator unlock failed: ${unlocked.status()}`);
+    const cookie = (await api.storageState()).cookies.find(item => item.name === OPERATOR_COOKIE);
+    if (!cookie) throw new Error('Scenario operator unlock returned no session cookie');
+    if (context) await context.addCookies([cookie]);
+    return api;
+  } catch (error) {
+    await api.dispose();
+    throw error;
+  }
+}
+
+export const scenarioTest = baseTest.extend<{ scenarioRequest: APIRequestContext }>({
+  scenarioRequest: async ({ context, baseURL }, use) => {
+    const api = await authenticatedScenarioRequest(context, baseURL);
+    try { await use(api); } finally { await api.dispose(); }
+  },
+});
+
+/** Use the server snapshot for every scenario focus/clear, including cleanup. */
+export async function focusScenarioTarget(
+  request: Pick<APIRequestContext, 'get' | 'put'>,
+  targetId: string | null,
+  baseURL?: string,
+): Promise<APIResponse> {
+  const url = baseURL ? new URL('/api/targets/state', baseURL).toString() : '/api/targets/state';
+  const current = await request.get(url);
+  if (!current.ok()) throw new Error(`Could not read target context: ${current.status()}`);
+  const body = await current.json() as { data?: { revision?: unknown } };
+  const expectedRevision = body.data?.revision;
+  if (typeof expectedRevision !== 'string' || !/^(0|[1-9][0-9]*)$/.test(expectedRevision)) {
+    throw new Error('Target context response has no valid revision');
+  }
+  return request.put(url, { data: { expectedRevision, action: { type: 'focus', targetId } } });
+}
 
 export interface ScenarioFixture {
   ownerId: string;
@@ -84,8 +138,8 @@ export async function createScenarioFixture(): Promise<ScenarioFixture> {
     secondContactId,
     async close() {
       try {
-        // The target FKs use ON DELETE SET NULL while target CHECKs require a
-        // subject, so remove targets before deleting their subjects.
+        // Remove the scenario's target rows explicitly before its subjects so
+        // cleanup works on dedicated databases both before and after 057.
         await pool.query('DELETE FROM research_target_state WHERE user_id = $1', [ownerId]);
         await pool.query(
           `DELETE FROM research_targets

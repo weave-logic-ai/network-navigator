@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Response } from '@playwright/test';
+import { expect, type Page, type Response } from '@playwright/test';
+import { focusScenarioTarget, scenarioTest as test } from './helpers';
 
 // Opt-in against a real, seeded app. Run from app/ with:
 // NETWORK_PERF_RUN=1 NETWORK_PERF_CONTACT_A='Unique Contact A' \
@@ -12,7 +13,9 @@ const contactA = process.env.NETWORK_PERF_CONTACT_A;
 const contactB = process.env.NETWORK_PERF_CONTACT_B;
 const iterations = Number(process.env.NETWORK_PERF_ITERATIONS ?? 20);
 const minNodes = Number(process.env.NETWORK_PERF_MIN_NODES ?? 1000);
-test.skip(!enabled || !contactA || !contactB, 'Set NETWORK_PERF_RUN=1 and two real fixture contact names.');
+test.use({ baseURL });
+test.skip(!enabled || !contactA || !contactB || !process.env.E2E_OPERATOR_SECRET,
+  'Set NETWORK_PERF_RUN=1, E2E_OPERATOR_SECRET, and two fixture contact names.');
 
 type Sample = { focusMs: number; apiMs: number; renderMs: number; nodes: number; rootId: string };
 type GraphStats = { loadedNodes: number; totalNodes: number; totalEdges: number };
@@ -74,7 +77,7 @@ async function focusWithPicker(page: Page, name: string): Promise<Sample> {
   };
 }
 
-test('real graph focus, paint and breadcrumb back p95', async ({ page, request }) => {
+test('real graph focus, paint and breadcrumb back p95', async ({ page, scenarioRequest: request }) => {
   test.setTimeout(300_000);
   expect(contactA).not.toBe(contactB);
   expect(Number.isInteger(iterations) && iterations >= 3).toBe(true);
@@ -88,9 +91,7 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
   expect(initialBody.data?.stats?.totalEdges ?? 0, 'Fixture must have real visible edges')
     .toBeGreaterThan(0);
 
-  const clearState = await request.put(`${baseURL}/api/targets/state`, {
-    data: { secondaryTargetId: null },
-  });
+  const clearState = await focusScenarioTarget(request, null, baseURL);
   expect(clearState.ok(), 'Fixture must allow resetting the secondary target').toBe(true);
 
   await page.goto(`${baseURL}/network`);
@@ -108,7 +109,7 @@ test('real graph focus, paint and breadcrumb back p95', async ({ page, request }
 
     const crumb = page.getByRole('navigation', { name: 'Research target breadcrumbs' });
     await crumb.getByText(contactB!, { exact: true }).first().hover();
-    const back = crumb.getByRole('button', { name: 'Swap back to prior secondary target' });
+    const back = crumb.getByRole('button', { name: 'Back to prior target' });
     await expect(back).toBeVisible();
     const graphRequest = page.waitForResponse((response) =>
       graphResponse(response) && new URL(response.url()).searchParams.get('primaryTargetId') === a.rootId,

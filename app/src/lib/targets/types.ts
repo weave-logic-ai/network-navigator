@@ -25,6 +25,8 @@ export interface ResearchTargetState {
   userId: string | null;
   primaryTargetId: string | null;
   secondaryTargetId: string | null;
+  revision: string;
+  activeLensId: string | null;
   updatedAt: string;
 }
 

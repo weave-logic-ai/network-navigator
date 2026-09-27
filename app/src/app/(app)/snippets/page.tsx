@@ -1,8 +1,8 @@
 // Snippets panel — Phase 1 Track C.
 //
 // Lists snippets attached to the currently-targeted entity. Reads the
-// current `research_target_state.secondary_target_id` if present, falling
-// back to `primary_target_id` (which is the owner's self-target in v1 per
+// current owner's `research_target_state.secondary_target_id` if present,
+// falling back to `primary_target_id` (the owner's self-target in v1 per
 // ADR-027 + `10-decisions.md` Q4). When the secondary is not set, the page
 // renders snippets linked to the self target.
 //
@@ -14,6 +14,7 @@ import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { listSnippetsForTarget } from '@/lib/snippets/service';
 import { getDefaultTenantId } from '@/lib/snippets/tenant';
 import { query } from '@/lib/db/client';
+import { getCurrentOwnerProfileId, getResearchTargetState } from '@/lib/targets/service';
 import type { SnippetTargetKind } from '@/lib/snippets/chain';
 
 export const dynamic = 'force-dynamic';
@@ -27,8 +28,8 @@ interface ResolvedActiveTarget {
 /**
  * Resolve the currently-active target for the snippets panel.
  *
- * Reads `research_target_state.secondary_target_id` first (the UI-centered
- * focus per Q4), falling back to `primary_target_id` (the self-target).
+ * Reads the current owner's validated state, using the focus when present
+ * and their self-target otherwise.
  * Table existence is probed defensively — Track B's migration 035 creates
  * both tables; if either is absent (e.g. running against an unmigrated dev
  * volume), we return null and the page renders the empty-state card.
@@ -54,36 +55,12 @@ async function resolveActiveTarget(
      ) AS exists`
   );
 
-  let activeTargetId: string | null = null;
-  if (hasState.rows[0]?.exists) {
-    const stateRes = await query<{
-      primary_target_id: string | null;
-      secondary_target_id: string | null;
-    }>(
-      `SELECT primary_target_id, secondary_target_id
-       FROM research_target_state
-       WHERE tenant_id = $1
-       LIMIT 1`,
-      [tenantId]
-    );
-    const row = stateRes.rows[0];
-    activeTargetId =
-      (row?.secondary_target_id as string | null) ??
-      (row?.primary_target_id as string | null) ??
-      null;
-  }
-
-  if (!activeTargetId) {
-    // Fallback: first self-target for this tenant.
-    const selfRes = await query<{ id: string }>(
-      `SELECT id FROM research_targets
-       WHERE tenant_id = $1 AND kind = 'self'
-       ORDER BY created_at ASC LIMIT 1`,
-      [tenantId]
-    );
-    activeTargetId = selfRes.rows[0]?.id ?? null;
-  }
-
+  if (!hasState.rows[0]?.exists) return null;
+  const ownerId = await getCurrentOwnerProfileId();
+  if (!ownerId) return null;
+  const state = await getResearchTargetState(ownerId);
+  if (!state || state.tenantId !== tenantId) return null;
+  const activeTargetId = state.secondaryTargetId ?? state.primaryTargetId;
   if (!activeTargetId) return null;
 
   const t = await query<{
@@ -92,8 +69,12 @@ async function resolveActiveTarget(
     label: string;
   }>(
     `SELECT id, kind, label FROM research_targets
-     WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-    [activeTargetId, tenantId]
+     WHERE id = $1 AND tenant_id = $2
+       AND ((kind = 'self' AND owner_id = $3 AND id = $4)
+         OR (kind = 'contact' AND contact_id IS NOT NULL)
+         OR (kind = 'company' AND company_id IS NOT NULL))
+     LIMIT 1`,
+    [activeTargetId, tenantId, ownerId, state.primaryTargetId]
   );
   if (!t.rows[0]) return null;
   return {

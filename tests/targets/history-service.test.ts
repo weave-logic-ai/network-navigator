@@ -77,48 +77,13 @@ describe('targets/history-service', () => {
     expect(buf[1].targetId).toBe('t-1');
   });
 
-  it('pushTargetHistory updates the JSONB column with the capped buffer', async () => {
+  it('rejects legacy history writes without a revision', async () => {
     const { query } = await import('@/lib/db/client');
-    const { getResearchTargetState } = await import('@/lib/targets/service');
-    (getResearchTargetState as jest.Mock).mockResolvedValue({
-      tenantId: 'tenant-1',
-      userId: 'owner-1',
-      primaryTargetId: 'self-1',
-      secondaryTargetId: null,
-      updatedAt: 'x',
-    });
-
-    const updateCalls: Array<{ sql: string; params: unknown[] }> = [];
-    (query as jest.MockedFunction<typeof query>).mockImplementation(
-      (sql: unknown, params?: unknown[]) => {
-        const text = String(sql);
-        if (text.includes('SELECT history FROM research_target_state')) {
-          return mockRows<Record<string, unknown>>([
-            { history: [{ targetId: 't-old', lensId: null, openedAt: 'x' }] },
-          ]) as ReturnType<typeof query>;
-        }
-        if (text.includes('UPDATE research_target_state')) {
-          updateCalls.push({ sql: text, params: params ?? [] });
-          return mockRows<Record<string, unknown>>([]) as ReturnType<typeof query>;
-        }
-        return mockRows<Record<string, unknown>>([]) as ReturnType<typeof query>;
-      }
-    );
-
     const svc = await import('@/lib/targets/history-service');
-    const result = await svc.pushTargetHistory('owner-1', {
-      targetId: 't-new',
-      lensId: 'lens-1',
-      openedAt: '2026-04-17T12:00:00.000Z',
-    });
-
-    expect(result[0].targetId).toBe('t-new');
-    expect(result).toHaveLength(2);
-    expect(updateCalls).toHaveLength(1);
-    const storedJson = updateCalls[0].params[2] as string;
-    const stored = JSON.parse(storedJson) as Array<Record<string, unknown>>;
-    expect(stored[0].targetId).toBe('t-new');
-    expect(stored[0].lensId).toBe('lens-1');
+    await expect(svc.pushTargetHistory('owner-1', {
+      targetId: 't-new', lensId: null, openedAt: '2026-04-17T12:00:00.000Z',
+    })).rejects.toThrow(/revisioned target state/);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('readTargetHistory returns [] when state row has no history column data', async () => {

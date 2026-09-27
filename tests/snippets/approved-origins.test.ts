@@ -57,12 +57,12 @@ describe('approved-origins sync', () => {
     expect(db.approvedOrigins).toEqual(['https://web.archive.org/*']);
   });
 
-  it('removeApprovedOrigins canonicalises *://host/* patterns', async () => {
-    const { db } = installChromeShim(['https://edgar.sec.gov/*']);
+  it('removeApprovedOrigins removes the native wildcard grant but preserves a separate HTTPS grant', async () => {
+    const { db } = installChromeShim(['*://edgar.sec.gov/*', 'https://edgar.sec.gov/*']);
     const mod = await import('../../browser/src/shared/approved-origins');
     const next = await mod.removeApprovedOrigins(['*://edgar.sec.gov/*']);
-    expect(next).toEqual([]);
-    expect(db.approvedOrigins).toEqual([]);
+    expect(next).toEqual(['https://edgar.sec.gov/*']);
+    expect(db.approvedOrigins).toEqual(['https://edgar.sec.gov/*']);
   });
 
   it('addApprovedOrigins merges without duplicates', async () => {

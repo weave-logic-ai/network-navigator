@@ -12,12 +12,8 @@
 // associations and never become lens associations by inference.
 
 import { query, transaction } from '../db/client';
-import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import type { IcpProfile, IcpCriteria } from '../scoring/types';
-
-function readQuery<T extends QueryResultRow>(client: PoolClient | undefined, sql: string, params?: unknown[]): Promise<QueryResult<T>> {
-  return client ? client.query<T>(sql, params) : query<T>(sql, params);
-}
 
 export interface ResearchLens {
   id: string;
@@ -27,11 +23,20 @@ export interface ResearchLens {
   primaryTargetId: string | null;
   secondaryTargetId: string | null;
   config: Record<string, unknown>;
+  icpProfileIds: string[];
   isDefault: boolean;
   createdAt: string;
   updatedAt: string;
   /** Populated by migration 044 — non-null means the lens was soft-deleted. */
   deletedAt: string | null;
+}
+
+export interface LensScope { tenantId: string; ownerId: string }
+
+function scopedQuery<T extends QueryResultRow>(
+  sql: string, params: unknown[], client?: PoolClient
+) {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
 }
 
 function rowToLens(row: Record<string, unknown>): ResearchLens {
@@ -43,12 +48,19 @@ function rowToLens(row: Record<string, unknown>): ResearchLens {
     primaryTargetId: (row.primary_target_id as string | null) ?? null,
     secondaryTargetId: (row.secondary_target_id as string | null) ?? null,
     config: (row.config as Record<string, unknown>) ?? {},
+    icpProfileIds: (row.icp_profile_ids as string[] | null) ?? [],
     isDefault: Boolean(row.is_default),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     deletedAt: row.deleted_at ? String(row.deleted_at) : null,
   };
 }
+
+const lensSelect = `lens.*, ARRAY(
+  SELECT rti.icp_profile_id FROM research_target_icps rti
+  WHERE rti.target_id = lens.primary_target_id AND rti.lens_id = lens.id
+  ORDER BY rti.icp_profile_id
+) AS icp_profile_ids`;
 
 function mapIcpRow(row: Record<string, unknown>): IcpProfile {
   return {
@@ -72,12 +84,16 @@ function mapIcpRow(row: Record<string, unknown>): IcpProfile {
  * deleted" banner path) should use `getLensById` which returns any row
  * regardless of delete state.
  */
-export async function listLensesForTarget(targetId: string, client?: PoolClient): Promise<ResearchLens[]> {
-  const res = await readQuery<Record<string, unknown>>(client,
-    `SELECT * FROM research_lenses
-     WHERE primary_target_id = $1 AND deleted_at IS NULL
-     ORDER BY is_default DESC, created_at ASC`,
-    [targetId]
+export async function listLensesForTarget(targetId: string, scope: LensScope, client?: PoolClient): Promise<ResearchLens[]> {
+  const res = await scopedQuery<Record<string, unknown>>(
+    `SELECT ${lensSelect} FROM research_lenses lens
+     JOIN research_targets target ON target.id = lens.primary_target_id
+     WHERE lens.primary_target_id = $1 AND lens.deleted_at IS NULL
+       AND lens.tenant_id = $2 AND target.tenant_id = $2
+       AND (target.kind <> 'self' OR target.owner_id = $3)
+       AND (lens.user_id IS NULL OR lens.user_id = $3)
+     ORDER BY lens.is_default DESC, lens.created_at ASC`,
+    [targetId, scope.tenantId, scope.ownerId], client
   );
   return res.rows.map(rowToLens);
 }
@@ -87,10 +103,16 @@ export async function listLensesForTarget(targetId: string, client?: PoolClient)
  * deep-link deserializer so we can render a "this lens was deleted" banner
  * instead of a 404.
  */
-export async function getLensById(lensId: string): Promise<ResearchLens | null> {
+export async function getLensById(lensId: string, scope: LensScope): Promise<ResearchLens | null> {
   const res = await query<Record<string, unknown>>(
-    `SELECT * FROM research_lenses WHERE id = $1 LIMIT 1`,
-    [lensId]
+    `SELECT ${lensSelect} FROM research_lenses lens
+     JOIN research_targets target ON target.id = lens.primary_target_id
+     WHERE lens.id = $1
+     AND lens.tenant_id = $2 AND target.tenant_id = $2
+       AND (lens.user_id IS NULL OR lens.user_id = $3)
+       AND (target.kind <> 'self' OR target.owner_id = $3)
+     LIMIT 1`,
+    [lensId, scope.tenantId, scope.ownerId]
   );
   return res.rows[0] ? rowToLens(res.rows[0]) : null;
 }
@@ -106,36 +128,86 @@ export async function getLensById(lensId: string): Promise<ResearchLens | null> 
  */
 export async function softDeleteLens(
   targetId: string,
-  lensId: string
+  lensId: string,
+  scope: LensScope
 ): Promise<ResearchLens | null> {
-  const res = await query<Record<string, unknown>>(
-    `UPDATE research_lenses
-     SET deleted_at = NOW(), is_default = FALSE, updated_at = NOW()
-     WHERE id = $1 AND primary_target_id = $2 AND deleted_at IS NULL
-     RETURNING *`,
-    [lensId, targetId]
-  );
-  return res.rows[0] ? rowToLens(res.rows[0]) : null;
+  return transaction(async (client: PoolClient) => {
+    // Match CAS lock order: current state rows first, then the lens row.
+    // The initial lens read only locates its tenant; the UPDATE below is the
+    // authoritative deletion check after all relevant state locks are held.
+    const found = await client.query<{ tenant_id: string }>(
+      `SELECT lens.tenant_id FROM research_lenses lens
+       JOIN research_targets target ON target.id = lens.primary_target_id
+       WHERE lens.id = $1 AND lens.primary_target_id = $2 AND lens.tenant_id = $3
+         AND target.tenant_id = $3
+         AND (target.kind <> 'self' OR target.owner_id = $4)
+         AND (lens.user_id IS NULL OR lens.user_id = $4) AND lens.deleted_at IS NULL`,
+      [lensId, targetId, scope.tenantId, scope.ownerId]
+    );
+    const tenantId = found.rows[0]?.tenant_id;
+    if (!tenantId) return null;
+
+    const states = await client.query<{ tenant_id: string; user_id: string }>(
+      `SELECT tenant_id, user_id FROM research_target_state
+       WHERE tenant_id = $1 AND
+         (last_used_lens_id = $2 OR secondary_target_id = $3 OR
+          (secondary_target_id IS NULL AND primary_target_id = $3))
+       ORDER BY user_id FOR UPDATE`,
+      [tenantId, lensId, targetId]
+    );
+    const deleted = await client.query<Record<string, unknown>>(
+      `UPDATE research_lenses
+       SET deleted_at = NOW(), is_default = FALSE, updated_at = NOW()
+       WHERE id = $1 AND primary_target_id = $2 AND tenant_id = $3
+         AND (user_id IS NULL OR user_id = $4)
+         AND EXISTS (SELECT 1 FROM research_targets target
+           WHERE target.id = $2 AND target.tenant_id = $3
+             AND (target.kind <> 'self' OR target.owner_id = $4))
+         AND deleted_at IS NULL RETURNING *`,
+      [lensId, targetId, tenantId, scope.ownerId]
+    );
+    if (!deleted.rows[0]) return null;
+
+    // Only touch rows locked above; new CAS commands cannot activate a lens
+    // after its UPDATE commits, and the revision trigger covers each clear.
+    for (const state of states.rows) {
+      await client.query(
+        `UPDATE research_target_state SET last_used_lens_id = NULL,
+         updated_at = NOW() WHERE tenant_id = $1 AND user_id = $2
+         AND last_used_lens_id = $3`,
+        [state.tenant_id, state.user_id, lensId]
+      );
+    }
+    return rowToLens(deleted.rows[0]);
+  });
 }
 
 /**
  * Read the current owner's `research_target_state.last_used_lens_id`.
- * Isolated so `getActiveLensForTarget` does not need to know how to resolve
- * owner/user from the environment — it just gets the pointer or null.
+ * Reads only the supplied owner and tenant. An optional transaction client
+ * keeps scoring previews on their authorized database snapshot.
  *
- * Returns null when there is no current owner profile, no state row, or
- * the column is NULL.
+ * Returns null when there is no state row.
  */
-async function readLastUsedLensIdForCurrentOwner(client?: PoolClient): Promise<string | null> {
-  const res = await readQuery<{ last_used_lens_id: string | null }>(client,
-    `SELECT last_used_lens_id
+async function readCurrentLensPointer(scope: LensScope, client?: PoolClient): Promise<{
+  lensId: string | null; currentTargetId: string | null;
+} | null> {
+  const res = await scopedQuery<{
+    last_used_lens_id: string | null;
+    primary_target_id: string | null;
+    secondary_target_id: string | null;
+  }>(
+    `SELECT last_used_lens_id, primary_target_id, secondary_target_id
      FROM research_target_state
-     WHERE user_id = (
-       SELECT id FROM owner_profiles WHERE is_current = TRUE LIMIT 1
-     )
-     LIMIT 1`
+     WHERE tenant_id = $1 AND user_id = $2
+     LIMIT 1`,
+    [scope.tenantId, scope.ownerId], client
   );
-  return res.rows[0]?.last_used_lens_id ?? null;
+  const row = res.rows[0];
+  return row ? {
+    lensId: row.last_used_lens_id,
+    currentTargetId: row.secondary_target_id ?? row.primary_target_id,
+  } : null;
 }
 
 /**
@@ -150,24 +222,31 @@ async function readLastUsedLensIdForCurrentOwner(client?: PoolClient): Promise<s
  *
  * Returns null if the target has no lenses at all.
  */
-export async function getActiveLensForTarget(targetId: string, client?: PoolClient): Promise<ResearchLens | null> {
-  const lastUsedLensId = await readLastUsedLensIdForCurrentOwner(client);
+export async function getActiveLensForTarget(targetId: string, scope: LensScope, client?: PoolClient): Promise<ResearchLens | null> {
+  const pointer = await readCurrentLensPointer(scope, client);
+  const lastUsedLensId = pointer?.lensId;
   if (lastUsedLensId) {
-    const res = await readQuery<Record<string, unknown>>(client,
-      `SELECT * FROM research_lenses
-       WHERE id = $1 AND primary_target_id = $2 AND deleted_at IS NULL
+    const res = await scopedQuery<Record<string, unknown>>(
+      `SELECT ${lensSelect} FROM research_lenses lens
+       JOIN research_targets target ON target.id = lens.primary_target_id
+       WHERE lens.id = $1 AND lens.primary_target_id = $2 AND lens.deleted_at IS NULL
+         AND lens.tenant_id = $3 AND target.tenant_id = $3
+         AND (target.kind <> 'self' OR target.owner_id = $4)
+         AND (lens.user_id IS NULL OR lens.user_id = $4)
        LIMIT 1`,
-      [lastUsedLensId, targetId]
+      [lastUsedLensId, targetId, scope.tenantId, scope.ownerId], client
     );
     if (res.rows[0]) {
       return rowToLens(res.rows[0]);
     }
-    // Stale pointer — fall through to the is_default / oldest path below.
+    // A stale/deleted pointer on the current context is an explicit no-lens state.
   }
+
+  if (pointer?.currentTargetId === targetId) return null;
 
   // Fallback: ORDER BY is_default DESC, created_at ASC picks the default
   // first and the oldest lens otherwise.
-  const lenses = await listLensesForTarget(targetId, client);
+  const lenses = await listLensesForTarget(targetId, scope, client);
   return lenses[0] ?? null;
 }
 
@@ -180,18 +259,24 @@ export async function getActiveLensForTarget(targetId: string, client?: PoolClie
  * referenced ICPs are all inactive. Callers must use that empty-array result
  * as a signal to fall back to the owner-default ICP list.
  */
-export async function getActiveLensIcps(targetId: string): Promise<IcpProfile[]> {
-  const lens = await getActiveLensForTarget(targetId);
+export async function getActiveLensIcps(targetId: string, scope: LensScope, client?: PoolClient): Promise<IcpProfile[]> {
+  const lens = await getActiveLensForTarget(targetId, scope, client);
   if (!lens) return [];
 
-  const res = await query<Record<string, unknown>>(
+  const res = await scopedQuery<Record<string, unknown>>(
     `SELECT ip.id, ip.name, ip.description, ip.is_active, ip.criteria,
             ip.weight_overrides, ip.created_at, ip.updated_at
      FROM research_target_icps rti
      JOIN icp_profiles ip ON ip.id = rti.icp_profile_id
+     JOIN research_lenses lens ON lens.id = rti.lens_id
+     JOIN research_targets target ON target.id = rti.target_id
      WHERE rti.target_id = $1 AND rti.lens_id = $2 AND ip.is_active = TRUE
+       AND lens.deleted_at IS NULL AND lens.primary_target_id = target.id
+       AND lens.tenant_id = $3 AND target.tenant_id = $3
+       AND (target.kind <> 'self' OR target.owner_id = $4)
+       AND (lens.user_id IS NULL OR lens.user_id = $4)
      ORDER BY ip.name`,
-    [targetId, lens.id]
+    [targetId, lens.id, scope.tenantId, scope.ownerId], client
   );
   return res.rows.map(mapIcpRow);
 }
@@ -209,13 +294,23 @@ export async function createLensForTarget(input: {
   secondaryTargetId?: string | null;
   configExtras?: Record<string, unknown>;
 }): Promise<ResearchLens> {
-  const existing = await listLensesForTarget(input.targetId);
-  const isDefault = existing.length === 0; // first lens wins default
-
   const { icpProfileIds: _legacyIds, ...config } = input.configExtras ?? {};
   const icpIds = [...new Set(input.icpProfileIds ?? [])];
 
   return transaction(async (client: PoolClient) => {
+    // Serialize creators on the target, including when no lens exists yet.
+    const target = await client.query(
+      `SELECT 1 FROM research_targets WHERE id = $1 AND tenant_id = $2
+       AND (kind <> 'self' OR owner_id = $3) FOR UPDATE`,
+      [input.targetId, input.tenantId, input.userId ?? null]
+    );
+    if (!target.rows[0]) throw new Error('Target not found');
+    const existing = await client.query(
+      `SELECT 1 FROM research_lenses WHERE primary_target_id = $1
+       AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [input.targetId, input.tenantId]
+    );
+    const isDefault = existing.rows.length === 0;
     const res = await client.query<Record<string, unknown>>(
       `INSERT INTO research_lenses
        (tenant_id, user_id, name, primary_target_id, secondary_target_id,
@@ -244,70 +339,16 @@ export async function createLensForTarget(input: {
         throw new Error('One or more ICP profiles do not exist');
       }
     }
-    return rowToLens(res.rows[0]);
+    return { ...rowToLens(res.rows[0]), icpProfileIds: icpIds };
   });
 }
 
-/**
- * Activate a lens for a target — after migration 046 this writes the
- * pointer to `research_target_state.last_used_lens_id` for the current
- * owner instead of flipping `is_default` across every sibling lens.
- *
- * `is_default` is retained as a "primary lens" hint and is opportunistically
- * promoted only when the target currently has NO default lens (keeps the
- * fallback path in `getActiveLensForTarget` working for callers without
- * owner context, like background jobs). Existing sibling `is_default = TRUE`
- * rows are left untouched.
- *
- * Returns the activated lens row, or null when the lens does not belong to
- * the target.
- */
+/** Legacy activation cannot bypass the revisioned state transaction. */
 export async function activateLensForTarget(
   targetId: string,
   lensId: string
 ): Promise<ResearchLens | null> {
-  return transaction(async (client: PoolClient) => {
-    // 1. Verify the lens belongs to this target and is not soft-deleted.
-    const check = await client.query<Record<string, unknown>>(
-      `SELECT * FROM research_lenses
-       WHERE id = $1 AND primary_target_id = $2 AND deleted_at IS NULL
-       LIMIT 1`,
-      [lensId, targetId]
-    );
-    if (check.rows.length === 0) return null;
-
-    // 2. Update the per-user state row so the read path picks this lens up.
-    //    Single-tenant v1 — owner_profiles.is_current=TRUE is the active user.
-    await client.query(
-      `UPDATE research_target_state
-       SET last_used_lens_id = $1, updated_at = NOW()
-       WHERE user_id = (
-         SELECT id FROM owner_profiles WHERE is_current = TRUE LIMIT 1
-       )`,
-      [lensId]
-    );
-
-    // 3. Opportunistic is_default hint: if nothing else is the default yet,
-    //    mark this one so fallback callers (anonymous / state-less) keep
-    //    resolving. Do not clobber an existing default.
-    const existingDefault = await client.query<{ id: string }>(
-      `SELECT id FROM research_lenses
-       WHERE primary_target_id = $1 AND is_default = TRUE AND deleted_at IS NULL
-       LIMIT 1`,
-      [targetId]
-    );
-    if (existingDefault.rows.length === 0) {
-      const promoted = await client.query<Record<string, unknown>>(
-        `UPDATE research_lenses
-         SET is_default = TRUE, updated_at = NOW()
-         WHERE id = $1 AND deleted_at IS NULL
-         RETURNING *`,
-        [lensId]
-      );
-      if (promoted.rows[0]) return rowToLens(promoted.rows[0]);
-    }
-
-    // Return the already-loaded row (no column-level changes).
-    return rowToLens(check.rows[0]);
-  });
+  void targetId;
+  void lensId;
+  throw new Error('Use revisioned target state commands');
 }

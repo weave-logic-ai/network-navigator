@@ -1,103 +1,136 @@
 jest.mock('@/lib/targets/service', () => ({
   getCurrentOwnerProfileId: jest.fn(),
-  getResearchTargetState: jest.fn(),
-  getTargetById: jest.fn(),
-  setSecondaryTarget: jest.fn(),
+  getTargetStateSnapshot: jest.fn(),
+  commandTargetState: jest.fn(),
+  TargetStateCommandError: class TargetStateCommandError extends Error {
+    constructor(public status: number, message: string, public current?: unknown) { super(message); }
+  },
 }));
 jest.mock('@/lib/graph/data-cache', () => ({ invalidateForOwner: jest.fn() }));
-jest.mock('@/lib/targets/history-service', () => ({ pushTargetHistory: jest.fn() }));
+jest.mock('@/lib/auth/local-request-boundary', () => ({
+  requireLocalDashboardRequest: jest.fn().mockResolvedValue(null),
+}));
 
-import { PUT } from '@/app/api/targets/state/route';
-import {
-  getCurrentOwnerProfileId, getResearchTargetState,
-  getTargetById, setSecondaryTarget,
-} from '@/lib/targets/service';
+import { GET, PUT } from '@/app/api/targets/state/route';
+import { POST as legacyHistoryPost } from '@/app/api/targets/state/history/route';
+import { PUT as activate } from '@/app/api/targets/[id]/lenses/[lensId]/activate/route';
+import { getCurrentOwnerProfileId, getTargetStateSnapshot, commandTargetState,
+  TargetStateCommandError } from '@/lib/targets/service';
 import { invalidateForOwner } from '@/lib/graph/data-cache';
-import { pushTargetHistory } from '@/lib/targets/history-service';
+import { focusScenarioTarget } from '../../app/e2e/scenarios/helpers';
 
-const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-const SELF = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
-const state = (secondaryTargetId: string | null) => ({
-  tenantId: 'tenant-1', userId: 'owner-1', primaryTargetId: SELF,
-  secondaryTargetId, updatedAt: '',
-});
-const owner = getCurrentOwnerProfileId as jest.MockedFunction<typeof getCurrentOwnerProfileId>;
-const read = getResearchTargetState as jest.MockedFunction<typeof getResearchTargetState>;
-const target = getTargetById as jest.MockedFunction<typeof getTargetById>;
-const write = setSecondaryTarget as jest.MockedFunction<typeof setSecondaryTarget>;
+const target = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const lens = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const owner = getCurrentOwnerProfileId as jest.Mock;
+const read = getTargetStateSnapshot as jest.Mock;
+const write = commandTargetState as jest.Mock;
+const snapshot = { revision: '1', focusTargetId: target, activeLensId: lens, history: [] };
+const request = (body: unknown) => ({ json: async () => body } as import('next/server').NextRequest);
 
-function req(body: unknown) {
-  return { json: async () => body } as unknown as import('next/server').NextRequest;
-}
-
-describe('target state context contract', () => {
+describe('target state CAS routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    (pushTargetHistory as jest.Mock).mockResolvedValue(undefined);
     owner.mockResolvedValue('owner-1');
-    read.mockResolvedValue(state(null));
-    target.mockImplementation(async (id) => ({
-      id, tenantId: 'tenant-1', kind: 'contact', label: id === A ? 'A' : 'B',
-      ownerId: null, contactId: id, companyId: null, pinned: false,
-      createdAt: '', updatedAt: '', lastUsedAt: '',
-    }));
-    write.mockImplementation(async (_owner, id) => state(id));
+    read.mockResolvedValue(snapshot);
+    write.mockResolvedValue(snapshot);
   });
 
-  it.each([{}, [], { secondaryTargetId: undefined }, { secondaryTargetId: 1 },
-    { secondaryTargetId: '' }, { secondaryTargetId: 'bad' }, { primaryTargetId: A },
-    { secondaryTargetId: null, primaryTargetId: A }])
-  ('returns 400 before any state mutation for malformed body %j', async (body) => {
-    expect((await PUT(req(body))).status).toBe(400);
+  it('returns the revisioned snapshot with no-store', async () => {
+    const response = await GET(request({}));
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect((await response.json()).data).toEqual(snapshot);
+  });
+
+  it.each([{}, [], { secondaryTargetId: target },
+    { expectedRevision: '0', action: { type: 'focus' } },
+    { expectedRevision: '0', action: { type: 'focus', targetId: '' } },
+    { expectedRevision: '0', action: { type: 'back', targetId: target } },
+    { expectedRevision: '0', action: { type: 'activateLens', targetId: target, lensId: 'bad' } },
+    { expectedRevision: 0, action: { type: 'back' } }])
+  ('rejects malformed command %j without mutation', async body => {
+    expect((await PUT(request(body))).status).toBe(400);
     expect(write).not.toHaveBeenCalled();
-    expect(invalidateForOwner).not.toHaveBeenCalled();
   });
 
-  it('returns 400 for invalid JSON without reading state', async () => {
-    const request = { json: async () => { throw new SyntaxError('bad JSON'); } } as unknown as import('next/server').NextRequest;
-    expect((await PUT(request)).status).toBe(400);
-    expect(read).not.toHaveBeenCalled();
+  it('requires a revision and rejects invalid JSON', async () => {
+    expect((await PUT(request({ action: { type: 'back' } }))).status).toBe(428);
+    expect((await PUT({ json: async () => { throw new SyntaxError(); } } as
+      import('next/server').NextRequest)).status).toBe(400);
+    expect(write).not.toHaveBeenCalled();
   });
 
-  it('selects A, then B, then clears while preserving immutable self', async () => {
-    for (const [before, next] of [[null, A], [A, B], [B, null]] as const) {
-      read.mockResolvedValueOnce(state(before));
-      const response = await PUT(req({ secondaryTargetId: next }));
+  it('dispatches typed focus, back and activation commands', async () => {
+    for (const action of [
+      { type: 'focus', targetId: target }, { type: 'back' },
+      { type: 'activateLens', targetId: target, lensId: lens },
+    ]) {
+      const response = await PUT(request({ expectedRevision: '0', action }));
       expect(response.status).toBe(200);
-      expect((await response.json()).data).toMatchObject({
-        primaryTargetId: SELF, secondaryTargetId: next,
-      });
-      expect(write).toHaveBeenLastCalledWith('owner-1', next);
+      expect(write).toHaveBeenLastCalledWith('owner-1', '0', action);
     }
     expect(invalidateForOwner).toHaveBeenCalledTimes(3);
   });
 
-  it('rejects self and another tenant without changing the last good state', async () => {
-    target.mockResolvedValueOnce({
-      id: SELF, tenantId: 'tenant-1', kind: 'self', ownerId: 'owner-1',
-      contactId: null, companyId: null, label: 'Self', pinned: false,
-      createdAt: '', updatedAt: '', lastUsedAt: '',
-    });
-    expect((await PUT(req({ secondaryTargetId: SELF }))).status).toBe(400);
-    target.mockResolvedValueOnce({
-      id: B, tenantId: 'other-tenant', kind: 'contact', ownerId: null,
-      contactId: B, companyId: null, label: 'B', pinned: false,
-      createdAt: '', updatedAt: '', lastUsedAt: '',
-    });
-    expect((await PUT(req({ secondaryTargetId: B }))).status).toBe(400);
+  it('returns the current authorized snapshot on conflict', async () => {
+    write.mockRejectedValueOnce(new TargetStateCommandError(409, 'Target state changed', snapshot));
+    const response = await PUT(request({ expectedRevision: '0', action: { type: 'back' } }));
+    expect(response.status).toBe(409);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect((await response.json()).data).toEqual(snapshot);
+    expect(invalidateForOwner).not.toHaveBeenCalled();
+  });
+
+  it('sanitizes unexpected errors', async () => {
+    write.mockRejectedValueOnce(new Error('private SQL details'));
+    const response = await PUT(request({ expectedRevision: '0', action: { type: 'back' } }));
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(await response.json())).not.toContain('private SQL details');
+  });
+
+  it('closes legacy history and lens activation without a revision', async () => {
+    expect((await legacyHistoryPost(request({}))).status).toBe(428);
+    const response = await activate(request({}), { params: Promise.resolve({ id: target, lensId: lens }) });
+    expect(response.status).toBe(428);
     expect(write).not.toHaveBeenCalled();
   });
 
-  it('does not publish success when storage fails', async () => {
-    write.mockRejectedValueOnce(new Error('database unavailable'));
-    expect((await PUT(req({ secondaryTargetId: A }))).status).toBe(500);
-    expect(invalidateForOwner).not.toHaveBeenCalled();
+  it('routes revisioned legacy activation through the same CAS command', async () => {
+    const response = await activate(request({ expectedRevision: '0' }),
+      { params: Promise.resolve({ id: target, lensId: lens }) });
+    expect(response.status).toBe(200);
+    expect(write).toHaveBeenCalledWith('owner-1', '0',
+      { type: 'activateLens', targetId: target, lensId: lens });
   });
 
-  it('does not publish success when storage returns no updated state', async () => {
-    write.mockResolvedValueOnce(null);
-    expect((await PUT(req({ secondaryTargetId: A }))).status).toBe(500);
-    expect(invalidateForOwner).not.toHaveBeenCalled();
+  it('lets scenario focus and cleanup pass the real CAS route parser with fresh revisions', async () => {
+    let current = { ...snapshot, revision: '7', secondaryTargetId: null as string | null };
+    read.mockImplementation(async () => current);
+    write.mockImplementation(async (_ownerId: string, expected: string,
+      action: { type: string; targetId: string | null }) => {
+      if (expected !== current.revision) {
+        throw new TargetStateCommandError(409, 'Target state changed', current);
+      }
+      current = { ...current, revision: String(Number(current.revision) + 1),
+        secondaryTargetId: action.targetId };
+      return current;
+    });
+    const adapt = (response: Response) => ({
+      ok: () => response.ok, status: () => response.status, json: () => response.json(),
+    });
+    const transport = {
+      get: jest.fn(async () => adapt(await GET(request({})))),
+      put: jest.fn(async (_url: string, options: { data: unknown }) =>
+        adapt(await PUT(request(options.data)))),
+    };
+    const scenarioRequest = transport as unknown as Parameters<typeof focusScenarioTarget>[0];
+
+    expect((await focusScenarioTarget(scenarioRequest, target)).status()).toBe(200);
+    expect((await focusScenarioTarget(scenarioRequest, null)).status()).toBe(200);
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    expect(transport.put.mock.calls.map(([, options]) => options.data)).toEqual([
+      { expectedRevision: '7', action: { type: 'focus', targetId: target } },
+      { expectedRevision: '8', action: { type: 'focus', targetId: null } },
+    ]);
+    expect(write).toHaveBeenCalledTimes(2);
   });
 });
