@@ -196,6 +196,7 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
   const [niches, setNiches] = useState<NicheOption[]>([]);
   const [selectedNiche, setSelectedNiche] = useState<string>(propNicheId || "all");
   const [filterType, setFilterType] = useState<EntityType | "ALL">("ALL");
+  const requestId = useRef(0);
   const svgRef = useRef<SVGSVGElement>(null);
 
   // Fetch niches for the dropdown
@@ -219,6 +220,7 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
 
   const fetchGraph = useCallback(
     async (refresh = false) => {
+      const currentRequest = ++requestId.current;
       setLoading(true);
       setError(null);
       setSelectedEntity(null);
@@ -227,16 +229,25 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
         if (selectedNiche && selectedNiche !== "all") {
           params.set("nicheId", selectedNiche);
         }
-        if (refresh) params.set("refresh", "true");
-        const res = await fetch(`/api/graph/knowledge?${params.toString()}`);
-        if (!res.ok) throw new Error("Failed to fetch knowledge graph");
+        const res = await fetch(`/api/graph/knowledge?${params.toString()}`, {
+          method: refresh ? "POST" : "GET",
+          ...(refresh ? {
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          } : {}),
+        });
+        if (!res.ok) throw new Error(refresh ? "Failed to refresh knowledge graph" : "Failed to fetch knowledge graph");
         const json = await res.json();
-        setGraph(json.data);
-        setCached(json.cached ?? false);
+        if (currentRequest === requestId.current) {
+          setGraph(json.data);
+          setCached(json.cached ?? false);
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
+        if (currentRequest === requestId.current) {
+          setError(err instanceof Error ? err.message : "Unknown error");
+        }
       } finally {
-        setLoading(false);
+        if (currentRequest === requestId.current) setLoading(false);
       }
     },
     [selectedNiche]
@@ -311,36 +322,40 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
 
   if (loading) {
     return (
-      <div className="space-y-4">
+      <div className="flex h-full flex-col gap-4">
         <div className="flex items-center gap-2">
           <Skeleton className="h-8 w-40" />
           <Skeleton className="h-8 w-32" />
         </div>
-        <Skeleton className="h-[500px] w-full rounded-lg" />
+        <Skeleton className="min-h-0 flex-1 w-full rounded-lg" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex h-96 items-center justify-center text-destructive">
-        <p>Error: {error}</p>
+      <div className="flex h-full items-center justify-center gap-3 text-destructive">
+        <p role="alert">Error: {error}</p>
+        <Button variant="outline" onClick={() => fetchGraph(true)}>Rebuild</Button>
+        {selectedNiche !== "all" && <Button variant="ghost" onClick={() => setSelectedNiche("all")}>All contacts</Button>}
       </div>
     );
   }
 
   if (!graph || graph.nodes.length === 0) {
     return (
-      <div className="flex h-96 items-center justify-center text-muted-foreground">
+      <div className="flex h-full items-center justify-center gap-3 text-muted-foreground">
         <p>No knowledge graph data. Import contacts and try again.</p>
+        <Button variant="outline" onClick={() => fetchGraph(true)}>Rebuild</Button>
+        {selectedNiche !== "all" && <Button variant="ghost" onClick={() => setSelectedNiche("all")}>All contacts</Button>}
       </div>
     );
   }
 
   return (
-    <div className="flex gap-4 h-full">
+    <div className="flex min-h-0 flex-col gap-4 lg:h-full lg:flex-row">
       {/* Main graph area */}
-      <div className="flex-1 flex flex-col gap-3">
+      <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3 lg:min-h-0">
         {/* Controls bar */}
         <div className="flex items-center gap-2 flex-wrap">
           <Select value={selectedNiche} onValueChange={setSelectedNiche}>
@@ -374,12 +389,7 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
             </SelectContent>
           </Select>
 
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => fetchGraph(true)}
-          >
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => fetchGraph(true)}>
             <RefreshCw className="mr-1 h-3 w-3" />
             Refresh
           </Button>
@@ -413,12 +423,13 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
         </div>
 
         {/* SVG graph */}
-        <div className="relative flex-1 rounded-lg border bg-background overflow-hidden min-h-[400px]">
+        <div className="relative min-h-0 flex-1 rounded-lg border bg-background overflow-hidden">
           <svg
             ref={svgRef}
             viewBox={`0 0 ${svgWidth} ${svgHeight}`}
             className="w-full h-full"
-            style={{ minHeight: 400 }}
+            role="img"
+            aria-label={`Knowledge graph with ${layoutNodes.length} visible entities and ${layoutEdges.length} relationships. Use the Top Entities list to inspect an entity.`}
           >
             {/* Edges */}
             {layoutEdges.map((edge) => {
@@ -493,7 +504,7 @@ export function KnowledgeGraphView({ nicheId: propNicheId }: KnowledgeGraphProps
       </div>
 
       {/* Right sidebar: entity details */}
-      <Card className="w-60 shrink-0 overflow-hidden">
+      <Card className="w-full shrink-0 overflow-hidden lg:w-60">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium">
             {selectedEntity ? "Entity Details" : "Top Entities"}

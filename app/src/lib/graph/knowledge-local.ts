@@ -3,6 +3,7 @@
 // Uses regex/keyword matching only — no ML models.
 
 import { query } from '../db/client';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -235,7 +236,15 @@ function extractEntities(contact: ContactProfileRow): Array<{ type: EntityType; 
 // Build knowledge graph from contacts
 // ---------------------------------------------------------------------------
 
-export async function buildKnowledgeGraph(nicheId?: string): Promise<KnowledgeGraph> {
+async function graphQuery<T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  params?: unknown[],
+  client?: PoolClient
+): Promise<QueryResult<T>> {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
+}
+
+export async function buildKnowledgeGraph(nicheId?: string, client?: PoolClient): Promise<KnowledgeGraph> {
   // Fetch contacts, optionally filtered by niche
   let contactRows: ContactProfileRow[];
 
@@ -243,12 +252,16 @@ export async function buildKnowledgeGraph(nicheId?: string): Promise<KnowledgeGr
     // Niche contacts: contacts that belong to a niche via niche membership
     // Niche profiles don't have a direct contact membership table,
     // so we match by keywords/industry from the niche profile
-    const nicheResult = await query<{
+    const nicheResult = await graphQuery<{
       keywords: string[];
       industry: string | null;
+      industry_slug: string | null;
     }>(
-      `SELECT keywords, industry FROM niche_profiles WHERE id = $1`,
-      [nicheId]
+      `SELECT np.keywords, i.name AS industry, i.slug AS industry_slug
+       FROM niche_profiles np
+       LEFT JOIN industries i ON i.id = np.industry_id
+       WHERE np.id = $1`,
+      [nicheId], client
     );
 
     if (nicheResult.rows.length === 0) {
@@ -273,32 +286,34 @@ export async function buildKnowledgeGraph(nicheId?: string): Promise<KnowledgeGr
       conditions.push(`(${keywordConditions.join(' OR ')})`);
     }
 
-    if (niche.industry) {
+    // The migration assigns unmapped niches to the General fallback;
+    // it is not a company industry filter.
+    if (niche.industry && niche.industry_slug !== 'general') {
       conditions.push(`co.industry ILIKE $${idx}`);
       params.push(`%${niche.industry}%`);
       idx++;
     }
 
     const where = conditions.join(' AND ');
-    const result = await query<ContactProfileRow>(
+    const result = await graphQuery<ContactProfileRow>(
       `SELECT c.id, c.title, c.headline, c.about, c.tags,
               c.current_company, co.industry AS company_industry
        FROM contacts c
        LEFT JOIN companies co ON c.current_company_id = co.id
        WHERE ${where}
        LIMIT 2000`,
-      params
+      params, client
     );
     contactRows = result.rows;
   } else {
     // All active contacts
-    const result = await query<ContactProfileRow>(
+    const result = await graphQuery<ContactProfileRow>(
       `SELECT c.id, c.title, c.headline, c.about, c.tags,
               c.current_company, co.industry AS company_industry
        FROM contacts c
        LEFT JOIN companies co ON c.current_company_id = co.id
        WHERE c.is_archived = FALSE AND c.degree > 0
-       LIMIT 5000`
+       LIMIT 5000`, undefined, client
     );
     contactRows = result.rows;
   }
@@ -428,9 +443,10 @@ export async function getCachedSnapshot(nicheId: string | null): Promise<Knowled
 
 export async function saveSnapshot(
   graph: KnowledgeGraph,
-  nicheId: string | null
+  nicheId: string | null,
+  client?: PoolClient
 ): Promise<void> {
-  await query(
+  await graphQuery(
     `INSERT INTO knowledge_snapshots
        (niche_id, source, entities, edges, clusters, entity_count, edge_count, expires_at)
      VALUES ($1, 'local', $2, $3, $4, $5, $6, NOW() + INTERVAL '7 days')`,
@@ -441,6 +457,6 @@ export async function saveSnapshot(
       JSON.stringify(graph.clusters),
       graph.nodes.length,
       graph.edges.length,
-    ]
+    ], client
   );
 }

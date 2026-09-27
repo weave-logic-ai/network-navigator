@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 // --- Types ---
 
@@ -163,6 +164,7 @@ export function ConversationGraph() {
   } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,7 +191,7 @@ export function ConversationGraph() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [retryKey]);
 
   // Observe container size
   useEffect(() => {
@@ -207,7 +209,7 @@ export function ConversationGraph() {
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [loading, error, nodes.length]);
 
   // Run force layout
   const positionedNodes = useMemo(
@@ -227,6 +229,10 @@ export function ConversationGraph() {
     () => Math.max(...edges.map((e) => e.messageCount), 1),
     [edges]
   );
+  const listedNodes = useMemo(
+    () => [...nodes].sort((a, b) => b.messageCount - a.messageCount || a.label.localeCompare(b.label)),
+    [nodes]
+  );
 
   const handleNodeHover = useCallback(
     (nodeId: string | null, event?: React.MouseEvent) => {
@@ -245,7 +251,7 @@ export function ConversationGraph() {
 
   if (loading) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-muted/30 rounded-lg">
+      <div className="flex h-full w-full items-center justify-center bg-muted/30 rounded-lg" role="status" aria-live="polite">
         <div className="space-y-3 text-center">
           <Skeleton className="mx-auto h-6 w-48" />
           <Skeleton className="mx-auto h-4 w-32" />
@@ -256,16 +262,18 @@ export function ConversationGraph() {
 
   if (error) {
     return (
-      <div className="flex h-full w-full items-center justify-center text-destructive">
-        <p>Error: {error}</p>
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-destructive">
+        <p role="alert">Error: {error}</p>
+        <Button variant="outline" onClick={() => setRetryKey((key) => key + 1)}>Retry</Button>
       </div>
     );
   }
 
   if (nodes.length === 0) {
     return (
-      <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-muted-foreground">
         <p>No conversation data available. Import messages to see the graph.</p>
+        <Button variant="outline" onClick={() => setRetryKey((key) => key + 1)}>Retry</Button>
       </div>
     );
   }
@@ -273,7 +281,7 @@ export function ConversationGraph() {
   return (
     <div className="flex h-full flex-col">
       {/* Legend */}
-      <div className="flex items-center gap-4 px-3 py-2 border-b bg-muted/30">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b bg-muted/30">
         <span className="text-xs font-medium text-muted-foreground">Edge recency:</span>
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1">
@@ -300,6 +308,8 @@ export function ConversationGraph() {
           width={dimensions.width}
           height={dimensions.height}
           className="absolute inset-0"
+          role="img"
+          aria-label={`Conversation graph with ${nodes.length} contacts and ${edges.length} relationships. Use the conversation list below for contact links and counts.`}
         >
           {/* Edges */}
           {edges.map((edge) => {
@@ -398,6 +408,19 @@ export function ConversationGraph() {
           </div>
         )}
       </div>
+      <details className="shrink-0 border-t bg-background text-sm">
+        <summary className="cursor-pointer px-3 py-2 font-medium">Browse conversations ({nodes.length} contacts)</summary>
+        <ul className="max-h-48 space-y-1 overflow-y-auto px-3 pb-3">
+          {listedNodes.map((node) => (
+            <li key={node.id} className="flex justify-between gap-3">
+              <a className="min-w-0 truncate text-primary underline-offset-2 hover:underline" href={`/contacts/${node.id}`}>
+                {node.label}
+              </a>
+              <span className="shrink-0 text-muted-foreground">{node.messageCount} messages</span>
+            </li>
+          ))}
+        </ul>
+      </details>
     </div>
   );
 }

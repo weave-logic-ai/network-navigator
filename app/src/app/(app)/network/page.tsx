@@ -119,7 +119,7 @@ export default function NetworkPage() {
   }, []);
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col">
+    <div className="flex min-w-0 h-[calc(100vh-7rem)] flex-col">
       <PageHeader
         title="Network Graph"
         description="Visualize your professional network"
@@ -140,8 +140,9 @@ export default function NetworkPage() {
         }
       />
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
-        <TabsList className="mx-0 w-fit">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
+        <div className="min-w-0 w-full overflow-x-auto">
+        <TabsList className="mx-0 w-max">
           <TabsTrigger value="graph" className="gap-1.5">
             <Network className="h-3.5 w-3.5" />
             Graph
@@ -159,8 +160,9 @@ export default function NetworkPage() {
             Knowledge
           </TabsTrigger>
         </TabsList>
+        </div>
 
-        <TabsContent value="graph" className="flex flex-1 gap-4 overflow-hidden mt-4">
+        <TabsContent value="graph" className="hidden min-h-0 flex-1 gap-4 overflow-hidden mt-4 data-[state=active]:flex">
           <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
             {(rootTargetId || rootHistory.length > 0) && (
               <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
@@ -183,20 +185,20 @@ export default function NetworkPage() {
           </div>
         </TabsContent>
 
-        <TabsContent value="taxonomy" className="flex-1 overflow-hidden mt-4">
+        <TabsContent value="taxonomy" className="min-h-0 flex-1 overflow-hidden mt-4 data-[state=inactive]:hidden">
           <div className="h-full rounded-lg border bg-background overflow-hidden">
             <TaxonomyGraph />
           </div>
         </TabsContent>
 
-        <TabsContent value="conversations" className="flex-1 overflow-hidden mt-4">
+        <TabsContent value="conversations" className="min-h-0 flex-1 overflow-hidden mt-4 data-[state=inactive]:hidden">
           <div className="h-full rounded-lg border bg-background overflow-hidden">
             <ConversationGraph />
           </div>
         </TabsContent>
 
-        <TabsContent value="knowledge" className="flex-1 overflow-hidden mt-4">
-          <div className="h-full rounded-lg border bg-background overflow-hidden">
+        <TabsContent value="knowledge" className="min-h-0 flex-1 overflow-y-auto mt-4 data-[state=inactive]:hidden lg:overflow-hidden">
+          <div className="min-h-full rounded-lg border bg-background lg:h-full lg:overflow-hidden">
             <KnowledgeGraph />
           </div>
         </TabsContent>

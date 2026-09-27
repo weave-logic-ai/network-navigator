@@ -1,7 +1,8 @@
 // GET /api/graph/conversations - MESSAGED edges with contact info and stats
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 interface ConversationNode {
   id: string;
@@ -18,24 +19,55 @@ interface ConversationEdge {
   lastActivity: string | null;
 }
 
-export async function GET() {
+function messageCount(row: { message_count: number; properties: Record<string, unknown> }): number {
+  if (row.message_count > 0) return row.message_count;
+  // A legacy graph may have an edge without the underlying message rows.
+  const legacy = row.properties?.message_count;
+  return typeof legacy === 'number' && Number.isFinite(legacy)
+    ? Math.max(0, Math.floor(legacy))
+    : 0;
+}
+
+export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
-    // Fetch all MESSAGED edges with contact names and message metadata
+    // Messages are stored per contact, without a source-contact key. Keep one
+    // graph edge per recipient so repeated imports cannot count the same raw
+    // messages more than once. Prefer the imported self contact as the source.
     const edgesResult = await query<{
       id: string;
       source_contact_id: string;
       target_contact_id: string;
       weight: number;
       properties: Record<string, unknown>;
-      created_at: Date;
-      updated_at: Date;
+      message_count: number;
+      last_message_at: Date | null;
     }>(
-      `SELECT e.id, e.source_contact_id, e.target_contact_id,
-              e.weight, e.properties, e.created_at, e.updated_at
-       FROM edges e
-       WHERE e.edge_type = 'MESSAGED'
-         AND e.target_contact_id IS NOT NULL
-       ORDER BY e.weight DESC`
+      `WITH recipient_edges AS (
+         SELECT DISTINCT ON (e.target_contact_id)
+                e.id, e.source_contact_id, e.target_contact_id,
+                e.weight, e.properties
+         FROM edges e
+         LEFT JOIN contacts src ON src.id = e.source_contact_id
+         WHERE e.edge_type = 'MESSAGED'
+           AND e.target_contact_id IS NOT NULL
+         ORDER BY e.target_contact_id,
+                  CASE WHEN src.linkedin_url LIKE 'self:%' THEN 0 ELSE 1 END,
+                  e.id
+       )
+       SELECT e.id, e.source_contact_id, e.target_contact_id,
+              e.weight, e.properties, m.message_count, m.last_message_at
+       FROM recipient_edges e
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS message_count, MAX(unique_messages.sent_at) AS last_message_at
+         FROM (
+           SELECT DISTINCT direction, subject, content, conversation_id, sent_at, source
+           FROM messages
+           WHERE contact_id = e.target_contact_id
+         ) unique_messages
+       ) m ON TRUE
+       ORDER BY m.message_count DESC, e.id`
     );
 
     if (edgesResult.rows.length === 0) {
@@ -68,7 +100,10 @@ export async function GET() {
     // Compute per-node message totals
     const messageTotals = new Map<string, number>();
     for (const row of edgesResult.rows) {
-      const msgCount = (row.properties?.message_count as number) ?? 0;
+      // Imported edge properties can outlive an import batch. The messages
+      // table is the source of truth; retain legacy-only edge counts when no
+      // message rows were imported alongside an older graph.
+      const msgCount = messageCount(row);
       messageTotals.set(
         row.source_contact_id,
         (messageTotals.get(row.source_contact_id) ?? 0) + msgCount
@@ -87,14 +122,17 @@ export async function GET() {
     }));
 
     // Build edges
-    const edges: ConversationEdge[] = edgesResult.rows.map((row) => ({
-      id: row.id,
-      source: row.source_contact_id,
-      target: row.target_contact_id,
-      messageCount: (row.properties?.message_count as number) ?? 0,
-      weight: row.weight,
-      lastActivity: row.updated_at?.toISOString() ?? null,
-    }));
+    const edges: ConversationEdge[] = edgesResult.rows.map((row) => {
+      const count = messageCount(row);
+      return {
+        id: row.id,
+        source: row.source_contact_id,
+        target: row.target_contact_id,
+        messageCount: count,
+        weight: count > 0 ? Math.log1p(count) : row.weight,
+        lastActivity: row.last_message_at?.toISOString() ?? null,
+      };
+    });
 
     return NextResponse.json({
       data: { nodes, edges },
