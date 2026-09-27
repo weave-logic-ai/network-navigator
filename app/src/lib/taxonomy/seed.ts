@@ -134,8 +134,8 @@ export async function seedTaxonomyIfEmpty(client?: PoolClient): Promise<{ seeded
   let icpCount = 0;
   for (const icp of icpData) {
     await exec(
-      `INSERT INTO icp_profiles (name, description, niche_id, criteria)
-       VALUES ($1, $2, (SELECT id FROM niche_profiles WHERE name = $3), $4)`,
+      `INSERT INTO icp_profiles (name, description, niche_id, criteria, owner_baseline)
+       VALUES ($1, $2, (SELECT id FROM niche_profiles WHERE name = $3), $4, TRUE)`,
       [icp.name, icp.desc, icp.niche, JSON.stringify(icp.criteria)]
     );
     icpCount++;

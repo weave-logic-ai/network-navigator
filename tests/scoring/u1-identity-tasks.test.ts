@@ -63,6 +63,22 @@ describe('automatic score tasks', () => {
     expect(inserts.every(([sql]) => String(sql).includes('c.linkedin_url ~*'))).toBe(true);
   });
 
+  it('suppresses score transitions for an incomparable predecessor while retaining identity repair', async () => {
+    await checkAndGenerateTasks('c1', null, scored, true, { forceInline: true, identityOnly: true });
+    expect(mockQuery.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO tasks'))).toHaveLength(0);
+
+    mockQuery.mockReset();
+    mockQuery.mockImplementation(async sql => {
+      if (String(sql).includes('FROM contacts')) return rows([{
+        ...contact, full_name: 'Unknown', first_name: null, last_name: null,
+      }]) as never;
+      return rows([]) as never;
+    });
+    await checkAndGenerateTasks('c2', null, scored, true, { forceInline: true, identityOnly: true });
+    expect(mockQuery.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO tasks'))
+      .map(([, params]) => params?.[2])).toEqual(['REPAIR_IDENTITY']);
+  });
+
   it('creates only a linked identity repair for an unknown person', async () => {
     mockQuery.mockImplementation(async (sql) => {
       if (String(sql).includes('FROM contacts')) return rows([{ ...contact, full_name: 'Unknown', first_name: null, last_name: null }]) as never;

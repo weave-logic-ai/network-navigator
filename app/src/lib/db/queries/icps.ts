@@ -8,6 +8,7 @@ export interface IcpRow {
   name: string;
   description: string | null;
   is_active: boolean;
+  owner_baseline: boolean;
   criteria: Record<string, unknown>;
   weight_overrides: Record<string, unknown>;
   created_at: Date;
@@ -16,7 +17,7 @@ export interface IcpRow {
 
 export async function listIcps(): Promise<IcpRow[]> {
   const result = await query<IcpRow>(
-    `SELECT id, niche_id, name, description, is_active, criteria, weight_overrides,
+    `SELECT id, niche_id, name, description, is_active, owner_baseline, criteria, weight_overrides,
             created_at, updated_at
      FROM icp_profiles
      ORDER BY name`
@@ -26,7 +27,7 @@ export async function listIcps(): Promise<IcpRow[]> {
 
 export async function getIcp(id: string): Promise<IcpRow | null> {
   const result = await query<IcpRow>(
-    `SELECT id, niche_id, name, description, is_active, criteria, weight_overrides,
+    `SELECT id, niche_id, name, description, is_active, owner_baseline, criteria, weight_overrides,
             created_at, updated_at
      FROM icp_profiles
      WHERE id = $1`,
@@ -43,8 +44,8 @@ export async function createIcp(data: {
   niche_id?: string;
 }): Promise<IcpRow> {
   const result = await query<IcpRow>(
-    `INSERT INTO icp_profiles (name, description, criteria, is_active, niche_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO icp_profiles (name, description, criteria, is_active, niche_id, owner_baseline)
+     VALUES ($1, $2, $3, $4, $5, TRUE)
      RETURNING *`,
     [
       data.name,
@@ -61,13 +62,16 @@ export async function updateIcp(
   id: string,
   data: Record<string, unknown>
 ): Promise<IcpRow | null> {
-  const allowedKeys = ['name', 'description', 'criteria', 'is_active', 'weight_overrides', 'niche_id'];
+  const allowedKeys = ['name', 'description', 'criteria', 'is_active', 'owner_baseline', 'weight_overrides', 'niche_id'];
   const setClauses: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
 
   for (const [key, value] of Object.entries(data)) {
     if (allowedKeys.includes(key)) {
+      if (key === 'owner_baseline' && typeof value !== 'boolean') {
+        throw new TypeError('owner_baseline must be boolean');
+      }
       setClauses.push(`${key} = $${idx++}`);
       // Stringify JSON fields
       if (key === 'criteria' || key === 'weight_overrides') {
@@ -96,7 +100,7 @@ export async function deleteIcp(id: string): Promise<boolean> {
 
 export async function listIcpsByNiche(nicheId: string): Promise<IcpRow[]> {
   const result = await query<IcpRow>(
-    `SELECT id, niche_id, name, description, is_active, criteria, weight_overrides,
+    `SELECT id, niche_id, name, description, is_active, owner_baseline, criteria, weight_overrides,
             created_at, updated_at
      FROM icp_profiles
      WHERE niche_id = $1
@@ -108,7 +112,7 @@ export async function listIcpsByNiche(nicheId: string): Promise<IcpRow[]> {
 
 export async function findIcpByNicheAndName(nicheId: string, name: string): Promise<IcpRow | null> {
   const result = await query<IcpRow>(
-    `SELECT id, niche_id, name, description, is_active, criteria, weight_overrides,
+    `SELECT id, niche_id, name, description, is_active, owner_baseline, criteria, weight_overrides,
             created_at, updated_at
      FROM icp_profiles
      WHERE niche_id = $1 AND LOWER(name) = LOWER($2)

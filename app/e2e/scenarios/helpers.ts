@@ -53,9 +53,13 @@ export async function createScenarioFixture(): Promise<ScenarioFixture> {
         `https://www.linkedin.com/in/scenario-${firstContactId}`,
         `https://www.linkedin.com/in/scenario-${secondContactId}`, companyId]
     );
+    // These fixed visual-fixture scores are deliberately unverified legacy
+    // data. Never label them owner scores with an invented basis hash.
+    await client.query("SELECT set_config('app.score_owner_restore', 'true', true)");
     await client.query(
-      `INSERT INTO contact_scores (contact_id, composite_score, tier)
-       VALUES ($1, 0.8, 'gold'), ($2, 0.4, 'silver')`,
+      `INSERT INTO contact_scores (contact_id, composite_score, tier, basis_kind, basis_hash)
+       VALUES ($1, 0.8, 'gold', 'legacy-unverified', NULL),
+              ($2, 0.4, 'silver', 'legacy-unverified', NULL)`,
       [firstContactId, secondContactId]
     );
     await client.query(

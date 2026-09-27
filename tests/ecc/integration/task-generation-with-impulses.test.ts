@@ -1,26 +1,7 @@
-// Regression coverage for the ECC_IMPULSES=true task-generation gap.
-//
-// Bug: task-triggers.ts early-returns when ECC_IMPULSES=true with a comment
-// claiming the impulse scoring-adapter (`emitScoringImpulses`) picks up task
-// generation instead. That wiring did not exist anywhere in production —
-// `emitScoringImpulses` had zero production callers — so flipping the flag
-// silently disabled ALL automatic task generation and replaced it with
-// nothing. `tests/ecc/integration/feature-flags.test.ts` never caught this
-// because it calls `emitScoringImpulses` directly rather than through the
-// real scoring pipeline.
-//
-// This file exercises the REAL `scoreContact` pipeline (app/src/lib/scoring/
-// pipeline.ts is NOT mocked) with ECC_IMPULSES=true and asserts tasks are
-// still generated end-to-end: pipeline -> emitScoringImpulses -> emitImpulse
-// -> dispatchImpulse -> executeTaskGenerator -> INSERT INTO tasks.
-//
-// Note: this test registers `impulse_handlers` rows for the tenant, matching
-// what a configured tenant looks like. There is currently no seed data or
-// admin surface anywhere in the codebase that provisions `impulse_handlers`
-// rows automatically — a fresh/default tenant has none. That is a real,
-// separate gap (impulses are emitted into a void until a handler is
-// registered) flagged in the handoff report; it is out of scope for this
-// wiring fix, which is specifically about the emitter never being called.
+// Regression coverage for task durability with ECC_IMPULSES on and off.
+// Exercises the real scoreContact pipeline with mocked database boundaries:
+// task inserts and impulse records run on the score transaction client, and
+// the ordered dispatcher observes tasks already present before handlers run.
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -112,13 +93,17 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
   it('generates tasks via the real scoring pipeline when ECC_IMPULSES=true and a handler is registered', async () => {
     process.env.ECC_IMPULSES = 'true';
 
-    jest.doMock('@/lib/db/client', () => ({
-      query: jest.fn(),
-      transaction: jest.fn(),
-      healthCheck: jest.fn(),
-      getPool: jest.fn(),
-      shutdown: jest.fn(),
-    }));
+    jest.doMock('@/lib/db/client', () => {
+      const query = jest.fn();
+      const client = { query, release: jest.fn() };
+      return {
+        query,
+        transaction: jest.fn(async fn => fn(client)),
+        healthCheck: jest.fn(),
+        getPool: jest.fn(() => ({ connect: async () => client })),
+        shutdown: jest.fn(),
+      };
+    });
 
     jest.doMock('@/lib/db/queries/scoring', () => ({
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
@@ -127,6 +112,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
       getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
+        basisKind: 'owner', basisHash: null,
         compositeScore: 0.5,
         tier: 'silver',
         persona: 'warm-lead',
@@ -140,14 +126,15 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         behavioralSignals: null,
         referralSignals: null,
       }),
-      upsertContactScore: jest.fn().mockResolvedValue(undefined),
+      upsertContactScore: jest.fn().mockResolvedValue({
+        comparable: true, revision: 1,
+        previous: fixedComposite({ compositeScore: 0.5, tier: 'silver', persona: 'warm-lead' }),
+      }),
       upsertContactIcpFit: jest.fn().mockResolvedValue(undefined),
     }));
 
-    // Composite/referral scoring math is exercised elsewhere (tests/scoring/).
-    // Here we pin the output so the test asserts the plumbing — pipeline ->
-    // emitScoringImpulses -> emitImpulse -> dispatchImpulse ->
-    // executeTaskGenerator -> INSERT INTO tasks — not the scoring algorithm.
+    // Composite/referral math is exercised elsewhere; pin output to test the
+    // transaction and dispatch plumbing here.
     jest.doMock('@/lib/scoring/composite', () => ({
       computeCompositeScore: jest.fn().mockReturnValue(fixedComposite()),
     }));
@@ -161,6 +148,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
     const mockQuery = dbModule.query as jest.MockedFunction<typeof dbModule.query>;
 
     const impulseStore: Record<string, Record<string, unknown>> = {};
+    const acknowledgments: string[] = [];
     let impulseSeq = 0;
     const insertedTasks: Array<{ sql: string; params: unknown[] }> = [];
 
@@ -171,18 +159,21 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       if (text.includes('obj_description(to_regclass')) {
         return mockRows([{ repair_ready: true, recommendation_ready: true }]);
       }
+      if (text.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (text.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
 
       if (text.includes(`FROM tenants WHERE slug = 'default'`)) {
         return mockRows([{ id: TENANT_ID }]);
       }
 
       if (text.includes('INSERT INTO impulses')) {
-        const [tenantId, impulseType, sourceEntityType, sourceEntityId, payloadJson] = p as string[];
+        const [tenantId, impulseType, sourceEntityId, payloadJson, revision, order] = p as string[];
         const id = `imp-${++impulseSeq}`;
         const row = {
           id, tenant_id: tenantId, impulse_type: impulseType,
-          source_entity_type: sourceEntityType, source_entity_id: sourceEntityId,
-          payload: JSON.parse(payloadJson), created_at: '2026-01-01',
+          source_entity_type: 'contact', source_entity_id: sourceEntityId,
+          payload: JSON.parse(payloadJson), score_revision: revision,
+          score_event_order: order, score_dispatched_at: null, created_at: '2026-01-01',
         };
         impulseStore[id] = row;
         return mockRows([row]);
@@ -193,19 +184,31 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         return mockRows(impulseStore[id] ? [impulseStore[id]] : []);
       }
 
+      if (text.includes('SELECT id FROM impulses') && text.includes('score_dispatched_at IS NULL')) {
+        return mockRows(Object.values(impulseStore)
+          .filter(row => row.score_dispatched_at === null)
+          .sort((a, b) => Number(a.score_event_order) - Number(b.score_event_order))
+          .map(row => ({ id: row.id })));
+      }
+      if (text.includes('UPDATE impulses SET score_dispatched_at')) {
+        impulseStore[p[0] as string].score_dispatched_at = '2026-01-01';
+        return mockRows([]);
+      }
+
       if (text.includes('FROM impulse_handlers')) {
         const impulseType = p[1] as string;
-        if (impulseType === 'tier_changed' || impulseType === 'persona_assigned') {
+        if (['score_computed', 'tier_changed', 'persona_assigned'].includes(impulseType)) {
           return mockRows([{
             id: `h-${impulseType}`, tenant_id: TENANT_ID, impulse_type: impulseType,
             handler_type: 'task_generator', config: {}, enabled: true, priority: 0,
             created_at: 'x', updated_at: 'x',
           }]);
         }
-        return mockRows([]); // score_computed: no handler registered — legitimate no-op
+        return mockRows([]);
       }
 
       if (text.includes('INSERT INTO impulse_acks')) {
+        acknowledgments.push(text.includes("'success'") ? 'success' : 'failed');
         return mockRows([]);
       }
 
@@ -214,7 +217,8 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       }
 
       if (text.includes('SELECT id FROM tasks')) {
-        return mockRows([]); // no pre-existing pending task — dedup passes through
+        return mockRows(insertedTasks.some(task => task.params[2] === p[0] && task.params[5] === p[2])
+          ? [{ id: 'existing-task' }] : []);
       }
 
       if (text.includes('INSERT INTO tasks')) {
@@ -227,26 +231,27 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
 
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const { scoreContact } = await import('@/lib/scoring/pipeline');
-    const result = await scoreContact('c1');
+    const { captureOwnerScoringBasis, scoreContact } = await import('@/lib/scoring/pipeline');
+    const basis = await captureOwnerScoringBasis();
+    const scoring = await import('@/lib/db/queries/scoring');
+    const old = await scoring.getContactScoreBreakdown('c1');
+    jest.mocked(scoring.getContactScoreBreakdown).mockResolvedValue({ ...old!, basisHash: basis.basisHash });
+    const result = await scoreContact('c1', undefined, undefined, basis);
     expect(result.score.tier).toBe('gold');
 
-    // Flush the fire-and-forget impulse emission + dispatch chain. Every
-    // step here is promise/microtask-based (mocked query, no real timers or
-    // I/O), so the microtask queue fully drains before this callback runs.
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-
-    // The tier_changed (silver -> gold) and persona_assigned (warm-lead ->
-    // buyer) impulses must each have produced a task via the real
-    // task-generator handler — the same tasks the legacy inline path in
-    // task-triggers.ts would have created directly.
+    // The score transaction creates these tasks before impulse dispatch.
     expect(insertedTasks.length).toBe(2);
     const taskTypes = insertedTasks.map(t => t.params[2]);
     expect(taskTypes).toContain('SEND_MESSAGE'); // gold-tier intro task
     expect(taskTypes).toContain('RESEARCH'); // buyer-persona research task
+    expect(Object.values(impulseStore)).toHaveLength(3);
+    expect(Object.values(impulseStore).every(row => row.score_dispatched_at !== null &&
+      (row.payload as Record<string, unknown>).scoreTasksCommitted === true)).toBe(true);
+    expect(acknowledgments).toHaveLength(3);
+    expect(acknowledgments.every(status => status === 'success')).toBe(true);
+    expect(errSpy).not.toHaveBeenCalled();
 
-    // The misconfiguration guard must NOT have fired — the emitter really ran.
+    // The legacy misconfiguration guard must not fire on the transactional path.
     const guardCalls = errSpy.mock.calls.filter(c =>
       String(c[0]).includes('no impulse emitter ran')
     );
@@ -258,13 +263,17 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
   it('preserves the legacy inline task path exactly when ECC_IMPULSES is off', async () => {
     // ECC_IMPULSES intentionally left unset (false).
 
-    jest.doMock('@/lib/db/client', () => ({
-      query: jest.fn(),
-      transaction: jest.fn(),
-      healthCheck: jest.fn(),
-      getPool: jest.fn(),
-      shutdown: jest.fn(),
-    }));
+    jest.doMock('@/lib/db/client', () => {
+      const query = jest.fn();
+      const client = { query, release: jest.fn() };
+      return {
+        query,
+        transaction: jest.fn(async fn => fn(client)),
+        healthCheck: jest.fn(),
+        getPool: jest.fn(() => ({ connect: async () => client })),
+        shutdown: jest.fn(),
+      };
+    });
 
     jest.doMock('@/lib/db/queries/scoring', () => ({
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
@@ -273,6 +282,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
       getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
+        basisKind: 'owner', basisHash: null,
         compositeScore: 0.5,
         tier: 'silver',
         persona: 'warm-lead',
@@ -286,7 +296,10 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         behavioralSignals: null,
         referralSignals: null,
       }),
-      upsertContactScore: jest.fn().mockResolvedValue(undefined),
+      upsertContactScore: jest.fn().mockResolvedValue({
+        comparable: true, revision: 1,
+        previous: fixedComposite({ compositeScore: 0.5, tier: 'silver', persona: 'warm-lead' }),
+      }),
       upsertContactIcpFit: jest.fn().mockResolvedValue(undefined),
     }));
 
@@ -311,6 +324,9 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         return mockRows([{ repair_ready: true, recommendation_ready: true }]);
       }
 
+      if (text.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (text.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
+
       if (text.includes('FROM contacts WHERE id = $1')) {
         return mockRows([namedIdentity('Ada Lovelace')]);
       }
@@ -325,15 +341,14 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       return mockRows([]);
     }) as typeof mockQuery);
 
-    const { scoreContact } = await import('@/lib/scoring/pipeline');
-    await scoreContact('c1');
-    await new Promise((resolve) => setImmediate(resolve));
-
+    const { captureOwnerScoringBasis, scoreContact } = await import('@/lib/scoring/pipeline');
+    const basis = await captureOwnerScoringBasis();
+    const scoring = await import('@/lib/db/queries/scoring');
+    const old = await scoring.getContactScoreBreakdown('c1');
+    jest.mocked(scoring.getContactScoreBreakdown).mockResolvedValue({ ...old!, basisHash: basis.basisHash });
+    await scoreContact('c1', undefined, undefined, basis);
     expect(insertedTasks.length).toBe(2);
-    const taskSources = mockQuery.mock.calls
-      .filter(c => String(c[0]).includes('INSERT INTO tasks'))
-      .map(c => String(c[0]));
-    expect(taskSources.every(sql => sql.includes("'auto-score'"))).toBe(true);
+    expect(insertedTasks.every(task => task.params[6] === 'auto-score')).toBe(true);
 
     // No ECC impulse plumbing was touched at all.
     const sql = mockQuery.mock.calls.map(c => String(c[0])).join('\n');
@@ -349,10 +364,15 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
   ])('%s pipeline handles %s identity without outreach', async (_mode, enabled, _identity, self) => {
     if (enabled) process.env.ECC_IMPULSES = 'true';
 
-    jest.doMock('@/lib/db/client', () => ({
-      query: jest.fn(), transaction: jest.fn(), healthCheck: jest.fn(),
-      getPool: jest.fn(), shutdown: jest.fn(),
-    }));
+    jest.doMock('@/lib/db/client', () => {
+      const query = jest.fn();
+      const client = { query, release: jest.fn() };
+      return {
+        query, transaction: jest.fn(async fn => fn(client)),
+        healthCheck: jest.fn(), getPool: jest.fn(() => ({ connect: async () => client })),
+        shutdown: jest.fn(),
+      };
+    });
     jest.doMock('@/lib/db/queries/scoring', () => ({
       getDefaultWeightProfile: jest.fn().mockResolvedValue(null),
       getWeightProfileByName: jest.fn().mockResolvedValue(null),
@@ -366,7 +386,10 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
         referralPersona: null, referralDimensions: [], behavioralSignals: null,
         referralSignals: null,
       }),
-      upsertContactScore: jest.fn().mockResolvedValue(undefined),
+      upsertContactScore: jest.fn().mockResolvedValue({
+        comparable: true, revision: 1,
+        previous: fixedComposite({ compositeScore: 0.5, tier: 'silver', persona: 'warm-lead' }),
+      }),
       upsertContactIcpFit: jest.fn().mockResolvedValue(undefined),
     }));
     jest.doMock('@/lib/scoring/composite', () => ({
@@ -381,33 +404,52 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
     const { query } = await import('@/lib/db/client');
     const mockQuery = query as jest.MockedFunction<typeof query>;
     const impulses: Record<string, Record<string, unknown>> = {};
+    const acknowledgments: string[] = [];
     const inserted: unknown[][] = [];
     const pending = new Set<string>();
     let nextImpulse = 0;
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     mockQuery.mockImplementation(((sql: unknown, params?: unknown[]) => {
       const statement = String(sql);
       const values = (params ?? []) as unknown[];
       if (statement.includes('obj_description(to_regclass')) {
         return mockRows([{ repair_ready: true, recommendation_ready: true }]);
       }
+      if (statement.includes('txid_current_snapshot')) return mockRows([{ snapshot_id: '1:2:' }]);
+      if (statement.includes('SELECT id FROM contacts WHERE id = $1 FOR UPDATE')) return mockRows([{ id: 'c1' }]);
       if (statement.includes("FROM tenants WHERE slug = 'default'")) return mockRows([{ id: TENANT_ID }]);
       if (statement.includes('INSERT INTO impulses')) {
         const id = `imp-${++nextImpulse}`;
         const row = {
           id, tenant_id: values[0], impulse_type: values[1],
-          source_entity_type: values[2], source_entity_id: values[3],
-          payload: JSON.parse(values[4] as string), created_at: '2026-01-01',
+          source_entity_type: 'contact', source_entity_id: values[2],
+          payload: JSON.parse(values[3] as string), score_revision: values[4],
+          score_event_order: values[5], score_dispatched_at: null,
+          created_at: '2026-01-01',
         };
         impulses[id] = row;
         return mockRows([row]);
       }
       if (statement.includes('SELECT * FROM impulses WHERE id')) return mockRows([impulses[values[0] as string]]);
+      if (statement.includes('SELECT id FROM impulses') && statement.includes('score_dispatched_at IS NULL')) {
+        return mockRows(Object.values(impulses)
+          .filter(row => row.score_dispatched_at === null)
+          .sort((a, b) => Number(a.score_event_order) - Number(b.score_event_order))
+          .map(row => ({ id: row.id })));
+      }
+      if (statement.includes('UPDATE impulses SET score_dispatched_at')) {
+        impulses[values[0] as string].score_dispatched_at = '2026-01-01';
+        return mockRows([]);
+      }
       if (statement.includes('FROM impulse_handlers')) return mockRows([{
         id: `h-${values[1]}`, tenant_id: TENANT_ID, impulse_type: values[1],
         handler_type: 'task_generator', config: {}, enabled: true, priority: 0,
         created_at: 'x', updated_at: 'x',
       }]);
-      if (statement.includes('INSERT INTO impulse_acks')) return mockRows([]);
+      if (statement.includes('INSERT INTO impulse_acks')) {
+        acknowledgments.push(statement.includes("'success'") ? 'success' : 'failed');
+        return mockRows([]);
+      }
       if (statement.includes('FROM contacts WHERE id = $1')) {
         return mockRows([{ ...namedIdentity('Unknown Person'), linkedin_url: self ? 'self:c1' : namedIdentity('Unknown Person').linkedin_url }]);
       }
@@ -427,6 +469,15 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
     await scoreContact('c1');
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    if (enabled) {
+      expect(Object.values(impulses)).toHaveLength(3);
+      expect(Object.values(impulses).every(row => row.score_dispatched_at !== null &&
+        (row.payload as Record<string, unknown>).scoreTasksCommitted === true)).toBe(true);
+      expect(acknowledgments).toHaveLength(3);
+      expect(acknowledgments.every(status => status === 'success')).toBe(true);
+    }
 
     expect(inserted).toHaveLength(self ? 0 : 1);
     if (!self) {
@@ -445,6 +496,31 @@ describe('checkAndGenerateTasks — misconfiguration guard (unit)', () => {
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+  });
+
+  it('checks U1 task indexes and inserts on the score transaction client', async () => {
+    const globalQuery = jest.fn(() => { throw new Error('unexpected second pool connection'); });
+    jest.doMock('@/lib/db/client', () => ({ query: globalQuery }));
+    const transactionQuery = jest.fn(async (sql: string) => {
+      if (sql.includes('FROM contacts WHERE id')) return mockRows([namedIdentity('Ada Lovelace')]);
+      if (sql.includes('obj_description(to_regclass')) {
+        return mockRows([{ repair_ready: true, recommendation_ready: true }]);
+      }
+      return mockRows([]);
+    });
+    const { checkAndGenerateTasks } = await import('@/lib/scoring/task-triggers');
+    type CompositeScore = Parameters<typeof checkAndGenerateTasks>[2];
+    type ScoreClient = NonNullable<Parameters<typeof checkAndGenerateTasks>[4]>['client'];
+    await checkAndGenerateTasks(
+      'c1',
+      fixedComposite({ tier: 'silver', persona: 'warm-lead' }) as unknown as CompositeScore,
+      fixedComposite() as unknown as CompositeScore,
+      true,
+      { client: { query: transactionQuery } as unknown as ScoreClient, forceInline: true }
+    );
+    expect(transactionQuery.mock.calls.some(([sql]) => sql.includes('obj_description(to_regclass'))).toBe(true);
+    expect(transactionQuery.mock.calls.filter(([sql]) => sql.includes('INSERT INTO tasks'))).toHaveLength(2);
+    expect(globalQuery).not.toHaveBeenCalled();
   });
 
   it('logs an explicit error when ECC_IMPULSES is on but no emitter was invoked', async () => {

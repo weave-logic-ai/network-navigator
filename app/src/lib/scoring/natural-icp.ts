@@ -201,14 +201,14 @@ async function upsertNaturalICP(icp: NaturalICPResult): Promise<void> {
   if (existing.rows.length > 0) {
     await query(
       `UPDATE icp_profiles
-       SET criteria = $1, updated_at = NOW()
+       SET criteria = $1, owner_baseline = TRUE, updated_at = NOW()
        WHERE id = $2`,
       [JSON.stringify(criteria), existing.rows[0].id]
     );
   } else {
     await query(
-      `INSERT INTO icp_profiles (name, description, criteria, is_active, source)
-       VALUES ($1, $2, $3, true, 'natural')`,
+      `INSERT INTO icp_profiles (name, description, criteria, is_active, source, owner_baseline)
+       VALUES ($1, $2, $3, true, 'natural', TRUE)`,
       [
         "Natural ICP (auto-detected)",
         "Auto-generated from owner profile (60%) and network composition (40%)",

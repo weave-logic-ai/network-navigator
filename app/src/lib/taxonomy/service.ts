@@ -1,7 +1,12 @@
 // Taxonomy service: Industry CRUD, hierarchy queries, ICP→Niche→Industry resolution
 
 import { query } from '../db/client';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import type { Industry, IndustryWithNiches, NicheWithIcps, TaxonomyChain } from './types';
+
+function readQuery<T extends QueryResultRow>(client: PoolClient | undefined, sql: string, params?: unknown[]): Promise<QueryResult<T>> {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
+}
 
 // --- Industries ---
 
@@ -150,8 +155,8 @@ export async function getNicheWithIcps(nicheId: string): Promise<NicheWithIcps |
 
 // --- ICP → Niche → Industry Resolution ---
 
-export async function resolveTaxonomyChain(icpProfileId: string): Promise<TaxonomyChain> {
-  const result = await query<Record<string, unknown>>(
+export async function resolveTaxonomyChain(icpProfileId: string, client?: PoolClient): Promise<TaxonomyChain> {
+  const result = await readQuery<Record<string, unknown>>(client,
     `SELECT
        ip.id as icp_id, ip.niche_id, ip.name as icp_name, ip.description as icp_desc,
        ip.is_active, ip.criteria, ip.weight_overrides, ip.created_at as icp_created,

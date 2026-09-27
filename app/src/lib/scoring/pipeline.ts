@@ -1,6 +1,4 @@
-// Scoring pipeline - orchestrates scoring for single/batch contacts
-// Phase 1: Core 9-dimension composite scoring
-// Phase 2: Referral scoring (6 components)
+// Scoring pipeline for persisted owner baselines and read-only lens previews.
 
 import { WeightManager } from './weight-manager';
 import { computeCompositeScore } from './composite';
@@ -15,35 +13,38 @@ import {
   ContentRelevanceScorer,
   GraphCentralityScorer,
 } from './scorers';
-import { DimensionScorer, ScoringRunResult, IcpCriteria, ContactScoringData, CompositeScore, IcpProfile } from './types';
+import { DimensionScorer, ScoringRunResult, IcpCriteria, ContactScoringData, IcpProfile, WeightProfile, CompositeScore } from './types';
 import * as scoringQueries from '../db/queries/scoring';
 import { checkAndGenerateTasks } from './task-triggers';
 import { resolveTaxonomyChain } from '../taxonomy/service';
 import { RESEARCH_FLAGS } from '../config/research-flags';
-import { getActiveLensIcps } from '../targets/lens-service';
-import { emitScoringImpulses } from '../ecc/impulses/scoring-adapter';
+import { getActiveLensForTarget } from '../targets/lens-service';
+import { ECC_FLAGS } from '../ecc/types';
+import { transaction } from '../db/client';
+import { createHash } from 'node:crypto';
+import { drainScoringImpulses, recordScoringImpulses } from './transition-writer';
 
-/**
- * Resolve the list of ICP profiles to score against.
- *
- * When the Phase 1.5 targets flag is on AND a `targetId` is provided, we
- * query the target's active lens's ICPs (see
- * `app/src/lib/targets/lens-service.ts`). If that list is empty — no lens,
- * no config ICPs, or all inactive — we fall back to the owner-default
- * `getActiveIcpProfiles()` so existing callers see no regression.
- *
- * When the flag is off OR targetId is absent, behavior is exactly today's:
- * the owner-default ICP list is returned unchanged.
- */
-async function resolveIcpProfilesForScoring(targetId?: string): Promise<IcpProfile[]> {
-  if (RESEARCH_FLAGS.targets && targetId) {
-    const lensIcps = await getActiveLensIcps(targetId);
-    if (lensIcps.length > 0) return lensIcps;
+export class TargetScopedScoreError extends Error {
+  constructor() {
+    super('targetId is only supported by the read-only scoring context preview');
+    this.name = 'TargetScopedScoreError';
   }
-  return scoringQueries.getActiveIcpProfiles();
+}
+
+export function assertOwnerBaseline(targetId?: string): void {
+  if (targetId !== undefined) throw new TargetScopedScoreError();
+}
+
+export class LensPreviewError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = 'LensPreviewError';
+  }
 }
 
 const behavioralScorer = new BehavioralScorer();
+// Bump whenever composite/referral scoring semantics change.
+const OWNER_ALGORITHM_VERSION = 1;
 
 const ALL_SCORERS: DimensionScorer[] = [
   new IcpFitScorer(),
@@ -57,159 +58,390 @@ const ALL_SCORERS: DimensionScorer[] = [
   new GraphCentralityScorer(),
 ];
 
-export async function scoreContact(
-  contactId: string,
-  profileName?: string,
-  targetId?: string
-): Promise<ScoringRunResult> {
-  // Phase 1.5 — WS-4 per-target ICP plumbing. When `RESEARCH_FLAGS.targets`
-  // is on and `targetId` resolves to a target with an active lens, the ICP
-  // set used below is the lens-scoped set. Otherwise we keep today's
-  // behavior: owner-default ICPs via `getActiveIcpProfiles()`.
-  const weightManager = new WeightManager();
-  await weightManager.loadProfile(profileName);
+export interface OwnerScoringBasis {
+  readonly weightProfile: WeightProfile;
+  readonly icpProfiles: readonly IcpProfile[];
+  readonly criteriaByIcpId: Readonly<Record<string, IcpCriteria>>;
+  readonly referralBaselines: Awaited<ReturnType<typeof scoringQueries.getScoringBaselines>>;
+  readonly snapshotId: string;
+  readonly basisHash: string;
+}
 
-  // Load contact scoring data
-  const contact = await scoringQueries.getContactScoringData(contactId);
-  if (!contact) {
-    throw new Error(`Contact not found: ${contactId}`);
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+  });
+}
+
+// PostgreSQL stores score numbers as real. Compare the value a retry would
+// persist, including dimensions and signals, rather than unrounded JS math.
+function samePersistedScore(previous: CompositeScore, score: CompositeScore): boolean {
+  const persisted = (value: CompositeScore) => ({
+    composite: Math.fround(value.compositeScore),
+    tier: value.tier,
+    persona: value.persona,
+    behavioralPersona: value.behavioralPersona,
+    scoringVersion: value.scoringVersion,
+    referralLikelihood: value.referralLikelihood == null ? null : Math.fround(value.referralLikelihood),
+    referralTier: value.referralTier,
+    referralPersona: value.referralPersona,
+    behavioralSignals: value.behavioralSignals,
+    referralSignals: value.referralSignals,
+    dimensions: value.dimensions.map(dim => ({
+      dimension: dim.dimension,
+      rawValue: Math.fround(dim.rawValue),
+      weightedValue: Math.fround(dim.weightedValue),
+      weight: Math.fround(dim.weight),
+      metadata: dim.metadata ?? {},
+    })).sort((a, b) => a.dimension.localeCompare(b.dimension)),
+    referralDimensions: (value.referralDimensions ?? []).map(dim => ({
+      component: dim.component,
+      rawValue: Math.fround(dim.rawValue),
+      weightedValue: Math.fround(dim.weightedValue),
+      weight: Math.fround(dim.weight),
+      metadata: dim.metadata ?? {},
+    })).sort((a, b) => a.component.localeCompare(b.component)),
+  });
+  return stableJson(persisted(previous)) === stableJson(persisted(score));
+}
+
+function ownerBasisHash(
+  profile: WeightProfile,
+  icps: readonly IcpProfile[],
+  criteriaByIcpId: Readonly<Record<string, IcpCriteria>>,
+  referralBaselines: OwnerScoringBasis['referralBaselines']
+): string {
+  const relevant = {
+    algorithmVersion: OWNER_ALGORITHM_VERSION,
+    weights: profile.weights,
+    icps: icps.map(icp => ({ id: icp.id, criteria: icp.criteria, effectiveCriteria: criteriaByIcpId[icp.id] })),
+    referralBaselines,
+  };
+  return createHash('sha256').update(stableJson(relevant)).digest('hex');
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.values(value).forEach(deepFreeze);
+    Object.freeze(value);
   }
+  return value;
+}
 
-  // Determine which dimensions have data
-  const availableDimensions = getAvailableDimensions(contact);
-  const weights = weightManager.redistributeWeights(availableDimensions);
-
-  // Load active ICP profiles — lens-scoped when a targetId + flag resolve.
-  const icpProfiles = await resolveIcpProfilesForScoring(targetId);
-
-  // Find the best-matching ICP for this contact's composite score
-  let bestIcpCriteria: IcpCriteria | undefined;
-  let bestIcpFit = -1;
-  const icpFitScorer = new IcpFitScorer();
-  for (const icp of icpProfiles) {
-    const fit = icpFitScorer.score(contact, icp.criteria);
-    if (fit > bestIcpFit) {
-      bestIcpFit = fit;
-      bestIcpCriteria = icp.criteria;
+/** Freeze the owner scoring settings before a long-running rescore starts. */
+export async function captureOwnerScoringBasis(profileName?: string): Promise<OwnerScoringBasis> {
+  return transaction(async client => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const snapshot = await client.query<{ snapshot_id: string }>(
+      'SELECT txid_current_snapshot()::text AS snapshot_id'
+    );
+    const weights = new WeightManager();
+    const weightProfile = await weights.loadProfile(profileName, client);
+    const icpProfiles = await scoringQueries.getActiveIcpProfiles(client);
+    const referralBaselines = await scoringQueries.getScoringBaselines(client);
+    const criteriaByIcpId: Record<string, IcpCriteria> = {};
+    for (const icp of icpProfiles) {
+      const chain = await resolveTaxonomyChain(icp.id, client);
+      criteriaByIcpId[icp.id] = {
+        ...icp.criteria,
+        ...(chain.industry ? { industries: [chain.industry.name] } : {}),
+        ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
+      };
     }
-  }
-
-  // Enrich best ICP criteria with taxonomy context
-  if (bestIcpCriteria) {
-    const bestIcp = icpProfiles.find(p => p.criteria === bestIcpCriteria);
-    if (bestIcp?.id) {
-      try {
-        const chain = await resolveTaxonomyChain(bestIcp.id);
-        if (chain.industry || chain.niche) {
-          bestIcpCriteria = {
-            ...bestIcpCriteria,
-            ...(chain.industry ? { industries: [chain.industry.name] } : {}),
-            ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
-          };
-        }
-      } catch {
-        // Taxonomy resolution is non-blocking
-      }
-    }
-  }
-
-  // Phase 1: Compute composite score (9 dimensions) using best-matching ICP
-  const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestIcpCriteria);
-
-  // Phase 2: Compute referral scoring
-  try {
-    const { computeReferralScore } = await import('./referral/referral-pipeline');
-    const baselines = await scoringQueries.getScoringBaselines();
-    const referralContext = {
-      p90Mutuals: baselines.p90Mutuals,
-      p90Edges: baselines.p90Edges,
-      totalClusters: baselines.totalClusters,
-      existingGoldScore: score.compositeScore,
-      existingRelationshipStrength:
-        score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0,
+    const captured = {
+      weightProfile: { ...weightProfile, weights: structuredClone(weightProfile.weights) },
+      icpProfiles: icpProfiles.map(icp => ({
+        ...icp,
+        criteria: structuredClone(icp.criteria),
+        weightOverrides: structuredClone(icp.weightOverrides),
+      })),
+      criteriaByIcpId: structuredClone(criteriaByIcpId),
+      referralBaselines: { ...referralBaselines },
+      snapshotId: snapshot.rows[0].snapshot_id,
     };
+    return deepFreeze({
+      ...captured,
+      basisHash: ownerBasisHash(captured.weightProfile, captured.icpProfiles,
+        captured.criteriaByIcpId, captured.referralBaselines),
+    });
+  });
+}
 
-    // Attach existing behavioral persona for referral persona classification
+/** Validate a persisted import-job basis before replaying it after restart. */
+export function restoreOwnerScoringBasis(raw: unknown): OwnerScoringBasis {
+  if (!raw || typeof raw !== 'object') throw new Error('Missing persisted owner basis');
+  const basis = raw as OwnerScoringBasis;
+  if (!basis.weightProfile || !Array.isArray(basis.icpProfiles) ||
+      !basis.criteriaByIcpId || !basis.referralBaselines ||
+      typeof basis.basisHash !== 'string') {
+    throw new Error('Invalid persisted owner basis');
+  }
+  const expected = ownerBasisHash(basis.weightProfile, basis.icpProfiles,
+    basis.criteriaByIcpId, basis.referralBaselines);
+  if (expected !== basis.basisHash) throw new Error('Persisted owner basis hash mismatch');
+  return deepFreeze(basis);
+}
+
+/** Score all contextual inputs from one read-only repeatable-read snapshot. */
+export async function previewContactForTarget(
+  contactId: string,
+  targetId: string,
+  profileName?: string
+) {
+  if (!RESEARCH_FLAGS.targets) throw new LensPreviewError('Research targets are disabled', 422);
+  return transaction(async client => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const snapshot = await client.query<{ captured_at: Date; snapshot_id: string }>(
+      'SELECT transaction_timestamp() AS captured_at, txid_current_snapshot()::text AS snapshot_id'
+    );
+    // Contacts have no tenant column. Their contact target is the tenant
+    // association; the owner's self target binds the operator to that tenant.
+    const boundary = await client.query<{ owner_id: string; tenant_id: string }>(
+      `SELECT owner.id AS owner_id, tenant.id AS tenant_id
+       FROM tenants tenant
+       JOIN owner_profiles owner ON owner.is_current = TRUE
+       JOIN research_targets self_target
+         ON self_target.tenant_id = tenant.id
+        AND self_target.kind = 'self' AND self_target.owner_id = owner.id
+       JOIN research_targets target
+         ON target.id = $1 AND target.tenant_id = tenant.id
+        AND (target.kind <> 'self' OR target.owner_id = owner.id)
+       JOIN research_targets contact_target
+         ON contact_target.tenant_id = tenant.id
+        AND contact_target.kind = 'contact' AND contact_target.contact_id = $2
+       JOIN contacts contact ON contact.id = contact_target.contact_id
+       WHERE tenant.slug = 'default'
+         AND (SELECT COUNT(*) FROM owner_profiles WHERE is_current = TRUE) = 1
+       LIMIT 1`,
+      [targetId, contactId]
+    );
+    const scope = boundary.rows[0];
+    if (!scope) throw new LensPreviewError('Scoring context not found', 404);
+    const lens = await getActiveLensForTarget(targetId, client);
+    if (!lens || lens.tenantId !== scope.tenant_id ||
+        lens.userId !== scope.owner_id || lens.primaryTargetId !== targetId) {
+      throw new LensPreviewError('Scoring context not found', 404);
+    }
+
+    const icpRows = await client.query<{
+      id: string; name: string; description: string | null; is_active: boolean;
+      criteria: IcpCriteria; weight_overrides: Record<string, number>;
+      created_at: Date; updated_at: Date;
+    }>(
+      `SELECT ip.id, ip.name, ip.description, ip.is_active, ip.criteria,
+              ip.weight_overrides, ip.created_at, ip.updated_at
+       FROM research_target_icps rti
+       JOIN icp_profiles ip ON ip.id = rti.icp_profile_id
+       WHERE rti.target_id = $1 AND rti.lens_id = $2 AND ip.is_active = TRUE
+       ORDER BY ip.name`,
+      [targetId, lens.id]
+    );
+    const icps: IcpProfile[] = icpRows.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      isActive: row.is_active,
+      criteria: row.criteria,
+      weightOverrides: row.weight_overrides,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    }));
+    if (icps.length === 0) throw new LensPreviewError('Active lens has no active ICPs', 422);
+
+    const weightManager = new WeightManager();
+    const weightProfile = await weightManager.loadProfile(profileName, client);
+    const capturedAt = snapshot.rows[0].captured_at.toISOString();
+    const contact = await scoringQueries.getContactScoringData(contactId, client);
+    if (!contact) throw new LensPreviewError('Contact not found', 404);
+
+    const fitScorer = new IcpFitScorer();
+    let best = icps[0];
+    let bestFit = -1;
+    const icpFits = icps.map(icp => {
+      const fitScore = fitScorer.score(contact, icp.criteria);
+      if (fitScore > bestFit) { bestFit = fitScore; best = icp; }
+      return { icpProfileId: icp.id, fitScore };
+    });
+    let criteria = best.criteria;
+    const chain = await resolveTaxonomyChain(best.id, client);
+    if (chain.industry || chain.niche) {
+      criteria = {
+        ...criteria,
+        ...(chain.industry ? { industries: [chain.industry.name] } : {}),
+        ...(chain.niche?.keywords?.length ? { nicheKeywords: chain.niche.keywords } : {}),
+      };
+    }
+    const weights = weightManager.redistributeWeights(getAvailableDimensions(contact));
+    const score = computeCompositeScore(contact, ALL_SCORERS, weights, criteria, OWNER_ALGORITHM_VERSION);
+    const referralBaselines = await scoringQueries.getScoringBaselines(client);
+    const { computeReferralScore } = await import('./referral/referral-pipeline');
     contact.existingGoldScore = score.compositeScore;
-    contact.existingRelationshipStrength = referralContext.existingRelationshipStrength;
+    contact.existingRelationshipStrength =
+      score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0;
     contact.existingBehavioralPersona = score.behavioralPersona;
-
-    const referral = computeReferralScore(contact, referralContext);
+    const referral = computeReferralScore(contact, {
+      ...referralBaselines,
+      existingGoldScore: score.compositeScore,
+      existingRelationshipStrength: contact.existingRelationshipStrength,
+    });
     score.referralLikelihood = referral.likelihood;
     score.referralTier = referral.tier;
     score.referralPersona = referral.persona;
     score.referralDimensions = referral.dimensions;
     score.referralSignals = referral.signals;
-  } catch (err) {
-    // Referral scoring is non-blocking — log and continue
-    console.error(`[scoring] Referral scoring failed for ${contactId}:`, err);
-  }
-
-  // Extract behavioral signals from the scorer instance
-  if (behavioralScorer.lastSignals) {
-    score.behavioralSignals = behavioralScorer.lastSignals;
-  }
-
-  // Retrieve old score before writing (for task trigger comparison)
-  let oldScore: CompositeScore | null = null;
-  try {
-    const oldBreakdown = await scoringQueries.getContactScoreBreakdown(contactId);
-    if (oldBreakdown) {
-      oldScore = {
-        compositeScore: oldBreakdown.compositeScore,
-        tier: oldBreakdown.tier as CompositeScore['tier'],
-        persona: (oldBreakdown.persona ?? 'unknown') as CompositeScore['persona'],
-        behavioralPersona: (oldBreakdown.behavioralPersona ?? 'unknown') as CompositeScore['behavioralPersona'],
-        dimensions: oldBreakdown.dimensions.map(d => ({ ...d, metadata: {} })),
+    return {
+      contactId,
+      score,
+      icpFits,
+      basis: {
+        kind: 'lens-preview' as const,
+        scope: 'composite-and-referral' as const,
+        targetId,
+        lensId: lens.id,
+        lensUpdatedAt: new Date(lens.updatedAt).toISOString(),
+        icps: icps.map(icp => ({ id: icp.id, updatedAt: icp.updatedAt })),
+        selectedIcpId: best.id,
+        weightProfileId: weightProfile.id,
+        weightProfileUpdatedAt: weightProfile.updatedAt,
+        weights,
+        referralBaselines,
+        capturedAt,
+        snapshotId: snapshot.rows[0].snapshot_id,
+        snapshotIsolation: 'repeatable-read' as const,
         scoringVersion: score.scoringVersion,
-        referralLikelihood: oldBreakdown.referralLikelihood,
-        referralTier: oldBreakdown.referralTier as CompositeScore['referralTier'],
-        referralPersona: oldBreakdown.referralPersona as CompositeScore['referralPersona'],
-        referralDimensions: null,
-        behavioralSignals: null,
-        referralSignals: null,
-      };
+      },
+    };
+  });
+}
+
+export async function scoreContact(
+  contactId: string,
+  profileName?: string,
+  targetId?: string,
+  basis?: OwnerScoringBasis,
+  emitTransitions: boolean = true,
+  importJobId?: string
+): Promise<ScoringRunResult> {
+  assertOwnerBaseline(targetId);
+  if (basis && profileName && profileName !== basis.weightProfile.name) {
+    throw new Error('Scoring profile does not match captured owner basis');
+  }
+  const ownerBasis = basis ?? await captureOwnerScoringBasis(profileName);
+  const result = await transaction(async client => {
+    // The input read must follow the same per-contact lock as the replacement.
+    // A competing scorer cannot compute from an earlier contact state and then
+    // replace a newer score after waiting for the write lock.
+    const locked = await client.query('SELECT id FROM contacts WHERE id = $1 FOR UPDATE', [contactId]);
+    if (locked.rows.length === 0) throw new Error(`Contact not found: ${contactId}`);
+    const contact = await scoringQueries.getContactScoringData(contactId, client);
+    if (!contact) throw new Error(`Contact not found: ${contactId}`);
+    const weightManager = new WeightManager(ownerBasis.weightProfile);
+
+    const availableDimensions = getAvailableDimensions(contact);
+    const weights = weightManager.redistributeWeights(availableDimensions);
+
+    const icpProfiles = ownerBasis.icpProfiles;
+
+    let bestIcpCriteria: IcpCriteria | undefined;
+    let bestIcp: IcpProfile | undefined;
+    let bestIcpFit = -1;
+    const icpFitScorer = new IcpFitScorer();
+    for (const icp of icpProfiles) {
+      const fit = icpFitScorer.score(contact, icp.criteria);
+      if (fit > bestIcpFit) {
+        bestIcpFit = fit;
+        bestIcpCriteria = icp.criteria;
+        bestIcp = icp;
+      }
     }
-  } catch {
-    // Non-critical — proceed without old score
-  }
 
-  // Store score
-  await scoringQueries.upsertContactScore(contactId, score);
+    if (bestIcp?.id) {
+      bestIcpCriteria = ownerBasis.criteriaByIcpId[bestIcp.id];
+      if (!bestIcpCriteria) throw new Error(`Captured owner basis is missing ICP ${bestIcp.id}`);
+    }
 
-  // ECC impulse handoff (fire-and-forget). `emitScoringImpulses` self-guards
-  // on ECC_FLAGS.impulses, so this call is a no-op when the flag is off. When
-  // the flag is on, this is what actually drives the task-generator impulse
-  // handler that replaces the legacy trigger below — this call site is the
-  // production wiring that task-triggers.ts's early-return assumes exists.
-  emitScoringImpulses(contactId, oldScore, score, undefined, targetId).catch((err) => {
-    console.error('[scoring] Impulse emission failed', { contactId, error: err });
+    const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestIcpCriteria, OWNER_ALGORITHM_VERSION);
+
+    try {
+      const { computeReferralScore } = await import('./referral/referral-pipeline');
+      const baselines = ownerBasis.referralBaselines;
+      const referralContext = {
+        p90Mutuals: baselines.p90Mutuals,
+        p90Edges: baselines.p90Edges,
+        totalClusters: baselines.totalClusters,
+        existingGoldScore: score.compositeScore,
+        existingRelationshipStrength:
+          score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0,
+      };
+
+      // Attach existing behavioral persona for referral persona classification
+      contact.existingGoldScore = score.compositeScore;
+      contact.existingRelationshipStrength = referralContext.existingRelationshipStrength;
+      contact.existingBehavioralPersona = score.behavioralPersona;
+
+      const referral = computeReferralScore(contact, referralContext);
+      score.referralLikelihood = referral.likelihood;
+      score.referralTier = referral.tier;
+      score.referralPersona = referral.persona;
+      score.referralDimensions = referral.dimensions;
+      score.referralSignals = referral.signals;
+    } catch (err) {
+      // Referral scoring is non-blocking — log and continue
+      console.error(`[scoring] Referral scoring failed for ${contactId}:`, err);
+    }
+
+    const behavioralDim = score.dimensions.find(d => d.dimension === 'behavioral');
+    if (behavioralDim?.metadata?.behavioralSignals) {
+      score.behavioralSignals = behavioralDim.metadata.behavioralSignals as typeof score.behavioralSignals;
+    }
+
+    const replaced = await scoringQueries.upsertContactScore(contactId, score, ownerBasis.basisHash, client);
+
+    const icpFits: ScoringRunResult['icpFits'] = [];
+    for (const icp of icpProfiles) {
+      const icpScore = computeCompositeScore(
+        contact,
+        [new IcpFitScorer()],
+        { icp_fit: 1.0 },
+        icp.criteria
+      );
+      const fitScore = icpScore.compositeScore;
+      const breakdown = { dimensions: icpScore.dimensions };
+      await scoringQueries.upsertContactIcpFit(contactId, icp.id, fitScore, breakdown, client);
+      icpFits.push({ icpProfileId: icp.id, fitScore, breakdown });
+    }
+
+    // Legacy or unlike-basis predecessors cannot produce meaningful deltas.
+    // Identity repair is independent of score comparability and commits with the score.
+    if (emitTransitions) {
+      await checkAndGenerateTasks(contactId, replaced.previous, score, true, {
+        client, forceInline: true, source: ECC_FLAGS.impulses ? 'impulse' : 'auto-score',
+        identityOnly: !replaced.comparable,
+      });
+      if (replaced.comparable && (!replaced.previous || !samePersistedScore(replaced.previous, score))) {
+        await recordScoringImpulses(client, contactId, replaced.previous, score, replaced.revision);
+      }
+    }
+    if (importJobId) {
+      const completed = await client.query(
+        `UPDATE score_import_job_contacts
+         SET scored_at = NOW(), attempts = attempts + 1, last_error = NULL
+         WHERE job_id = $1 AND contact_id = $2 AND scored_at IS NULL AND skipped_at IS NULL
+         RETURNING contact_id`, [importJobId, contactId]
+      );
+      if (!completed.rows[0]) throw new Error('Import job contact was already completed or removed');
+    }
+    return { contactId, score, icpFits };
   });
-
-  // Generate tasks based on score transitions (fire-and-forget). Self-guards:
-  // no-ops when ECC_IMPULSES is on (impulses were just dispatched above; see
-  // task-triggers.ts's misconfiguration guard for what happens if that ever
-  // stops being true).
-  checkAndGenerateTasks(contactId, oldScore, score, true).catch((err) => {
-    console.error('[scoring] Task trigger failed', { contactId, error: err });
-  });
-
-  // Compute ICP fits for all active profiles
-  const icpFits: ScoringRunResult['icpFits'] = [];
-  for (const icp of icpProfiles) {
-    const icpScore = computeCompositeScore(
-      contact,
-      [new IcpFitScorer()],
-      { icp_fit: 1.0 },
-      icp.criteria
-    );
-    const fitScore = icpScore.compositeScore;
-    const breakdown = { dimensions: icpScore.dimensions };
-    await scoringQueries.upsertContactIcpFit(contactId, icp.id, fitScore, breakdown);
-    icpFits.push({ icpProfileId: icp.id, fitScore, breakdown });
+  if (emitTransitions) {
+    await drainScoringImpulses(contactId).catch(error => {
+      // The committed impulse remains pending and will be retried by the next
+      // scorer or an operator invoking the drainer.
+      console.error('[scoring] Scoring impulse dispatch deferred', { contactId, error });
+    });
   }
-
-  return { contactId, score, icpFits };
+  return result;
 }
 
 export async function scoreBatch(
@@ -217,89 +449,15 @@ export async function scoreBatch(
   profileName?: string,
   targetId?: string
 ): Promise<ScoringRunResult[]> {
-  const weightManager = new WeightManager();
-  await weightManager.loadProfile(profileName);
-
+  assertOwnerBaseline(targetId);
   // If no IDs provided, score all non-archived contacts
   const ids = contactIds ?? await scoringQueries.getAllContactIds();
-  // Phase 1.5 — lens-scoped ICPs when a targetId + flag resolve.
-  const icpProfiles = await resolveIcpProfilesForScoring(targetId);
-  const batchIcpFitScorer = new IcpFitScorer();
-
-  // Pre-compute baselines for referral scoring (once for the batch)
-  let baselines = { p90Mutuals: 20, p90Edges: 10, totalClusters: 5 };
-  try {
-    baselines = await scoringQueries.getScoringBaselines();
-  } catch {
-    // Use defaults if baselines query fails
-  }
-
+  const basis = await captureOwnerScoringBasis(profileName);
   const results: ScoringRunResult[] = [];
 
   for (const contactId of ids) {
     try {
-      const contact = await scoringQueries.getContactScoringData(contactId);
-      if (!contact) continue;
-
-      const availableDimensions = getAvailableDimensions(contact);
-      const weights = weightManager.redistributeWeights(availableDimensions);
-
-      // Find best-matching ICP for this contact
-      let bestCriteria: IcpCriteria | undefined;
-      let bestFit = -1;
-      for (const icp of icpProfiles) {
-        const fit = batchIcpFitScorer.score(contact, icp.criteria);
-        if (fit > bestFit) { bestFit = fit; bestCriteria = icp.criteria; }
-      }
-
-      // Phase 1
-      const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestCriteria);
-
-      // Phase 2: Referral scoring
-      try {
-        const { computeReferralScore } = await import('./referral/referral-pipeline');
-        contact.existingGoldScore = score.compositeScore;
-        contact.existingRelationshipStrength =
-          score.dimensions.find(d => d.dimension === 'relationship_strength')?.rawValue ?? 0;
-        contact.existingBehavioralPersona = score.behavioralPersona;
-
-        const referral = computeReferralScore(contact, {
-          ...baselines,
-          existingGoldScore: score.compositeScore,
-          existingRelationshipStrength: contact.existingRelationshipStrength,
-        });
-        score.referralLikelihood = referral.likelihood;
-        score.referralTier = referral.tier;
-        score.referralPersona = referral.persona;
-        score.referralDimensions = referral.dimensions;
-        score.referralSignals = referral.signals;
-      } catch {
-        // Non-blocking
-      }
-
-      // Behavioral signals
-      const behavioralDim = score.dimensions.find(d => d.dimension === 'behavioral');
-      if (behavioralDim?.metadata?.behavioralSignals) {
-        score.behavioralSignals = behavioralDim.metadata.behavioralSignals as typeof score.behavioralSignals;
-      }
-
-      await scoringQueries.upsertContactScore(contactId, score);
-
-      const icpFits: ScoringRunResult['icpFits'] = [];
-      for (const icp of icpProfiles) {
-        const icpScore = computeCompositeScore(
-          contact,
-          [new IcpFitScorer()],
-          { icp_fit: 1.0 },
-          icp.criteria
-        );
-        const fitScore = icpScore.compositeScore;
-        const breakdown = { dimensions: icpScore.dimensions };
-        await scoringQueries.upsertContactIcpFit(contactId, icp.id, fitScore, breakdown);
-        icpFits.push({ icpProfileId: icp.id, fitScore, breakdown });
-      }
-
-      results.push({ contactId, score, icpFits });
+      results.push(await scoreContact(contactId, profileName, undefined, basis));
     } catch (err) {
       console.error(`[scoring] Failed to score contact ${contactId}:`, err);
     }
@@ -311,15 +469,12 @@ export async function scoreBatch(
 function getAvailableDimensions(contact: ContactScoringData): string[] {
   const available: string[] = [];
 
-  // ICP fit is always available (may score 0 if no ICP)
   available.push('icp_fit');
 
-  // Network hub: need connections or edges
   if (contact.mutualConnectionCount > 0 || contact.edgeCount > 0 || (contact.connectionsCount || 0) > 0) {
     available.push('network_hub');
   }
 
-  // Relationship strength: always available (uses degree)
   available.push('relationship_strength');
 
   // Signal boost: need text data

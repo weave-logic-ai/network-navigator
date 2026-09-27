@@ -18,6 +18,12 @@ export async function executeTaskGenerator(
     return { tasksCreated: 0, reason: 'no_matching_rules' };
   }
 
+  // Owner scoring commits tasks with the score. A queued scoring impulse must
+  // not recreate a task after that task has already been completed.
+  if (payload.scoreTasksCommitted === true) {
+    return { tasksCreated: 0, reason: 'committed_with_score' };
+  }
+
   const contactResult = await query<ContactIdentityRow>(
     `SELECT full_name, first_name, last_name, linkedin_url, degree, is_archived
      FROM contacts WHERE id = $1`,

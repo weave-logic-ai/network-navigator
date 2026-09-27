@@ -12,8 +12,12 @@
 // associations and never become lens associations by inference.
 
 import { query, transaction } from '../db/client';
-import type { PoolClient } from 'pg';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import type { IcpProfile, IcpCriteria } from '../scoring/types';
+
+function readQuery<T extends QueryResultRow>(client: PoolClient | undefined, sql: string, params?: unknown[]): Promise<QueryResult<T>> {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
+}
 
 export interface ResearchLens {
   id: string;
@@ -68,8 +72,8 @@ function mapIcpRow(row: Record<string, unknown>): IcpProfile {
  * deleted" banner path) should use `getLensById` which returns any row
  * regardless of delete state.
  */
-export async function listLensesForTarget(targetId: string): Promise<ResearchLens[]> {
-  const res = await query<Record<string, unknown>>(
+export async function listLensesForTarget(targetId: string, client?: PoolClient): Promise<ResearchLens[]> {
+  const res = await readQuery<Record<string, unknown>>(client,
     `SELECT * FROM research_lenses
      WHERE primary_target_id = $1 AND deleted_at IS NULL
      ORDER BY is_default DESC, created_at ASC`,
@@ -122,8 +126,8 @@ export async function softDeleteLens(
  * Returns null when there is no current owner profile, no state row, or
  * the column is NULL.
  */
-async function readLastUsedLensIdForCurrentOwner(): Promise<string | null> {
-  const res = await query<{ last_used_lens_id: string | null }>(
+async function readLastUsedLensIdForCurrentOwner(client?: PoolClient): Promise<string | null> {
+  const res = await readQuery<{ last_used_lens_id: string | null }>(client,
     `SELECT last_used_lens_id
      FROM research_target_state
      WHERE user_id = (
@@ -146,10 +150,10 @@ async function readLastUsedLensIdForCurrentOwner(): Promise<string | null> {
  *
  * Returns null if the target has no lenses at all.
  */
-export async function getActiveLensForTarget(targetId: string): Promise<ResearchLens | null> {
-  const lastUsedLensId = await readLastUsedLensIdForCurrentOwner();
+export async function getActiveLensForTarget(targetId: string, client?: PoolClient): Promise<ResearchLens | null> {
+  const lastUsedLensId = await readLastUsedLensIdForCurrentOwner(client);
   if (lastUsedLensId) {
-    const res = await query<Record<string, unknown>>(
+    const res = await readQuery<Record<string, unknown>>(client,
       `SELECT * FROM research_lenses
        WHERE id = $1 AND primary_target_id = $2 AND deleted_at IS NULL
        LIMIT 1`,
@@ -163,7 +167,7 @@ export async function getActiveLensForTarget(targetId: string): Promise<Research
 
   // Fallback: ORDER BY is_default DESC, created_at ASC picks the default
   // first and the oldest lens otherwise.
-  const lenses = await listLensesForTarget(targetId);
+  const lenses = await listLensesForTarget(targetId, client);
   return lenses[0] ?? null;
 }
 

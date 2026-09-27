@@ -46,6 +46,11 @@ const schemaSql = `
     priority integer, url text, source text, metadata jsonb DEFAULT '{}'::jsonb,
     created_at timestamptz DEFAULT now()
   );
+  CREATE TABLE impulses (id uuid PRIMARY KEY);
+  CREATE TABLE impulse_notification_tasks (
+    impulse_id uuid PRIMARY KEY REFERENCES impulses(id) ON DELETE CASCADE,
+    task_id uuid UNIQUE REFERENCES tasks(id) ON DELETE SET NULL
+  );
   CREATE TABLE goal_check_feedback (
     check_type text, goal_type text, context_hash text, accepted boolean
   );
@@ -178,6 +183,7 @@ run('U1 importer and lock lifecycle on disposable PostgreSQL', () => {
       payload: { tier: 'gold' }, createdAt: new Date().toISOString() };
     const first = { ...base, id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' };
     const second = { ...base, id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' };
+    await db.query('INSERT INTO impulses(id) VALUES ($1), ($2)', [first.id, second.id]);
     const a = await executeNotification(first, { channel: 'task' });
     const b = await executeNotification(second, { channel: 'task' });
     const replay = await executeNotification(first, { channel: 'task' });
