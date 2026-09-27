@@ -2,7 +2,9 @@ jest.mock('@/lib/db/client', () => ({ query: jest.fn() }));
 
 import { query } from '@/lib/db/client';
 import { GET } from '@/app/api/graph/ego/route';
-import { syncContactsGraph } from '@/lib/graph/ruvector-sync';
+import { syncContactsGraph, computeRuVectorPageRank, computeRuVectorCentrality } from '@/lib/graph/ruvector-sync';
+import type { PoolClient } from 'pg';
+import { PUBLISHED_GRAPH_EDGE_TYPES } from '@/lib/graph/edge-policy';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
 
@@ -55,7 +57,7 @@ it('syncs scored and unscored contacts using score columns from contact_scores',
   });
   const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   try {
-    const ids = await syncContactsGraph();
+    const ids = await syncContactsGraph({ query: mockQuery } as unknown as PoolClient);
     expect([...ids.keys()]).toEqual(['scored', 'unscored']);
     const nodeCalls = mockQuery.mock.calls.filter(([sql]) => sql.includes('ruvector_add_node'));
     expect(nodeCalls).toHaveLength(2);
@@ -69,7 +71,27 @@ it('syncs scored and unscored contacts using score columns from contact_scores',
     expect(contactSql).toContain('cs.tier');
     expect(contactSql).toContain('cs.composite_score');
     expect(contactSql).not.toMatch(/c\.(tier|composite_score)/);
+    const edgeRead = mockQuery.mock.calls.find(([sql]) => sql.includes('FROM edges'));
+    expect(edgeRead?.[1]).toEqual([PUBLISHED_GRAPH_EDGE_TYPES]);
+    expect(contactSql).toContain('WHERE c.is_archived = FALSE');
   } finally {
     logSpy.mockRestore();
   }
+});
+
+it('refuses direct or duplicate graph sync before any graph mutation', async () => {
+  await expect(syncContactsGraph()).rejects.toThrow('Direct graph sync is retired');
+  mockQuery.mockImplementation(async (sql) => {
+    if (sql.includes('ruvector_list_graphs')) return rows([{ exists: true }]);
+    return rows([]);
+  });
+  await expect(syncContactsGraph({ query: mockQuery } as unknown as PoolClient)).rejects.toThrow('already exists');
+  expect(mockQuery.mock.calls.some(([sql]) => sql.includes('ruvector_create_graph'))).toBe(false);
+  expect(mockQuery.mock.calls.some(([sql]) => sql.includes('ruvector_add_node'))).toBe(false);
+});
+
+it('direct native metric helpers give a migration error without reading retired contacts', async () => {
+  await expect(computeRuVectorPageRank()).rejects.toThrow('computeGraphSnapshot()');
+  await expect(computeRuVectorCentrality()).rejects.toThrow('computeGraphSnapshot()');
+  expect(mockQuery).not.toHaveBeenCalled();
 });

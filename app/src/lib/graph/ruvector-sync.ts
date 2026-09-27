@@ -3,45 +3,58 @@
 // Maps UUID contact IDs to RuVector bigint node IDs
 
 import { query } from "../db/client";
-
-/** Real edge types to include (excludes synthetic mutual-proximity, same-cluster) */
-const REAL_EDGE_TYPES = [
-  "CONNECTED_TO",
-  "MESSAGED",
-  "same-company",
-  "INVITED_BY",
-  "ENDORSED",
-  "RECOMMENDED",
-  "FOLLOWS_COMPANY",
-  "WORKED_AT",
-  "EDUCATED_AT",
-  "WORKS_AT",
-];
+import type { PoolClient, QueryResultRow } from "pg";
+import { PUBLISHED_GRAPH_EDGE_TYPES } from "./edge-policy";
 
 export const GRAPH_NAME = "contacts";
 
+function graphId(value: number | string): number {
+  // pg returns SQL bigint as a string; RuVector's path JSON uses numbers.
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 0) throw new Error(`Invalid RuVector graph id: ${value}`);
+  return id;
+}
+
+function readGraph<T extends QueryResultRow>(client: PoolClient | undefined, sql: string, params?: unknown[]) {
+  return client ? client.query<T>(sql, params) : query<T>(sql, params);
+}
+
 /**
- * Full sync: recreate the RuVector contacts graph from the edges table.
+ * Build a native graph inside a caller-owned publication transaction.
  * Steps:
- *   1. Delete existing graph (if any)
- *   2. Create fresh graph
- *   3. Add all contacts as nodes (with tier, niche info)
+ *   1. Lock and refuse an existing graph name
+ *   2. Create a fresh graph
+ *   3. Add all contacts as nodes (with tier and score)
  *   4. Add only real relationship edges
  * Returns a map of contactId (UUID) -> ruvector node_id (bigint)
  */
-export async function syncContactsGraph(): Promise<Map<string, number>> {
-  // 1. Delete existing graph
-  try {
-    await query(`SELECT ruvector_delete_graph($1)`, [GRAPH_NAME]);
-  } catch {
-    // Graph might not exist yet, ignore
+export async function syncContactsGraph(
+  client?: PoolClient,
+  graphName: string = GRAPH_NAME,
+  edgeTypes: readonly string[] = PUBLISHED_GRAPH_EDGE_TYPES,
+): Promise<Map<string, number>> {
+  if (!client) {
+    throw new Error("Direct graph sync is retired; use computeGraphSnapshot() to publish metrics and a private graph atomically.");
   }
+  if (graphName !== GRAPH_NAME && !/^contacts_[0-9a-f]{32}$/.test(graphName)) {
+    throw new Error("Invalid private graph name");
+  }
+  const run = <T extends QueryResultRow>(sql: string, params?: unknown[]) =>
+    client.query<T>(sql, params);
 
-  // 2. Create fresh graph
-  await query(`SELECT ruvector_create_graph($1)`, [GRAPH_NAME]);
+  // Caller holds a transaction through publication. This conflicts with the
+  // shared read pin if the name were ever reused.
+  await run(`SELECT pg_advisory_xact_lock(832782, hashtext($1))`, [graphName]);
+  // The installed extension returns true even when a graph already exists.
+  // Refuse to append to any existing graph, including one held by a reader.
+  const existing = await run<{ exists: boolean }>(`SELECT $1 = ANY(ruvector_list_graphs()) AS exists`, [graphName]);
+  if (existing.rows[0]?.exists) {
+    throw new Error(`RuVector graph "${graphName}" already exists; publish under a fresh private name.`);
+  }
+  await run(`SELECT ruvector_create_graph($1)`, [graphName]);
 
   // 3. Add contacts as nodes
-  const contactsRes = await query<{
+  const contactsRes = await run<{
     id: string;
     full_name: string | null;
     tier: string | null;
@@ -57,10 +70,10 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
   const uuidToNodeId = new Map<string, number>();
 
   for (const contact of contactsRes.rows) {
-    const nodeRes = await query<{ ruvector_add_node: number }>(
+    const nodeRes = await run<{ ruvector_add_node: number }>(
       `SELECT ruvector_add_node($1, $2, $3)`,
       [
-        GRAPH_NAME,
+        graphName,
         [contact.tier || "unscored"],
         JSON.stringify({
           contact_id: contact.id,
@@ -71,11 +84,11 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
         }),
       ]
     );
-    uuidToNodeId.set(contact.id, nodeRes.rows[0].ruvector_add_node);
+    uuidToNodeId.set(contact.id, graphId(nodeRes.rows[0].ruvector_add_node));
   }
 
   // 4. Add real edges only
-  const edgesRes = await query<{
+  const edgesRes = await run<{
     source_contact_id: string;
     target_contact_id: string;
     edge_type: string;
@@ -85,7 +98,7 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
      FROM edges
      WHERE target_contact_id IS NOT NULL
        AND edge_type = ANY($1)`,
-    [REAL_EDGE_TYPES]
+    [edgeTypes]
   );
 
   let edgesAdded = 0;
@@ -94,8 +107,8 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
     const targetNodeId = uuidToNodeId.get(edge.target_contact_id);
     if (sourceNodeId === undefined || targetNodeId === undefined) continue;
 
-    await query(`SELECT ruvector_add_edge($1, $2, $3, $4, $5)`, [
-      GRAPH_NAME,
+    await run(`SELECT ruvector_add_edge($1, $2, $3, $4, $5)`, [
+      graphName,
       sourceNodeId,
       targetNodeId,
       edge.edge_type,
@@ -105,7 +118,7 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
   }
 
   console.log(
-    `[ruvector-sync] Graph "${GRAPH_NAME}" synced: ${uuidToNodeId.size} nodes, ${edgesAdded} edges`
+    `[ruvector-sync] Graph "${graphName}" synced: ${uuidToNodeId.size} nodes, ${edgesAdded} edges`
   );
 
   return uuidToNodeId;
@@ -114,14 +127,14 @@ export async function syncContactsGraph(): Promise<Map<string, number>> {
 /**
  * Get graph stats from RuVector
  */
-export async function getGraphStats(): Promise<{
+export async function getGraphStats(graphName: string = GRAPH_NAME): Promise<{
   nodeCount: number;
   edgeCount: number;
   raw: Record<string, unknown>;
 }> {
   const res = await query<{ ruvector_graph_stats: Record<string, unknown> }>(
     `SELECT ruvector_graph_stats($1)`,
-    [GRAPH_NAME]
+    [graphName]
   );
   const stats = res.rows[0]?.ruvector_graph_stats || {};
   return {
@@ -131,127 +144,22 @@ export async function getGraphStats(): Promise<{
   };
 }
 
-/**
- * Run PageRank via RuVector and store results in graph_metrics
- */
-export async function computeRuVectorPageRank(
-  nodeIdMap?: Map<string, number>
-): Promise<number> {
-  // Build reverse map: node_id -> contact UUID
-  let reverseMap: Map<number, string>;
-
-  if (nodeIdMap) {
-    reverseMap = new Map();
-    for (const [uuid, nodeId] of nodeIdMap) {
-      reverseMap.set(nodeId, uuid);
-    }
-  } else {
-    // Rebuild from graph by querying nodes
-    reverseMap = await buildReverseMap();
-  }
-
-  const res = await query<{ node_id: number; rank: number }>(
-    `SELECT * FROM ruvector_graph_pagerank($1, 0.85, 0.001)`,
-    [GRAPH_NAME]
+export async function getPublishedGraphName(client?: PoolClient): Promise<string> {
+  const result = await readGraph<{ active_graph_name: string | null }>(client,
+    "SELECT active_graph_name FROM graph_compute_state WHERE id = TRUE"
   );
-
-  let updated = 0;
-  for (const row of res.rows) {
-    const contactId = reverseMap.get(row.node_id);
-    if (!contactId) continue;
-
-    await query(
-      `INSERT INTO graph_metrics (contact_id, pagerank, computed_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (contact_id) DO UPDATE SET pagerank = $2, computed_at = NOW()`,
-      [contactId, row.rank]
-    );
-    updated++;
-  }
-
-  console.log(`[ruvector-sync] PageRank computed for ${updated} nodes`);
-  return updated;
+  if (!result.rows[0]?.active_graph_name) throw new Error("No native graph has been published; run graph Compute.");
+  return result.rows[0].active_graph_name;
 }
 
-/**
- * Run centrality via RuVector and store results
- */
-export async function computeRuVectorCentrality(
-  method: string = "betweenness",
-  nodeIdMap?: Map<string, number>
-): Promise<number> {
-  let reverseMap: Map<number, string>;
-
-  if (nodeIdMap) {
-    reverseMap = new Map();
-    for (const [uuid, nodeId] of nodeIdMap) {
-      reverseMap.set(nodeId, uuid);
-    }
-  } else {
-    reverseMap = await buildReverseMap();
-  }
-
-  const res = await query<{ node_id: number; centrality: number }>(
-    `SELECT * FROM ruvector_graph_centrality($1, $2)`,
-    [GRAPH_NAME, method]
-  );
-
-  let updated = 0;
-  const column =
-    method === "betweenness"
-      ? "betweenness_centrality"
-      : method === "degree"
-      ? "degree_centrality"
-      : method === "closeness"
-      ? "closeness_centrality"
-      : "eigenvector_centrality";
-
-  for (const row of res.rows) {
-    const contactId = reverseMap.get(row.node_id);
-    if (!contactId) continue;
-
-    await query(
-      `INSERT INTO graph_metrics (contact_id, ${column}, computed_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (contact_id) DO UPDATE SET ${column} = $2, computed_at = NOW()`,
-      [contactId, row.centrality]
-    );
-    updated++;
-  }
-
-  console.log(
-    `[ruvector-sync] ${method} centrality computed for ${updated} nodes`
-  );
-  return updated;
+/** Native metric writes were replaced by computeGraphSnapshot's atomic publication. */
+export async function computeRuVectorPageRank(_nodeIdMap?: Map<string, number>): Promise<number> {
+  throw new Error("Direct native metric writes are retired; use computeGraphSnapshot().");
 }
 
-/**
- * Build reverse map from RuVector nodes back to contact UUIDs.
- * Uses the contact_id stored in node properties.
- */
-async function buildReverseMap(): Promise<Map<number, string>> {
-  const res = await query<{ node_id: number; properties: Record<string, unknown> }>(
-    `SELECT node_id, properties FROM ruvector_cypher($1, 'MATCH (n) RETURN n.id AS node_id, n.properties AS properties', '{}')`,
-    [GRAPH_NAME]
-  ).catch(() => ({ rows: [] }));
-
-  const map = new Map<number, string>();
-  for (const row of res.rows) {
-    const contactId = row.properties?.contact_id as string;
-    if (contactId) {
-      map.set(row.node_id, contactId);
-    }
-  }
-
-  // Fallback: if cypher doesn't return easily, rebuild from contacts table
-  if (map.size === 0) {
-    // We can't easily reverse-map without re-syncing, return empty
-    console.warn(
-      "[ruvector-sync] Could not build reverse map. Run syncContactsGraph() first."
-    );
-  }
-
-  return map;
+/** Native metric writes were replaced by computeGraphSnapshot's atomic publication. */
+export async function computeRuVectorCentrality(_method: string = "betweenness", _nodeIdMap?: Map<string, number>): Promise<number> {
+  throw new Error("Direct native metric writes are retired; use computeGraphSnapshot().");
 }
 
 /**
@@ -282,13 +190,14 @@ export async function ensureNodeContactIdIndex(): Promise<void> {
  */
 export async function getNodeIdForContact(
   contactId: string,
-  graphName: string = GRAPH_NAME
+  graphName: string = GRAPH_NAME,
+  client?: PoolClient
 ): Promise<number | null> {
-  const res = await query<{ id: number }>(
+  const res = await readGraph<{ id: number }>(client,
     `SELECT id FROM _ruvector_nodes WHERE graph_name = $1 AND properties->>'contact_id' = $2 LIMIT 1`,
     [graphName, contactId]
   );
-  return res.rows[0]?.id ?? null;
+  return res.rows[0] ? graphId(res.rows[0].id) : null;
 }
 
 /**
@@ -296,18 +205,19 @@ export async function getNodeIdForContact(
  */
 export async function getContactIdsForNodes(
   nodeIds: number[],
-  graphName: string = GRAPH_NAME
+  graphName: string = GRAPH_NAME,
+  client?: PoolClient
 ): Promise<Map<number, string>> {
   const map = new Map<number, string>();
   if (nodeIds.length === 0) return map;
 
-  const res = await query<{ id: number; contact_id: string | null }>(
+  const res = await readGraph<{ id: number; contact_id: string | null }>(client,
     `SELECT id, properties->>'contact_id' AS contact_id
      FROM _ruvector_nodes WHERE graph_name = $1 AND id = ANY($2)`,
     [graphName, nodeIds]
   );
   for (const row of res.rows) {
-    if (row.contact_id) map.set(row.id, row.contact_id);
+    if (row.contact_id) map.set(graphId(row.id), row.contact_id);
   }
   return map;
 }
@@ -317,7 +227,8 @@ export async function getContactIdsForNodes(
  */
 export async function getEdgesByIds(
   edgeIds: number[],
-  graphName: string = GRAPH_NAME
+  graphName: string = GRAPH_NAME,
+  client?: PoolClient
 ): Promise<
   Array<{
     id: number;
@@ -329,21 +240,21 @@ export async function getEdgesByIds(
 > {
   if (edgeIds.length === 0) return [];
 
-  const res = await query<{
+  const res = await readGraph<{
     id: number;
     source: number;
     target: number;
     edge_type: string;
     properties: Record<string, unknown>;
-  }>(
+  }>(client,
     `SELECT id, source, target, edge_type, properties
      FROM _ruvector_edges WHERE graph_name = $1 AND id = ANY($2)`,
     [graphName, edgeIds]
   );
   return res.rows.map((row) => ({
-    id: row.id,
-    source: row.source,
-    target: row.target,
+    id: graphId(row.id),
+    source: graphId(row.source),
+    target: graphId(row.target),
     edgeType: row.edge_type,
     properties: row.properties,
   }));
@@ -367,10 +278,11 @@ export async function computeRuVectorShortestPath(
   sourceNodeId: number,
   targetNodeId: number,
   maxHops: number,
-  graphName: string = GRAPH_NAME
+  graphName: string = GRAPH_NAME,
+  client?: PoolClient
 ): Promise<RuVectorPathResult | null> {
   try {
-    const res = await query<{ ruvector_shortest_path: RuVectorPathResult }>(
+    const res = await readGraph<{ ruvector_shortest_path: RuVectorPathResult }>(client,
       `SELECT ruvector_shortest_path($1, $2, $3, $4)`,
       [graphName, sourceNodeId, targetNodeId, maxHops]
     );

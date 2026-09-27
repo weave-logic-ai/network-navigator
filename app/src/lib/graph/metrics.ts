@@ -1,55 +1,20 @@
-// Graph metrics computation — RuVector native with Node.js fallback
+// Graph metrics computation and pure Node.js metric helpers
 
 import * as graphQueries from "../db/queries/graph";
-import {
-  syncContactsGraph,
-  computeRuVectorPageRank,
-  computeRuVectorCentrality,
-  ensureEdgeIndex,
-} from "./ruvector-sync";
+import { computeGraphSnapshot } from "./compute-snapshot";
 import { GraphMetrics } from "./types";
 
 /**
- * Compute all graph metrics using RuVector native graph engine.
- * Falls back to Node.js computation if RuVector sync fails.
+ * Legacy entry point. Publish metrics, communities, and the native graph as
+ * one snapshot, then return the metrics for existing callers.
  */
 export async function computeAllMetrics(): Promise<GraphMetrics[]> {
-  try {
-    return await computeAllMetricsRuVector();
-  } catch (error) {
-    console.warn(
-      `[graph/metrics] RuVector computation failed; falling back to the Node.js ` +
-        `implementation (in-memory PageRank + 50-sample betweenness approximation ` +
-        `instead of RuVector's in-DB native computation). Results are still stored ` +
-        `in graph_metrics, but which engine served this run is only visible here: ` +
-        (error instanceof Error ? error.message : String(error))
-    );
-    return await computeAllMetricsNodeJS();
-  }
-}
-
-/**
- * RuVector-based computation: sync graph, then run native PageRank + centrality.
- * Runs in-DB — dramatically faster than Node.js for large graphs.
- */
-async function computeAllMetricsRuVector(): Promise<GraphMetrics[]> {
-  // Ensure index for edge queries
-  await ensureEdgeIndex();
-
-  // Sync contacts graph (excludes synthetic edges)
-  const nodeIdMap = await syncContactsGraph();
-
-  // Run RuVector native computations
-  await computeRuVectorPageRank(nodeIdMap);
-  await computeRuVectorCentrality("betweenness", nodeIdMap);
-  await computeRuVectorCentrality("degree", nodeIdMap);
-
-  // Read back results from graph_metrics
+  await computeGraphSnapshot();
   const metricsResult = await graphQueries.listGraphMetrics(1, 10000);
   return metricsResult.data;
 }
 
-// ---- Node.js fallback (original implementation) ----
+// ---- Read-only Node.js metric helpers ----
 
 /**
  * Compute PageRank approximation using iterative power iteration in Node.js.
@@ -202,44 +167,4 @@ export async function computeBetweenness(
   }
 
   return betweenness;
-}
-
-/**
- * Node.js fallback: compute all metrics and store them.
- */
-async function computeAllMetricsNodeJS(): Promise<GraphMetrics[]> {
-  const degreeCounts = await graphQueries.getDegreeCounts({ realEdgesOnly: true });
-  const pageranks = await computePageRank();
-  const betweenness = await computeBetweenness();
-
-  const allNodes = new Set([
-    ...degreeCounts.keys(),
-    ...pageranks.keys(),
-    ...betweenness.keys(),
-  ]);
-
-  const results: GraphMetrics[] = [];
-
-  for (const contactId of allNodes) {
-    const metrics = {
-      pagerank: pageranks.get(contactId) ?? null,
-      betweennessCentrality: betweenness.get(contactId) ?? null,
-      degreeCentrality: degreeCounts.get(contactId) ?? null,
-    };
-
-    await graphQueries.upsertGraphMetrics(contactId, metrics);
-
-    results.push({
-      contactId,
-      pagerank: metrics.pagerank,
-      betweennessCentrality: metrics.betweennessCentrality,
-      closenessCentrality: null,
-      degreeCentrality: metrics.degreeCentrality,
-      eigenvectorCentrality: null,
-      clusteringCoefficient: null,
-      computedAt: new Date().toISOString(),
-    });
-  }
-
-  return results;
 }

@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SigmaGraph } from "@/components/network/sigma-graph";
-import { ClusterSidebar } from "@/components/network/cluster-sidebar";
+import { ClusterSidebar, isSelectedGroupRemoved, type ClusterData } from "@/components/network/cluster-sidebar";
 import { TaxonomyGraph } from "@/components/network/taxonomy-graph";
 import { ConversationGraph } from "@/components/network/conversation-graph";
 import { KnowledgeGraphView as KnowledgeGraph } from "@/components/network/knowledge-graph";
@@ -19,25 +19,71 @@ const SIGMA_GRAPH_NODE_LIMIT = 6000;
 
 export default function NetworkPage() {
   const [computing, setComputing] = useState(false);
+  const [computeStatus, setComputeStatus] = useState<{ kind: "running" | "success" | "error"; message: string } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [clusterSidebarOpen, setClusterSidebarOpen] = useState(false);
   const [highlightedCluster, setHighlightedCluster] = useState<string | null>(null);
+  const highlightedClusterRef = useRef(highlightedCluster);
+  highlightedClusterRef.current = highlightedCluster;
+  const [graphGroups, setGraphGroups] = useState<ClusterData[]>([]);
+  const graphGroupsRef = useRef<ClusterData[]>([]);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | undefined>();
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [groupNotice, setGroupNotice] = useState<string | null>(null);
+  const handleGroupsStateChange = useCallback((groups: ClusterData[] | null, error: string | null, reloaded = false, requestedGroupId?: string | null) => {
+    // Keep the catalog usable while a graph filter refetch is in flight.
+    setGroupsLoading(groups === null && error === null && graphGroupsRef.current.length === 0);
+    setGroupsError(error);
+    if (groups) {
+      graphGroupsRef.current = groups;
+      setGraphGroups(groups);
+      if (reloaded) setCatalogRevision((revision) => revision + 1);
+      const selected = highlightedClusterRef.current;
+      if (reloaded && isSelectedGroupRemoved(groups, selected, requestedGroupId)) {
+        highlightedClusterRef.current = null;
+        setHighlightedCluster(null);
+        setSelectedGroupKey(undefined);
+        setGroupNotice("The selected group was removed; its highlight was cleared.");
+      }
+    }
+  }, []);
+  const handleHighlightCluster = useCallback((id: string | null, memberKey?: string) => {
+    highlightedClusterRef.current = id;
+    setHighlightedCluster(id);
+    setSelectedGroupKey(memberKey);
+    setGroupNotice(null);
+  }, []);
   const [activeTab, setActiveTab] = useState("graph");
   const { snapshot, pending, error: contextError } = useTargetContext();
   const rootTargetId = snapshot?.secondaryTargetId ?? null;
   const handleBack = useCallback(() => { void contextController.back().catch(() => undefined); }, []);
 
   const handleCompute = useCallback(async () => {
+    if (computing) return;
     setComputing(true);
+    setComputeStatus({ kind: "running", message: "Computing metrics and groups. The current graph remains available." });
     try {
-      await fetch("/api/graph/compute", { method: "POST" });
+      const response = await fetch("/api/graph/compute", { method: "POST" });
+      const body = await response.json() as {
+        data?: { metricsComputed: number; communitiesDetected: number; communityMethod: "spectral" | "linked-company-fallback" };
+        error?: string;
+        details?: string;
+      };
+      if (!response.ok || !body.data) throw new Error(body.details || body.error || `Graph compute failed (${response.status})`);
+      const fallback = body.data.communityMethod === "linked-company-fallback"
+        ? " Linked-company fallback was used because spectral groups were unavailable."
+        : "";
+      const groupLabel = body.data.communitiesDetected === 1 ? "group" : "groups";
+      setComputeStatus({ kind: "success", message: `Computed ${body.data.metricsComputed} contact metrics and ${body.data.communitiesDetected} ${groupLabel}.${fallback}` });
       setRefreshKey((k) => k + 1);
-    } catch {
-      // silent
+    } catch (error) {
+      setComputeStatus({ kind: "error", message: error instanceof Error ? error.message : "Graph computation ended, but its result could not be verified. Refresh the graph before retrying." });
     } finally {
       setComputing(false);
     }
-  }, []);
+  }, [computing]);
 
   return (
     <div className="flex min-w-0 h-[calc(100vh-7rem)] flex-col">
@@ -60,6 +106,16 @@ export default function NetworkPage() {
           </div>
         }
       />
+
+      {(computeStatus || contextError || groupNotice) && (
+        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-sm" aria-live="polite">
+          {computeStatus && <span role={computeStatus.kind === "error" ? "alert" : "status"}
+            className={computeStatus.kind === "error" ? "text-destructive" : "text-muted-foreground"}>{computeStatus.message}</span>}
+          {computeStatus?.kind === "error" && <Button variant="outline" size="sm" onClick={handleCompute} disabled={computing}>Retry compute</Button>}
+          {contextError && <span role="alert" className="text-destructive">{contextError}</span>}
+          {groupNotice && <span role="status" className="text-muted-foreground">{groupNotice}</span>}
+        </div>
+      )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
         <div className="min-w-0 w-full overflow-x-auto">
@@ -91,7 +147,6 @@ export default function NetworkPage() {
                   <ArrowLeft className="mr-1 h-3.5 w-3.5" /> Back
                 </Button>
                 <span>{rootTargetId ? `Self › ${snapshot?.focusLabel ?? "Focused target"}` : "Self"}</span>
-                {contextError && <span role="status">{contextError}</span>}
               </div>
             )}
             {/* `key={refreshKey}` forces a remount (and refetch) when
@@ -101,6 +156,8 @@ export default function NetworkPage() {
               key={refreshKey}
               limit={SIGMA_GRAPH_NODE_LIMIT}
               highlightedCluster={highlightedCluster}
+              selectedGroupKey={selectedGroupKey}
+              onGroupsStateChange={handleGroupsStateChange}
               rootTargetId={rootTargetId}
             />
           </div>
@@ -127,7 +184,10 @@ export default function NetworkPage() {
 
       <ClusterSidebar
         open={clusterSidebarOpen} onOpenChange={setClusterSidebarOpen}
-        highlightedCluster={highlightedCluster} onHighlightCluster={setHighlightedCluster}
+        highlightedCluster={highlightedCluster} onHighlightCluster={handleHighlightCluster}
+        clusters={graphGroups} loading={groupsLoading} error={groupsError}
+        refreshKey={refreshKey}
+        catalogRevision={catalogRevision}
       />
     </div>
   );

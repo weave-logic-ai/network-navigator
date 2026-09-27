@@ -10,6 +10,9 @@ describe('graph shift-click', () => {
     expect(isShiftClick({ original: { shiftKey: true } as MouseEvent })).toBe(true);
     expect(isShiftClick({ original: { shiftKey: false } as MouseEvent })).toBe(false);
   });
+  it('returns false for a missing event', () => {
+    expect(isShiftClick(undefined)).toBe(false);
+  });
   it('queues target creation and reports the confirmed focus', async () => {
     createAndFocus.mockResolvedValue({ secondaryTargetId: 'target-new' });
     await expect(setSecondaryTargetViaShiftClick('contact-abc')).resolves.toEqual({ ok: true, secondaryTargetId: 'target-new' });

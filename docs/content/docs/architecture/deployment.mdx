@@ -447,6 +447,29 @@ reupgraded_revision=0, focus=a0000000-0000-4000-8000-000000000006, lens=a0000000
 ```
 
 The opt-in browser scenarios use a separate database named `*_test` or `*_validation` and an isolated loopback app. Set the app's `LOCAL_OPERATOR_SECRET` to a synthetic test secret of at least 32 characters, and pass the same value as `E2E_OPERATOR_SECRET` with `E2E_BASE_URL` and `E2E_DATABASE_URL` to Playwright. The scenario helper unlocks over HTTP and shares the issued cookie with the browser. For the US4 snippet scenario, enable `RESEARCH_SNIPPETS` and set matching synthetic `EXTENSION_ALLOWED_ORIGINS` (app) and `E2E_EXTENSION_ORIGIN` (Playwright); its token request uses the extension principal rather than the operator session.
+### Graph grouping upgrade
+
+Migrations 059 and 060 run automatically only when PostgreSQL initializes a **new** volume. On an existing volume, stop graph Compute requests and back up that database from the repository root:
+
+```bash
+mkdir -p data/drives/backups
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "data/drives/backups/graph-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
+```
+
+Confirm that every applicable earlier migration has been applied to this specific database, including 057 and 058. A copied volume can have gaps, so check its schema rather than relying on the latest filename. In particular, `cluster_memberships` must exist before 059. Apply 059 then 060 together from the repository root, using the Compose project for the intended deployment (do not substitute a different project's database):
+
+```bash
+cat data/db/init/059-cluster-membership-count-index.sql data/db/init/060-graph-compute-publication.sql | \
+  docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -1'
+```
+
+The `-1` flag wraps both scripts in one transaction and `ON_ERROR_STOP` exits on failure. Do not enable Compute until this verification returns one index, one state table, and exactly one state row. Its graph pointer remains empty until the first successful Compute; the legacy `contacts` graph may contain extra relationship types and is not a publication:
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -c "SELECT to_regclass('\''public.idx_cluster_memberships_cluster_id'\'') AS membership_index, to_regclass('\''public.graph_compute_state'\'') AS publication_table, (SELECT count(*) FROM graph_compute_state WHERE id = TRUE) AS pointer_rows"'
+```
+
+If either object is absent, the graph data and Compute APIs return HTTP 503 with this upgrade path. If the pointer row is missing, repair the interrupted 060 migration before retrying. Once verified, restart the app. A failed migration rolls back both scripts; fix the reported prerequisite and rerun the same idempotent scripts. Keep the backup until graph data loads and Compute succeeds.
 
 ### Isolated local demo
 

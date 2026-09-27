@@ -4,8 +4,14 @@ jest.mock('@/lib/db/queries/graph', () => ({
   getAllEdges: jest.fn(),
 }));
 
+jest.mock('@/lib/db/client', () => ({
+  transaction: jest.fn(async (fn: (client: { query: jest.Mock }) => Promise<unknown>) =>
+    fn({ query: jest.fn().mockResolvedValue({ rows: [] }) })),
+}));
+
 jest.mock('@/lib/graph/ruvector-sync', () => ({
   GRAPH_NAME: 'contacts',
+  getPublishedGraphName: jest.fn().mockResolvedValue('contacts'),
   ensureNodeContactIdIndex: jest.fn().mockResolvedValue(undefined),
   getNodeIdForContact: jest.fn(),
   getContactIdsForNodes: jest.fn(),
@@ -56,6 +62,7 @@ describe('findPath (RuVector-first with Node.js BFS fallback)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (ruvectorSync.getPublishedGraphName as jest.Mock).mockResolvedValue('contacts');
     warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
@@ -94,18 +101,37 @@ describe('findPath (RuVector-first with Node.js BFS fallback)', () => {
       ],
     });
     expect(mockGetAllEdges).not.toHaveBeenCalled();
+    expect(mockGetNodeIdForContact).toHaveBeenCalledWith('contact-a', 'contacts', expect.anything());
+    expect(mockShortestPath).toHaveBeenCalledWith(1, 3, 4, 'contacts', expect.anything());
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('treats a RuVector "no path" result as authoritative and does not fall back to BFS', async () => {
+    (ruvectorSync.getPublishedGraphName as jest.Mock).mockResolvedValue('contacts_new');
     mockGetNodeIdForContact.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
     mockShortestPath.mockResolvedValueOnce(null);
 
     const result = await findPath('contact-a', 'contact-z', 4);
 
     expect(result).toBeNull();
+    expect(mockGetNodeIdForContact).toHaveBeenCalledWith('contact-a', 'contacts_new', expect.anything());
+    expect(mockShortestPath).toHaveBeenCalledWith(1, 2, 4, 'contacts_new', expect.anything());
     expect(mockGetAllEdges).not.toHaveBeenCalled();
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('retries when publication changes before the graph pin is acquired', async () => {
+    (ruvectorSync.getPublishedGraphName as jest.Mock)
+      .mockResolvedValueOnce('contacts_old')
+      .mockResolvedValueOnce('contacts_new')
+      .mockResolvedValue('contacts_new');
+    mockGetNodeIdForContact.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+    mockShortestPath.mockResolvedValueOnce(null);
+
+    expect(await findPath('contact-a', 'contact-b')).toBeNull();
+    expect(mockGetNodeIdForContact).not.toHaveBeenCalledWith('contact-a', 'contacts_old', expect.anything());
+    expect(mockGetNodeIdForContact).toHaveBeenCalledWith('contact-a', 'contacts_new', expect.anything());
+    expect(mockGetAllEdges).not.toHaveBeenCalled();
   });
 
   it('falls back to Node.js BFS and logs which engine served the request when RuVector cannot resolve a node', async () => {
@@ -122,10 +148,21 @@ describe('findPath (RuVector-first with Node.js BFS fallback)', () => {
       edges: [{ from: 'contact-a', to: 'contact-b', edgeType: 'CONNECTED_TO', weight: 1 }],
     });
     expect(mockGetAllEdges).toHaveBeenCalledTimes(1);
-    expect(mockGetAllEdges).toHaveBeenCalledWith({ realEdgesOnly: true });
+    expect(mockGetAllEdges).toHaveBeenCalledWith({ publishedGraphOnly: true });
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain('[graph/paths]');
     expect(warnSpy.mock.calls[0][0]).toContain('falling back to Node.js BFS');
+  });
+
+  it('matches native directed traversal for a single A to B edge', async () => {
+    mockGetNodeIdForContact.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+    mockShortestPath.mockResolvedValueOnce(null);
+    expect(await findPath('B', 'A')).toBeNull();
+    expect(mockGetAllEdges).not.toHaveBeenCalled();
+
+    mockGetNodeIdForContact.mockResolvedValueOnce(null).mockResolvedValueOnce(1);
+    mockGetAllEdges.mockResolvedValueOnce([fakeEdge({ sourceContactId: 'A', targetContactId: 'B' })]);
+    expect(await findPath('B', 'A')).toBeNull();
   });
 
 });

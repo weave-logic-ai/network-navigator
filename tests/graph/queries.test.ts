@@ -30,4 +30,12 @@ describe('graph edge queries', () => {
     expect(mockQuery.mock.calls[0][0]).toContain(filter);
     expect(mockQuery.mock.calls[1][0].split(filter)).toHaveLength(3);
   });
+
+  it('reads only the edge set stored with a successful publication', async () => {
+    await getAllEdges({ publishedGraphOnly: true });
+    expect(mockQuery).toHaveBeenCalledWith(
+      'SELECT published_edges FROM graph_compute_state WHERE id = TRUE AND active_graph_name IS NOT NULL'
+    );
+    expect(mockQuery.mock.calls[0][0]).not.toContain('FROM edges');
+  });
 });
