@@ -19,7 +19,7 @@ import {
   getSnippetQueue,
   SNIPPET_QUEUE_KEY,
 } from '../shared/snippet-queue';
-import { addApprovedOrigins, revokeOrigin } from '../shared/approved-origins';
+import { listApprovedOriginsFromChrome, revokeOrigin } from '../shared/approved-origins';
 import { getSnipModeActive, setSnipModeActive } from '../shared/snip-mode';
 import { ExtensionAuthError, fetchOutreachTemplates, isFullExtensionToken, personalizeOutreachTemplate, registerFullExtensionToken } from '../shared/outreach-api';
 
@@ -1015,6 +1015,8 @@ const snippetWidgetBody = document.getElementById('sp-snippet-widget-body');
 // ADR-028 clause 6 — approved-origins revoke UI
 const approvedOriginsList = document.getElementById('sp-approved-origins-list');
 const approvedOriginsEmpty = document.getElementById('sp-approved-origins-empty');
+const approvedOriginsStatus = document.getElementById('sp-approved-origins-status');
+const approvedOriginsRetry = document.getElementById('sp-approved-origins-retry');
 // Phase 1.5 — image tab DOM
 const snippetTabText = document.getElementById('sp-snippet-tab-text');
 const snippetTabImage = document.getElementById('sp-snippet-tab-image');
@@ -1400,12 +1402,9 @@ if (addHostBtn) {
       const origin = new URL(tab.url).origin + '/*';
       const granted = await chrome.permissions.request({ origins: [origin] });
       if (granted) {
-        // Mirror the grant in local storage for UI state (source of truth
-        // remains chrome.permissions per ADR-028). Route through
-        // approved-origins.ts rather than writing the storage key directly
-        // so canonicalization/dedup stays single-sourced with the revoke
-        // path and the service worker's onAdded/onRemoved listeners.
-        await addApprovedOrigins([origin]);
+        // The service worker mirrors the native grant on permissions.onAdded.
+        // The panel reads the native list directly so it does not race that
+        // single writer or hide a broad/HTTP grant under an HTTPS alias.
         // Re-inject so snipping works immediately without a reload.
         await injectSnippetContentScript(tab.id);
         await updateAddHostButton();
@@ -1421,28 +1420,50 @@ if (addHostBtn) {
 // Approved-origins revoke UI (ADR-028 clause 6)
 // ============================================================
 //
-// Lists every origin in the `approvedOrigins` mirror with a "Revoke" button.
-// The actual revoke — chrome.permissions.remove followed by the mirror
-// update — lives in shared/approved-origins.ts's `revokeOrigin` so it's
-// covered by that module's fake-chrome test suite and stays single-sourced
-// with the grant path and the service worker's onAdded/onRemoved listeners.
+// Read native patterns before rendering: the storage list is only a mirror.
 
 async function getApprovedOriginsForDisplay(): Promise<string[]> {
-  const stored = await new Promise<{ approvedOrigins?: string[] }>((r) =>
-    chrome.storage.local.get('approvedOrigins', (v) => r(v)),
-  );
-  return [...(stored.approvedOrigins ?? [])].sort();
+  return listApprovedOriginsFromChrome();
 }
 
 async function handleRevokeClick(origin: string): Promise<void> {
-  await revokeOrigin(origin);
+  if (approvedOriginsStatus) approvedOriginsStatus.textContent = 'Checking site permission…';
+  const result = await revokeOrigin(origin);
+  if (approvedOriginsStatus) {
+    approvedOriginsStatus.textContent = result.revoked
+      ? `Access to ${origin} was revoked.`
+      : result.origins.includes(origin)
+        ? `Chrome did not remove ${origin}. It may be included with the extension.`
+        : `Chrome did not confirm that access to ${origin} is gone. Check extension permissions for broader grants.`;
+  }
   await renderApprovedOrigins();
   await updateAddHostButton();
 }
 
+let approvedOriginsRenderRevision = 0;
+
 async function renderApprovedOrigins(): Promise<void> {
   if (!approvedOriginsList || !approvedOriginsEmpty) return;
-  const origins = await getApprovedOriginsForDisplay();
+  const revision = ++approvedOriginsRenderRevision;
+  let origins: string[];
+  try {
+    origins = await getApprovedOriginsForDisplay();
+  } catch {
+    if (revision !== approvedOriginsRenderRevision) return;
+    approvedOriginsList.style.display = 'none';
+    approvedOriginsList.innerHTML = '';
+    approvedOriginsEmpty.style.display = '';
+    approvedOriginsEmpty.textContent = 'Site permissions could not be verified.';
+    if (approvedOriginsRetry) approvedOriginsRetry.style.display = '';
+    if (approvedOriginsStatus) approvedOriginsStatus.textContent = 'Permission check unavailable. Retry to refresh.';
+    return;
+  }
+  if (revision !== approvedOriginsRenderRevision) return;
+  if (approvedOriginsRetry) approvedOriginsRetry.style.display = 'none';
+  if (approvedOriginsStatus?.textContent === 'Permission check unavailable. Retry to refresh.') {
+    approvedOriginsStatus.textContent = '';
+  }
+  approvedOriginsEmpty.textContent = 'No sites approved yet.';
   if (origins.length === 0) {
     approvedOriginsList.style.display = 'none';
     approvedOriginsList.innerHTML = '';
@@ -1452,25 +1473,34 @@ async function renderApprovedOrigins(): Promise<void> {
   approvedOriginsEmpty.style.display = 'none';
   approvedOriginsList.style.display = '';
   approvedOriginsList.innerHTML = '';
+  const fixedOrigins = new Set(chrome.runtime.getManifest().host_permissions ?? []);
   for (const origin of origins) {
     const li = document.createElement('li');
     li.className = 'approved-origin-row';
     const label = document.createElement('span');
     label.className = 'approved-origin-label';
-    label.textContent = origin.replace(/\/\*$/, '');
+    label.textContent = origin === '<all_urls>' ? 'All sites (optional)' : origin.replace(/\/\*$/, '');
     const revokeBtn = document.createElement('button');
     revokeBtn.className = 'btn-icon';
-    revokeBtn.title = `Revoke access to ${origin}`;
-    revokeBtn.setAttribute('aria-label', `Revoke access to ${origin}`);
-    revokeBtn.textContent = 'Revoke';
-    revokeBtn.addEventListener('click', () => {
-      void handleRevokeClick(origin);
-    });
+    if (fixedOrigins.has(origin)) {
+      revokeBtn.disabled = true;
+      revokeBtn.title = `${origin} is included with the extension`;
+      revokeBtn.textContent = 'Included';
+    } else {
+      revokeBtn.title = `Revoke access to ${origin}`;
+      revokeBtn.setAttribute('aria-label', `Revoke access to ${origin}`);
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', () => {
+        void handleRevokeClick(origin);
+      });
+    }
     li.appendChild(label);
     li.appendChild(revokeBtn);
     approvedOriginsList.appendChild(li);
   }
 }
+
+approvedOriginsRetry?.addEventListener('click', () => { void renderApprovedOrigins(); });
 
 // ============================================================
 // Snip mode opt-in (ADR-028 clause 4)
