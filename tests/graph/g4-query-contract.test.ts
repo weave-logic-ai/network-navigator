@@ -1,4 +1,4 @@
-jest.mock('@/lib/db/client', () => ({ query: jest.fn() }));
+jest.mock('@/lib/db/client', () => ({ query: jest.fn(), transaction: jest.fn() }));
 
 type NodeRow = {
   id: string; full_name: string; tier: string; degree: number;
@@ -26,16 +26,20 @@ function setup(options: { contacts?: NodeRow[]; edges?: EdgeRow[]; target?: bool
   const contacts = options.contacts ?? [node('a'), node('b')];
   const allEdges = options.edges ?? TYPES.map((type, index) => edge(`e${index}`, type));
   const query = jest.requireMock('@/lib/db/client').query as jest.Mock;
+  const transaction = jest.requireMock('@/lib/db/client').transaction as jest.Mock;
+  transaction.mockImplementation((fn: (client: { query: jest.Mock }) => Promise<unknown>) => fn({ query }));
   query.mockReset();
   query.mockImplementation((sqlValue: unknown, params: unknown[] = []) => {
     const sql = String(sqlValue);
+    if (sql.includes("to_regclass('public.idx_cluster_memberships_cluster_id')")) return Promise.resolve(rows([{ membership_index: 'idx_cluster_memberships_cluster_id', publication_table: 'graph_compute_state' }]));
+    if (sql.includes('SELECT EXISTS(SELECT 1 FROM graph_compute_state')) return Promise.resolve(rows([{ present: true }]));
     if (sql.includes('FROM research_targets WHERE id')) {
       const target = options.target === 'company'
         ? { id: 't1', kind: 'company', company_id: 'co-1' }
         : { id: 't1', kind: 'contact', contact_id: 'focus' };
       return Promise.resolve(rows(options.target ? [target] : []));
     }
-    if (sql.includes('cluster_memberships')) {
+    if (sql.includes('SELECT c.id, c.full_name')) {
       const focused = sql.includes('WITH neighborhood');
       const threshold = Number(params[focused ? 1 : 0]);
       const requestedLimit = Number(params[focused ? 2 : 1]);
@@ -56,6 +60,7 @@ function setup(options: { contacts?: NodeRow[]; edges?: EdgeRow[]; target?: bool
       const selected = candidates.slice(0, 20000).filter((item) => loaded.has(item.source_contact_id) && loaded.has(item.target_contact_id));
       return Promise.resolve(rows(selected.map((item) => ({ ...item, available_edges: candidates.length }))));
     }
+    if (sql.includes('SELECT cl.id AS cluster_id')) return Promise.resolve(rows([]));
     if (sql.includes('FROM companies WHERE id')) return Promise.resolve(rows([{ id: 'co-1', name: 'Acme' }]));
     if (sql.includes('FROM contacts WHERE is_archived')) return Promise.resolve(rows([{ cnt: String(contacts.length) }]));
     if (sql.includes('FROM clusters')) return Promise.resolve(rows([{ cnt: '0' }]));
@@ -144,7 +149,7 @@ describe('G4 sigma query contract', () => {
   it('keeps a low-ranked contact focus through minPagerank and a one-node limit', async () => {
     const query = setup({ target: true, contacts: [node('high', 0.9), node('focus', 0.001)] });
     const { body } = await get('?primaryTargetId=t1&minPagerank=0.5&limit=1');
-    const nodesSql = String(query.mock.calls.find((call) => String(call[0]).includes('cluster_memberships'))?.[0]);
+    const nodesSql = String(query.mock.calls.find((call) => String(call[0]).includes('SELECT c.id, c.full_name'))?.[0]);
     expect(nodesSql).toContain('OR c.id = $1');
     expect(nodesSql).toMatch(/ORDER BY \(c.id = \$1\) DESC, COALESCE\(gm.pagerank, 0\) DESC, c.id ASC/);
     expect(body.data.focusNodeId).toBe('focus');

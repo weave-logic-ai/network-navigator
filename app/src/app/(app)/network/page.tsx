@@ -5,7 +5,8 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SigmaGraph } from "@/components/network/sigma-graph";
-import { ClusterSidebar } from "@/components/network/cluster-sidebar";
+import { canGraphGoBack, getGraphBackDecision, LatestFocusQueue, writeGraphBack } from "@/components/network/shift-click";
+import { ClusterSidebar, isSelectedGroupRemoved, type ClusterData } from "@/components/network/cluster-sidebar";
 import { TaxonomyGraph } from "@/components/network/taxonomy-graph";
 import { ConversationGraph } from "@/components/network/conversation-graph";
 import { KnowledgeGraphView as KnowledgeGraph } from "@/components/network/knowledge-graph";
@@ -18,9 +19,44 @@ const SIGMA_GRAPH_NODE_LIMIT = 6000;
 
 export default function NetworkPage() {
   const [computing, setComputing] = useState(false);
+  const [computeStatus, setComputeStatus] = useState<{ kind: "running" | "success" | "error"; message: string } | null>(null);
+  const [backError, setBackError] = useState<string | null>(null);
+  const backRetryRef = useRef<{ target: string | null; popHistory: boolean } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [clusterSidebarOpen, setClusterSidebarOpen] = useState(false);
   const [highlightedCluster, setHighlightedCluster] = useState<string | null>(null);
+  const highlightedClusterRef = useRef(highlightedCluster);
+  highlightedClusterRef.current = highlightedCluster;
+  const [graphGroups, setGraphGroups] = useState<ClusterData[]>([]);
+  const graphGroupsRef = useRef<ClusterData[]>([]);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | undefined>();
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [groupNotice, setGroupNotice] = useState<string | null>(null);
+  const handleGroupsStateChange = useCallback((groups: ClusterData[] | null, error: string | null, reloaded = false, requestedGroupId?: string | null) => {
+    // Keep the catalog usable while a graph filter refetch is in flight.
+    setGroupsLoading(groups === null && error === null && graphGroupsRef.current.length === 0);
+    setGroupsError(error);
+    if (groups) {
+      graphGroupsRef.current = groups;
+      setGraphGroups(groups);
+      if (reloaded) setCatalogRevision((revision) => revision + 1);
+      const selected = highlightedClusterRef.current;
+      if (reloaded && isSelectedGroupRemoved(groups, selected, requestedGroupId)) {
+        highlightedClusterRef.current = null;
+        setHighlightedCluster(null);
+        setSelectedGroupKey(undefined);
+        setGroupNotice("The selected group was removed; its highlight was cleared.");
+      }
+    }
+  }, []);
+  const handleHighlightCluster = useCallback((id: string | null, memberKey?: string) => {
+    highlightedClusterRef.current = id;
+    setHighlightedCluster(id);
+    setSelectedGroupKey(memberKey);
+    setGroupNotice(null);
+  }, []);
   const [activeTab, setActiveTab] = useState("graph");
   // ADR-027 graph re-rooting: the current secondary target id (if any),
   // read from `/api/targets/state` on mount so the Graph tab opens already
@@ -34,9 +70,19 @@ export default function NetworkPage() {
   const rootChangedRef = useRef(false);
   const [rootHistory, setRootHistory] = useState<(string | null)[]>([]);
   const [backPending, setBackPending] = useState(false);
+  const [focusPending, setFocusPending] = useState(false);
+  const focusPendingRef = useRef(false);
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  const focusQueueRef = useRef(new LatestFocusQueue<{ ok: boolean; secondaryTargetId?: string | null }>());
+  const handleFocusPendingChange = useCallback((pending: boolean) => {
+    focusPendingRef.current = pending;
+    setFocusPending(pending);
+  }, []);
 
   const handleRootTargetIdChange = useCallback((next: string | null) => {
     if (rootTargetIdRef.current === next) return;
+    backRetryRef.current = null;
+    setBackError(null);
     rootChangedRef.current = true;
     setRootHistory((history) => [...history, rootTargetIdRef.current]);
     rootTargetIdRef.current = next;
@@ -82,41 +128,72 @@ export default function NetworkPage() {
     return () => window.removeEventListener("research-target-changed", onTargetChanged);
   }, [handleRootTargetIdChange]);
 
-  const handleBack = useCallback(async () => {
-    if ((!rootTargetIdRef.current && rootHistory.length === 0) || backPending) return;
-    const previous = rootHistory.length > 0 ? rootHistory[rootHistory.length - 1] : null;
+  const handleBack = useCallback(() => {
+    if (backPending || !canGraphGoBack(rootTargetIdRef.current, rootHistory, focusPendingRef.current, backRetryRef.current)) return;
+    const pendingFocus = focusPendingRef.current;
+    const { target: previous, popHistory } = getGraphBackDecision(rootTargetIdRef.current, rootHistory, pendingFocus, backRetryRef.current);
+    handleFocusPendingChange(false);
+    setNavigationRevision((revision) => revision + 1);
     setBackPending(true);
-    try {
-      const response = await fetch("/api/targets/state", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secondaryTargetId: previous }),
-      });
-      if (!response.ok) return;
-      setRootHistory((history) => history.slice(0, -1));
+    setBackError(null);
+    const reconcileFailure = async (isCurrent: () => boolean) => {
+      if (!isCurrent()) return;
+      backRetryRef.current = { target: previous, popHistory };
+      setBackError("Could not return to the previous graph focus. Retry Back.");
+      try {
+        const response = await fetch("/api/targets/state");
+        if (!response.ok) return;
+        const state = await response.json() as { data?: { secondaryTargetId?: string | null } | null };
+        if (!isCurrent() || !state.data) return;
+        const persistedId = state.data.secondaryTargetId ?? null;
+        rootTargetIdRef.current = persistedId;
+        setRootTargetId(persistedId);
+        window.dispatchEvent(new CustomEvent("research-target-changed", {
+          detail: { secondaryTargetId: persistedId },
+        }));
+      } catch {
+        // Keep the failure visible if the authoritative state cannot be read.
+      }
+    };
+    void focusQueueRef.current.enqueue(() => writeGraphBack(previous), async (result, isCurrent) => {
+      if (!result.ok) {
+        await reconcileFailure(isCurrent);
+        return;
+      }
+      backRetryRef.current = null;
+      if (popHistory) setRootHistory((history) => history.slice(0, -1));
       rootTargetIdRef.current = previous;
       setRootTargetId(previous);
       window.dispatchEvent(new CustomEvent("research-target-changed", {
         detail: { secondaryTargetId: previous },
       }));
-    } catch {
-      // Preserve the current focus so Back can be retried.
-    } finally {
-      setBackPending(false);
-    }
-  }, [backPending, rootHistory]);
+    }, reconcileFailure).finally(() => setBackPending(false));
+  }, [backPending, rootHistory, handleFocusPendingChange]);
 
   const handleCompute = useCallback(async () => {
+    if (computing) return;
     setComputing(true);
+    setComputeStatus({ kind: "running", message: "Computing metrics and groups. The current graph remains available." });
     try {
-      await fetch("/api/graph/compute", { method: "POST" });
+      const response = await fetch("/api/graph/compute", { method: "POST" });
+      const body = await response.json() as {
+        data?: { metricsComputed: number; communitiesDetected: number; communityMethod: "spectral" | "linked-company-fallback" };
+        error?: string;
+        details?: string;
+      };
+      if (!response.ok || !body.data) throw new Error(body.details || body.error || `Graph compute failed (${response.status})`);
+      const fallback = body.data.communityMethod === "linked-company-fallback"
+        ? " Linked-company fallback was used because spectral groups were unavailable."
+        : "";
+      const groupLabel = body.data.communitiesDetected === 1 ? "group" : "groups";
+      setComputeStatus({ kind: "success", message: `Computed ${body.data.metricsComputed} contact metrics and ${body.data.communitiesDetected} ${groupLabel}.${fallback}` });
       setRefreshKey((k) => k + 1);
-    } catch {
-      // silent
+    } catch (error) {
+      setComputeStatus({ kind: "error", message: error instanceof Error ? error.message : "Graph computation ended, but its result could not be verified. Refresh the graph before retrying." });
     } finally {
       setComputing(false);
     }
-  }, []);
+  }, [computing]);
 
   return (
     <div className="flex min-w-0 h-[calc(100vh-7rem)] flex-col">
@@ -139,6 +216,17 @@ export default function NetworkPage() {
           </div>
         }
       />
+
+      {(computeStatus || backError || groupNotice) && (
+        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-sm" aria-live="polite">
+          {computeStatus && <span role={computeStatus.kind === "error" ? "alert" : "status"}
+            className={computeStatus.kind === "error" ? "text-destructive" : "text-muted-foreground"}>{computeStatus.message}</span>}
+          {computeStatus?.kind === "error" && <Button variant="outline" size="sm" onClick={handleCompute} disabled={computing}>Retry compute</Button>}
+          {backError && <span role="alert" className="text-destructive">{backError}</span>}
+          {backError && <Button variant="outline" size="sm" onClick={handleBack} disabled={backPending}>Retry Back</Button>}
+          {groupNotice && <span role="status" className="text-muted-foreground">{groupNotice}</span>}
+        </div>
+      )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
         <div className="min-w-0 w-full overflow-x-auto">
@@ -164,7 +252,7 @@ export default function NetworkPage() {
 
         <TabsContent value="graph" className="hidden min-h-0 flex-1 gap-4 overflow-hidden mt-4 data-[state=active]:flex">
           <div className="relative flex-1 rounded-lg border bg-background overflow-hidden">
-            {(rootTargetId || rootHistory.length > 0) && (
+            {(rootTargetId || rootHistory.length > 0 || focusPending) && (
               <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
                 <Button variant="ghost" size="sm" disabled={backPending} onClick={handleBack}>
                   <ArrowLeft className="mr-1 h-3.5 w-3.5" /> Back
@@ -179,8 +267,13 @@ export default function NetworkPage() {
               key={refreshKey}
               limit={SIGMA_GRAPH_NODE_LIMIT}
               highlightedCluster={highlightedCluster}
+              selectedGroupKey={selectedGroupKey}
+              onGroupsStateChange={handleGroupsStateChange}
               rootTargetId={rootTargetId}
               onRootTargetIdChange={handleRootTargetIdChange}
+              focusQueue={focusQueueRef.current}
+              onFocusPendingChange={handleFocusPendingChange}
+              navigationRevision={navigationRevision}
             />
           </div>
         </TabsContent>
@@ -206,7 +299,10 @@ export default function NetworkPage() {
 
       <ClusterSidebar
         open={clusterSidebarOpen} onOpenChange={setClusterSidebarOpen}
-        highlightedCluster={highlightedCluster} onHighlightCluster={setHighlightedCluster}
+        highlightedCluster={highlightedCluster} onHighlightCluster={handleHighlightCluster}
+        clusters={graphGroups} loading={groupsLoading} error={groupsError}
+        refreshKey={refreshKey}
+        catalogRevision={catalogRevision}
       />
     </div>
   );

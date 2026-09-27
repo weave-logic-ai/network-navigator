@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
-import { isShiftClick, setSecondaryTargetViaShiftClick } from "./shift-click";
+import { isShiftClick, LatestFocusQueue, setSecondaryTargetViaShiftClick } from "./shift-click";
+import type { ClusterData } from "./cluster-sidebar";
 
 interface SigmaNode {
   key: string;
@@ -21,7 +22,7 @@ interface SigmaNode {
     pagerank: number;
     score: number;
     degree: number;
-    clusterId: string | null;
+    groupIds: string[];
     kind?: "contact" | "company";
   };
 }
@@ -39,6 +40,7 @@ interface SigmaEdge {
 interface GraphData {
   nodes: SigmaNode[];
   edges: SigmaEdge[];
+  groups: ClusterData[];
   focusNodeId: string | null;
   stats: {
     totalNodes: number;
@@ -50,6 +52,39 @@ interface GraphData {
     truncatedEdges: number;
     communities: number;
   };
+}
+
+export function matchesGraphGroup(groupIds: readonly string[] | undefined, selectedGroup: string | null): boolean {
+  return !selectedGroup || Boolean(groupIds?.includes(selectedGroup));
+}
+
+export function isGraphNodeEmphasized(
+  groupIds: readonly string[] | undefined,
+  selectedGroup: string | null,
+  matchesSearch: boolean,
+  isFlashed = false,
+): boolean {
+  return isFlashed || (matchesSearch && matchesGraphGroup(groupIds, selectedGroup));
+}
+
+export function countVisibleGraphGroups(
+  groups: ClusterData[],
+  nodes: SigmaNode[],
+  searchQuery: string,
+  selectedGroup: string | null,
+  flashedNodes: ReadonlySet<string> = new Set(),
+): ClusterData[] {
+  const counts = new Map(groups.map((group) => [group.id, 0]));
+  const hasSearch = Boolean(searchQuery.trim());
+  const queryText = searchQuery.toLowerCase();
+  for (const node of nodes) {
+    const matchesSearch = !hasSearch || node.attributes.label.toLowerCase().includes(queryText);
+    if (!isGraphNodeEmphasized(node.attributes.groupIds, selectedGroup, matchesSearch, flashedNodes.has(node.key))) continue;
+    for (const id of node.attributes.groupIds) {
+      if (counts.has(id)) counts.set(id, counts.get(id)! + 1);
+    }
+  }
+  return groups.map((group) => ({ ...group, visibleCount: counts.get(group.id) ?? 0 }));
 }
 
 export function formatGraphCounts(stats: GraphData["stats"]): string {
@@ -78,10 +113,12 @@ interface SigmaGraphProps {
   /**
    * ClusterSidebar's "click a cluster to highlight its nodes" feature
    * (Communities button on the Graph tab). When set to a `clusters.id`,
-   * nodes whose `clusterId` doesn't match are dimmed the same way a search
+   * nodes whose `groupIds` don't contain the ID are dimmed the same way a search
    * query dims non-matches — see the node-reducer effect below.
    */
   highlightedCluster?: string | null;
+  selectedGroupKey?: string;
+  onGroupsStateChange?: (groups: ClusterData[] | null, error: string | null, reloaded?: boolean, requestedGroupId?: string | null) => void;
   /**
    * ADR-027 graph re-rooting. A contact or company `research_targets.id`
    * to center the graph on, in place of the default top-by-PageRank
@@ -95,7 +132,10 @@ interface SigmaGraphProps {
    * a node Focus action sets a new secondary, so the parent doesn't need to poll.
    */
   rootTargetId?: string | null;
-  onRootTargetIdChange?: (next: string) => void;
+  onRootTargetIdChange?: (next: string | null) => void;
+  focusQueue?: LatestFocusQueue<{ ok: boolean; secondaryTargetId?: string | null }>;
+  onFocusPendingChange?: (pending: boolean) => void;
+  navigationRevision?: number;
 }
 
 const EDGE_TYPE_OPTIONS = [
@@ -143,8 +183,13 @@ export function SigmaGraph({
   showProvenanceEdges = false,
   onShowProvenanceEdgesChange,
   highlightedCluster = null,
+  selectedGroupKey,
+  onGroupsStateChange,
   rootTargetId = null,
   onRootTargetIdChange,
+  focusQueue,
+  onFocusPendingChange,
+  navigationRevision,
 }: SigmaGraphProps) {
   // Local copy of the toggle: mirrors the parent's value when controlled,
   // otherwise acts as uncontrolled state. Either way, flipping it triggers
@@ -167,6 +212,14 @@ export function SigmaGraph({
   const mountedRef = useRef(true);
   const latestDataRef = useRef<GraphData | null>(null);
   const requestSeqRef = useRef(0);
+  const localFocusQueueRef = useRef(new LatestFocusQueue<{ ok: boolean; secondaryTargetId?: string | null }>());
+  const focusQueueRef = focusQueue ?? localFocusQueueRef.current;
+  const requestInFlightRef = useRef(false);
+  const groupsCallbackRef = useRef(onGroupsStateChange);
+  groupsCallbackRef.current = onGroupsStateChange;
+  const selectedGroupRef = useRef({ id: highlightedCluster, key: selectedGroupKey });
+  selectedGroupRef.current = { id: highlightedCluster, key: selectedGroupKey };
+  const lastSelectionRef = useRef({ id: highlightedCluster, key: selectedGroupKey });
   const [data, setData] = useState<GraphData | null>(null);
   const [graphRevision, setGraphRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -186,40 +239,69 @@ export function SigmaGraph({
     () => new Set()
   );
 
-  const focusSelectedNode = useCallback(async (node: SigmaNode) => {
+  const focusSelectedNode = useCallback((node: SigmaNode) => {
     setFocusPending(true);
+    onFocusPendingChange?.(true);
     setFocusError(null);
-    const result = await focusGraphNode(node);
-    if (!mountedRef.current) return;
-    setFocusPending(false);
-    if (!result.ok || !result.secondaryTargetId) {
+    const reconcileFailure = async (isCurrent: () => boolean) => {
+      if (!mountedRef.current || !isCurrent()) return;
       setFocusError("Could not focus this node. Please try again.");
-      return;
-    }
-    setActiveRootTargetId(result.secondaryTargetId);
-    onRootTargetIdChange?.(result.secondaryTargetId);
-    window.dispatchEvent(new CustomEvent("research-target-changed", {
-      detail: {
-        secondaryTargetId: result.secondaryTargetId,
-        secondaryTargetLabel: node.attributes.label,
-      },
-    }));
-    setSecondarySetFlash((prev) => new Set(prev).add(node.key));
-    window.setTimeout(() => {
+      try {
+        const response = await fetch("/api/targets/state");
+        if (!response.ok) return;
+        const state = (await response.json()) as { data?: { secondaryTargetId?: string | null } | null };
+        if (!mountedRef.current || !isCurrent() || !state.data) return;
+        const persistedId = state.data.secondaryTargetId ?? null;
+        setActiveRootTargetId(persistedId);
+        onRootTargetIdChange?.(persistedId);
+        window.dispatchEvent(new CustomEvent("research-target-changed", {
+          detail: { secondaryTargetId: persistedId },
+        }));
+      } catch {
+        // Keep the visible error if the authoritative state cannot be read.
+      } finally {
+        if (mountedRef.current && isCurrent()) {
+          setFocusPending(false);
+          onFocusPendingChange?.(false);
+        }
+      }
+    };
+    void focusQueueRef.enqueue(() => focusGraphNode(node), async (result, isCurrent) => {
       if (!mountedRef.current) return;
-      setSecondarySetFlash((prev) => {
-        const next = new Set(prev);
-        next.delete(node.key);
-        return next;
-      });
-    }, 600);
-  }, [onRootTargetIdChange]);
+      if (!result.ok || !result.secondaryTargetId) {
+        await reconcileFailure(isCurrent);
+        return;
+      }
+      setFocusPending(false);
+      onFocusPendingChange?.(false);
+      setActiveRootTargetId(result.secondaryTargetId);
+      onRootTargetIdChange?.(result.secondaryTargetId);
+      window.dispatchEvent(new CustomEvent("research-target-changed", {
+        detail: {
+          secondaryTargetId: result.secondaryTargetId,
+          secondaryTargetLabel: node.attributes.label,
+        },
+      }));
+      setSecondarySetFlash((prev) => new Set(prev).add(node.key));
+      window.setTimeout(() => {
+        if (!mountedRef.current) return;
+        setSecondarySetFlash((prev) => {
+          const next = new Set(prev);
+          next.delete(node.key);
+          return next;
+        });
+      }, 600);
+    }, reconcileFailure);
+  }, [onRootTargetIdChange, onFocusPendingChange, focusQueueRef]);
   const focusNodeRef = useRef(focusSelectedNode);
   focusNodeRef.current = focusSelectedNode;
 
   const loadData = useCallback(async () => {
     const requestSeq = ++requestSeqRef.current;
+    requestInFlightRef.current = true;
     setError(null);
+    setLoading(true);
+    groupsCallbackRef.current?.(null, null);
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
@@ -227,19 +309,35 @@ export function SigmaGraph({
       params.set("edgeTypes", edgeTypes.join(","));
       if (provenanceOn) params.set("includeProvenanceEdges", "true");
       if (activeRootTargetId) params.set("primaryTargetId", activeRootTargetId);
+      const requestedGroup = selectedGroupRef.current;
+      if (requestedGroup.id) params.set("selectedGroupId", requestedGroup.id);
+      if (requestedGroup.key) params.set("selectedGroupKey", requestedGroup.key);
 
       const res = await fetch(`/api/graph/sigma-data?${params}`);
       if (!res.ok) throw new Error("Failed to load graph data");
       const json = await res.json();
-      if (requestSeq === requestSeqRef.current) setData(json.data);
+      if (requestSeq === requestSeqRef.current) {
+        setData(json.data);
+        groupsCallbackRef.current?.(json.data.groups, null, true, requestedGroup.id);
+      }
     } catch (err) {
       if (requestSeq === requestSeqRef.current) {
-        setError(err instanceof Error ? err.message : "Failed to load");
+        const message = err instanceof Error ? err.message : "Failed to load graph data";
+        setError(message);
+        groupsCallbackRef.current?.(null, message);
       }
     } finally {
-      if (requestSeq === requestSeqRef.current) setLoading(false);
+      if (requestSeq === requestSeqRef.current) {
+        requestInFlightRef.current = false;
+        setLoading(false);
+      }
     }
   }, [limit, nicheId, edgeTypes, provenanceOn, activeRootTargetId]);
+
+  useEffect(() => {
+    if (!data || loading || error) return;
+    groupsCallbackRef.current?.(countVisibleGraphGroups(data.groups, data.nodes, searchQuery, highlightedCluster, secondarySetFlash), null);
+  }, [data, loading, error, searchQuery, highlightedCluster, secondarySetFlash]);
 
   const handleProvenanceToggle = useCallback(() => {
     setProvenanceOn((prev) => {
@@ -259,13 +357,31 @@ export function SigmaGraph({
   // cleared the secondary via the header breadcrumb.
   useEffect(() => {
     setActiveRootTargetId(rootTargetId);
+    setFocusPending(false);
     setSearchQuery("");
     setSelectedNode(null);
   }, [rootTargetId]);
 
   useEffect(() => {
+    if (navigationRevision === undefined) return;
+    setFocusPending(false);
+  }, [navigationRevision]);
+
+  useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // A selection made while an older request is in flight needs a response
+  // pinned to that identity; otherwise the capped catalog may omit it.
+  useEffect(() => {
+    const last = lastSelectionRef.current;
+    if (last.id === highlightedCluster && last.key === selectedGroupKey) return;
+    lastSelectionRef.current = { id: highlightedCluster, key: selectedGroupKey };
+    if (!highlightedCluster) return;
+    if (requestInFlightRef.current || !latestDataRef.current?.groups.some((group) => group.id === highlightedCluster)) {
+      void loadData();
+    }
+  }, [highlightedCluster, selectedGroupKey, loadData]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -495,9 +611,7 @@ export function SigmaGraph({
           return { ...data, color: "#F59E0B", highlighted: true };
         }
         const matchesSearch = !hasSearch || matchingNodes.has(node);
-        const matchesCluster =
-          !hasClusterFilter || data.clusterId === highlightedCluster;
-        if (!matchesSearch || !matchesCluster) {
+        if (!isGraphNodeEmphasized(data.groupIds as string[] | undefined, highlightedCluster, matchesSearch)) {
           return { ...data, color: "#e2e8f0", label: "" };
         }
         if (hasSearch || hasClusterFilter) {
@@ -507,7 +621,7 @@ export function SigmaGraph({
       }
     );
     sigma.refresh();
-  }, [searchQuery, secondarySetFlash, highlightedCluster]);
+  }, [searchQuery, secondarySetFlash, highlightedCluster, graphRevision]);
 
   const toggleEdgeType = (type: string) => {
     setEdgeTypes((prev) =>
@@ -527,25 +641,14 @@ export function SigmaGraph({
     sigmaRef.current?.getCamera().animatedReset();
   };
 
-  if (loading) {
-    return (
-      <div className="h-[600px] flex items-center justify-center text-muted-foreground">
-        <Loader2 className="h-5 w-5 animate-spin mr-2" />
-        Loading graph data...
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="h-[600px] flex items-center justify-center text-destructive">
-        {error}
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-2 p-2" data-graph-revision={graphRevision}>
+      {(loading || error) && (
+        <div className="flex items-center gap-2 text-sm" role={error ? "alert" : "status"}>
+          {loading && <><Loader2 className="h-4 w-4 animate-spin" />Loading graph data...</>}
+          {error && <><span className="text-destructive">{error}</span><Button variant="outline" size="sm" onClick={() => void loadData()}>Retry graph load</Button></>}
+        </div>
+      )}
       {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-sm">

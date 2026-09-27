@@ -22,6 +22,65 @@ export function isShiftClick(
   return Boolean(maybeMouse.shiftKey);
 }
 
+/** Serializes focus writes while allowing only the latest request to update UI. */
+export class LatestFocusQueue<T> {
+  private revision = 0;
+  private tail: Promise<void> = Promise.resolve();
+
+  enqueue(
+    action: () => Promise<T>,
+    onResult: (result: T, isCurrent: () => boolean) => void | Promise<void>,
+    onError: (isCurrent: () => boolean) => void | Promise<void>,
+  ): Promise<void> {
+    const revision = ++this.revision;
+    const isCurrent = () => revision === this.revision;
+    this.tail = this.tail.catch(() => {}).then(async () => {
+      if (!isCurrent()) return;
+      try {
+        const result = await action();
+        if (isCurrent()) await onResult(result, isCurrent);
+      } catch {
+        if (isCurrent()) await onError(isCurrent);
+      }
+    });
+    return this.tail;
+  }
+}
+
+/** Back uses the same serialized target-state lane as graph Focus. */
+export async function writeGraphBack(previous: string | null, fetchImpl: typeof fetch = fetch): Promise<{ ok: boolean; secondaryTargetId: string | null }> {
+  const response = await fetchImpl("/api/targets/state", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secondaryTargetId: previous }),
+  });
+  return { ok: response.ok, secondaryTargetId: previous };
+}
+
+/** A pending Focus has not entered history yet, so Back returns to the visible root. */
+export function getGraphBackDecision(
+  current: string | null,
+  history: readonly (string | null)[],
+  focusPending: boolean,
+  retry: { target: string | null; popHistory: boolean } | null = null,
+): { target: string | null; popHistory: boolean } {
+  if (retry) return retry;
+  return {
+    target: focusPending ? current : history.length ? history[history.length - 1] : null,
+    popHistory: !focusPending,
+  };
+}
+
+/** A failed Back remains retryable even when the visible root is Self. */
+export function canGraphGoBack(
+  current: string | null,
+  history: readonly (string | null)[],
+  focusPending: boolean,
+  retry: { target: string | null; popHistory: boolean } | null,
+): boolean {
+  return retry !== null || current !== null || history.length > 0 || focusPending;
+}
+
 /**
  * POST /api/targets with `{kind: 'contact', id}` to get-or-create the
  * target row, then PUT /api/targets/state with `secondaryTargetId`. Silent

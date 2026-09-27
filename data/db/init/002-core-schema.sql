@@ -86,6 +86,7 @@ CREATE INDEX idx_contacts_dedup_hash ON contacts(dedup_hash);
 CREATE INDEX idx_contacts_tags ON contacts USING GIN(tags);
 CREATE INDEX idx_contacts_current_company_id ON contacts(current_company_id);
 CREATE INDEX idx_contacts_is_archived ON contacts(is_archived);
+CREATE INDEX idx_cluster_memberships_cluster_id ON cluster_memberships(cluster_id);
 
 CREATE INDEX idx_edges_source_contact_id ON edges(source_contact_id);
 CREATE INDEX idx_edges_target_contact_id ON edges(target_contact_id);

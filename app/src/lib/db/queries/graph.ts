@@ -85,7 +85,15 @@ export async function getEdgesForContact(contactId: string): Promise<GraphEdge[]
   return result.rows.map(mapEdge);
 }
 
-export async function getAllEdges(options: { realEdgesOnly?: boolean } = {}): Promise<GraphEdge[]> {
+export async function getAllEdges(options: { realEdgesOnly?: boolean; publishedGraphOnly?: boolean } = {}): Promise<GraphEdge[]> {
+  if (options.publishedGraphOnly) {
+    const snapshot = await query<{ published_edges: Array<{
+      id: string; source_contact_id: string; target_contact_id: string | null;
+      target_company_id: string | null; edge_type: string; weight: number;
+      properties: Record<string, unknown>;
+    }> }>("SELECT published_edges FROM graph_compute_state WHERE id = TRUE AND active_graph_name IS NOT NULL");
+    return (snapshot.rows[0]?.published_edges ?? []).map(mapEdge);
+  }
   const result = await query<{
     id: string; source_contact_id: string; target_contact_id: string | null;
     target_company_id: string | null; edge_type: string; weight: number;

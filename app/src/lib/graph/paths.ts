@@ -2,8 +2,10 @@
 // RuVector native with a Node.js BFS over real relationship edges as fallback.
 
 import * as graphQueries from '../db/queries/graph';
+import { transaction } from '../db/client';
+import type { PoolClient } from 'pg';
 import {
-  GRAPH_NAME,
+  getPublishedGraphName,
   ensureNodeContactIdIndex,
   getNodeIdForContact,
   getContactIdsForNodes,
@@ -33,7 +35,7 @@ export async function findPath(
   } catch (error) {
     console.warn(
       `[graph/paths] ruvector_shortest_path failed for ${sourceId} -> ${targetId} ` +
-        `(graph "${GRAPH_NAME}"); falling back to Node.js BFS over non-synthetic contact edges: ` +
+        `(published graph); falling back to Node.js BFS over non-synthetic contact edges: ` +
         (error instanceof Error ? error.message : String(error))
     );
     return await findPathNodeJS(sourceId, targetId, maxDepth);
@@ -55,26 +57,46 @@ async function findPathRuVector(
   maxDepth: number
 ): Promise<PathResult | null> {
   await ensureNodeContactIdIndex();
+  // Pin the graph on the same connection used for every native read. Cleanup
+  // takes the exclusive form of this lock before deleting an old graph.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const outcome = await transaction(async (client) => {
+      await client.query("SET LOCAL transaction_timeout = '10s'");
+      const graphName = await getPublishedGraphName(client);
+      await client.query('SELECT pg_advisory_xact_lock_shared(832782, hashtext($1))', [graphName]);
+      // The pointer may have switched and cleanup may have deleted the old
+      // graph before the pin was acquired. Retry with the current name.
+      if (await getPublishedGraphName(client) !== graphName) return { retry: true as const };
+      return { retry: false as const, result: await readPinnedPath(client, graphName, sourceId, targetId, maxDepth) };
+    });
+    if (!outcome.retry) return outcome.result;
+  }
+  throw new Error('Published graph changed while acquiring a read pin');
+}
+
+async function readPinnedPath(
+  client: PoolClient, graphName: string, sourceId: string, targetId: string, maxDepth: number
+): Promise<PathResult | null> {
 
   const [sourceNodeId, targetNodeId] = await Promise.all([
-    getNodeIdForContact(sourceId),
-    getNodeIdForContact(targetId),
+    getNodeIdForContact(sourceId, graphName, client),
+    getNodeIdForContact(targetId, graphName, client),
   ]);
 
   if (sourceNodeId === null || targetNodeId === null) {
     const missing = sourceNodeId === null ? sourceId : targetId;
     throw new Error(
-      `contact ${missing} has no node in RuVector graph "${GRAPH_NAME}" ` +
+      `contact ${missing} has no node in RuVector graph "${graphName}" ` +
         `(graph may not be synced yet — see syncContactsGraph())`
     );
   }
 
-  const raw = await computeRuVectorShortestPath(sourceNodeId, targetNodeId, maxDepth);
+  const raw = await computeRuVectorShortestPath(sourceNodeId, targetNodeId, maxDepth, graphName, client);
   if (raw === null) return null;
 
   const [contactIdByNode, edgeRecords] = await Promise.all([
-    getContactIdsForNodes(raw.nodes),
-    getEdgesByIds(raw.edges),
+    getContactIdsForNodes(raw.nodes, graphName, client),
+    getEdgesByIds(raw.edges, graphName, client),
   ]);
   const edgeById = new Map(edgeRecords.map((edge) => [edge.id, edge]));
 
@@ -110,10 +132,10 @@ async function findPathNodeJS(
   targetId: string,
   maxDepth: number
 ): Promise<PathResult | null> {
-  const edges = await graphQueries.getAllEdges({ realEdgesOnly: true });
+  const edges = await graphQueries.getAllEdges({ publishedGraphOnly: true });
   if (edges.length === 0) return null;
 
-  // Build undirected adjacency list with edge metadata
+  // Native RuVector edges are inserted source -> target; match that traversal.
   const adj = new Map<string, Array<{ neighbor: string; edgeType: string; weight: number }>>();
 
   for (const edge of edges) {
@@ -124,11 +146,6 @@ async function findPathNodeJS(
 
     adj.get(edge.sourceContactId)!.push({
       neighbor: edge.targetContactId,
-      edgeType: edge.edgeType,
-      weight: edge.weight,
-    });
-    adj.get(edge.targetContactId)!.push({
-      neighbor: edge.sourceContactId,
       edgeType: edge.edgeType,
       weight: edge.weight,
     });
