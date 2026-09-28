@@ -110,12 +110,19 @@
       </details>
     </section>
 
+    <section class="panel-section" id="sp-snippet-queue-section" style="display: none;" aria-label="Local snippets">
+      <div class="snippet-header-row">
+        <h2>Local snippets</h2>
+        <span id="sp-snippet-queue-depth" class="snippet-queue-depth" aria-live="polite"></span>
+      </div>
+      <p id="sp-snippet-queue-error" class="snippet-queue-error" role="alert" style="display: none;"></p>
+      <button id="sp-snippet-queue-read-retry" class="btn btn-secondary" type="button" style="display: none;">Retry reading queue</button>
+      <div id="sp-snippet-queue-list" class="snippet-queue-list"></div>
+    </section>
+
     <!-- Snippet Widget (Phase 1 Track C + Phase 1.5 image) -->
     <section class="panel-section" id="sp-snippet-section" style="display: none;">
-      <div class="snippet-header-row">
-        <h2>Snip to target</h2>
-        <span id="sp-snippet-queue-depth" class="snippet-queue-depth" style="display: none;" aria-live="polite"></span>
-      </div>
+      <h2>Snip to target</h2>
 
       <!-- Snip mode opt-in (ADR-028 clause 4). Toggled here or via the
            Ctrl+Shift+S / Cmd+Shift+S hotkey (relayed from the service

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { isAllowedExtensionOrigin, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
+import { isAllowedExtensionOrigin, isOriginlessExtensionRead, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
 import { hasOperatorSession } from '@/lib/auth/operator-session';
 
 const SECRET_PROTECTED_CRON_ROUTES = new Set([
@@ -47,6 +47,7 @@ export async function middleware(request: NextRequest) {
 
   const origin = request.headers.get('origin');
   const extensionOrigin = !!origin && origin.startsWith('chrome-extension://');
+  const originlessExtensionRead = isOriginlessExtensionRead(request);
   if (origin === 'null' || (origin && origin !== localOrigin && !isAllowedExtensionOrigin(origin))) {
     return NextResponse.json({ error: 'Untrusted origin' }, { status: 403 });
   }
@@ -75,7 +76,8 @@ export async function middleware(request: NextRequest) {
   const extensionPrincipal = isApi && (path === '/api/extension/register'
     || isTokenProtectedExtensionRoute(path)
     || (extensionOrigin && (isExtensionVisibilityParserRoute(path)
-      || isExtensionOutreachRoute(request, path))));
+      || isExtensionOutreachRoute(request, path)))
+    || (originlessExtensionRead && isExtensionOutreachRoute(request, path)));
   if (path !== '/api/operator/unlock' && !extensionPrincipal && !await hasOperatorSession(request)) {
     if (!isApi) return NextResponse.redirect(new URL('/operator/unlock', localOrigin));
     return NextResponse.json({ error: 'Operator session required' }, { status: 401 });

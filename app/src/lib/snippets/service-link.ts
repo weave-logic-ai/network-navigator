@@ -18,7 +18,7 @@
 // the bytes captured plus a link between the snippet and the record.
 
 import crypto from 'crypto';
-import { query } from '../db/client';
+import { query, withQuerySavepoint } from '../db/client';
 import { createCausalNode, createCausalEdge } from '../ecc/causal-graph/service';
 import { appendChainEntry } from '../ecc/exo-chain/service';
 import {
@@ -109,6 +109,7 @@ export async function saveLinkSnippet(
   let sourceRecordId: string | null = null;
   let sourceRecordNew = false;
   try {
+    await withQuerySavepoint('snippet_link', async () => {
     const fetched = await fetcher(canonicalHref, {
       tenantId: input.tenantId,
       timeoutMs: 15_000,
@@ -135,6 +136,7 @@ export async function saveLinkSnippet(
     });
     sourceRecordId = written.id;
     sourceRecordNew = written.isNew;
+    });
   } catch (err) {
     const code =
       err instanceof SourceFetchError ? err.code : 'HTTP_ERROR';
@@ -189,6 +191,7 @@ export async function saveLinkSnippet(
   const chainId = snippetChainId(input.targetKind, input.targetId);
   let chainSequence = -1;
   try {
+    await withQuerySavepoint('snippet_chain', async () => {
     const seqRes = await query<{ max: string | number | null }>(
       `SELECT MAX(sequence) AS max FROM exo_chain_entries WHERE chain_id = $1`,
       [chainId]
@@ -229,6 +232,7 @@ export async function saveLinkSnippet(
       'extension'
     );
     chainSequence = appended.entry.sequence;
+    });
   } catch (err) {
     warnings.push(
       `ExoChain append failed (non-fatal): ${

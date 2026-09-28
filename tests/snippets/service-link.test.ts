@@ -11,6 +11,7 @@
 
 jest.mock('@/lib/db/client', () => ({
   query: jest.fn(),
+  withQuerySavepoint: (_name: string, fn: () => Promise<unknown>) => fn(),
   transaction: jest.fn(),
   healthCheck: jest.fn(),
   getPool: jest.fn(),

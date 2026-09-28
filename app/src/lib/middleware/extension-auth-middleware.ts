@@ -4,13 +4,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateExtensionToken } from '@/lib/auth/extension-auth';
 import { checkRateLimit } from './extension-rate-limiter';
-import { isAllowedExtensionOrigin, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
+import { isAllowedExtensionOrigin, isOriginlessExtensionRead, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
 
 /**
  * Middleware that validates extension requests.
  * Checks:
  *   1. X-Extension-Token header present and valid
- *   2. Origin header matches the configured Chrome extension allowlist
+ *   2. Origin matches the extension allowlist, or this is a token-bearing
+ *      originless MV3 GET to a loopback extension endpoint
  *   3. Token is not revoked
  *
  * Returns 401 with JSON error body on failure.
@@ -22,7 +23,7 @@ export async function withExtensionAuth(
 ): Promise<NextResponse> {
   // 1. Validate origin
   const origin = req.headers.get('origin');
-  if (!trustedLocalOrigin(req) || !validateOrigin(origin)) {
+  if (!trustedLocalOrigin(req) || !(validateOrigin(origin) || isOriginlessExtensionRead(req))) {
     return NextResponse.json(
       {
         error: 'INVALID_ORIGIN',

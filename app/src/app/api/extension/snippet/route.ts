@@ -10,6 +10,8 @@
 // 404 so the extension widget treats the endpoint as absent.
 
 import { NextRequest, NextResponse } from 'next/server';
+import { createHash } from 'node:crypto';
+import { transactionWithQueryContext } from '@/lib/db/client';
 import { withExtensionAuth } from '@/lib/middleware/extension-auth-middleware';
 import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { getDefaultTenantId } from '@/lib/snippets/tenant';
@@ -20,14 +22,113 @@ import {
   ALLOWED_IMAGE_MIME_TYPES,
   MAX_IMAGE_BYTES,
 } from '@/lib/snippets/blob-store';
-import type { SnippetSaveRequest } from '@/lib/snippets/types';
+import type { SnippetSaveRequest, SnippetSaveResponse } from '@/lib/snippets/types';
+
+type SaveResponse = { success: true } & SnippetSaveResponse;
+type Receipt = {
+  tenant_id: string;
+  target_kind: string;
+  target_id: string;
+  request_hash: string;
+  response: SaveResponse;
+};
+
+function requestHash(body: SnippetSaveRequest): string {
+  // chrome.storage.local may reorder object keys before an offline replay.
+  // Hash the JSON value so a lost response can return its original receipt.
+  const canonical = JSON.stringify(body, (_key, value: unknown) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function legacyRequestHashes(body: SnippetSaveRequest): string[] {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const currentOrder = digest(body);
+  // Receipts saved before canonical hashing used the extension's insertion
+  // order. Chrome storage can reorder the same queued body before replay.
+  const common = ['kind', 'targetKind', 'targetId'];
+  const fields = body.kind === 'image'
+    ? ['imageBytes', 'mimeType', 'width', 'height', 'sourceUrl', 'pageType', 'tagSlugs', 'note']
+    : body.kind === 'link'
+      ? ['href', 'linkText', 'sourceUrl', 'pageType', 'tagSlugs', 'note']
+      : ['text', 'sourceUrl', 'pageType', 'tagSlugs', 'note', 'mentionContactIds'];
+  const order = [...common, ...fields, 'requestId'];
+  const record = body as unknown as Record<string, unknown>;
+  if (Object.keys(record).some(key => !order.includes(key))) return [currentOrder];
+  const extensionOrder = Object.fromEntries(order.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]]));
+  return [currentOrder, digest(extensionOrder)];
+}
+
+async function saveSnippet(body: SnippetSaveRequest, tenantId: string, imageBytes?: Buffer): Promise<SaveResponse> {
+  if (body.kind === 'image') {
+    const result = await saveImageSnippet({
+      tenantId, targetKind: body.targetKind, targetId: body.targetId,
+      bytes: imageBytes!, mimeType: body.mimeType, width: body.width ?? null,
+      height: body.height ?? null, sourceUrl: body.sourceUrl, pageType: body.pageType,
+      tagSlugs: body.tagSlugs, note: body.note, sessionId: body.sessionId,
+    });
+    return { success: true, ...result };
+  }
+  if (body.kind === 'link') {
+    const result = await saveLinkSnippet({
+      tenantId, targetKind: body.targetKind, targetId: body.targetId, href: body.href,
+      linkText: body.linkText, sourceUrl: body.sourceUrl, pageType: body.pageType,
+      tagSlugs: body.tagSlugs, note: body.note, sessionId: body.sessionId,
+    });
+    return { success: true, ...result };
+  }
+  const result = await saveTextSnippet({
+    tenantId, targetKind: body.targetKind, targetId: body.targetId, text: body.text,
+    sourceUrl: body.sourceUrl, pageType: body.pageType, tagSlugs: body.tagSlugs,
+    note: body.note, mentionContactIds: body.mentionContactIds, sessionId: body.sessionId,
+  });
+  return { success: true, ...result };
+}
+
+async function saveSnippetOnce(extensionId: string, tenantId: string, body: SnippetSaveRequest, imageBytes?: Buffer): Promise<SaveResponse | null> {
+  if (!body.requestId) return saveSnippet(body, tenantId, imageBytes); // Shipped legacy clients.
+  const hash = requestHash(body);
+  return transactionWithQueryContext(async (client) => {
+    // The unique insert waits for any in-flight request with this key. All
+    // snippet graph writes use this transaction through the query context.
+    const claim = await client.query(
+      `INSERT INTO extension_snippet_receipts
+       (extension_id, request_id, tenant_id, target_kind, target_id, request_hash, response)
+       VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)
+       ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
+      [extensionId, body.requestId, tenantId, body.targetKind, body.targetId, hash]
+    );
+    if (claim.rowCount === 0) {
+      const existing = await client.query<Receipt>(
+        `SELECT tenant_id, target_kind, target_id, request_hash, response
+         FROM extension_snippet_receipts WHERE request_id = $1`,
+        [body.requestId]
+      );
+      const receipt = existing.rows[0];
+      if (!receipt || receipt.tenant_id !== tenantId || receipt.target_kind !== body.targetKind ||
+          receipt.target_id !== body.targetId ||
+          (receipt.request_hash !== hash && !legacyRequestHashes(body).includes(receipt.request_hash))) return null;
+      return receipt.response;
+    }
+    const response = await saveSnippet(body, tenantId, imageBytes);
+    await client.query(
+      `UPDATE extension_snippet_receipts SET response = $3::jsonb
+       WHERE extension_id = $1 AND request_id = $2`,
+      [extensionId, body.requestId, JSON.stringify(response)]
+    );
+    return response;
+  });
+}
 
 export async function POST(req: NextRequest) {
   if (!RESEARCH_FLAGS.snippets) {
     return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 });
   }
 
-  return withExtensionAuth(req, async () => {
+  return withExtensionAuth(req, async (_req, extensionId) => {
     let body: SnippetSaveRequest;
     try {
       body = (await req.json()) as SnippetSaveRequest;
@@ -48,12 +149,16 @@ export async function POST(req: NextRequest) {
 
     try {
       const tenantId = await getDefaultTenantId();
+      const expectedTenant = req.headers?.get?.('x-snippet-tenant-id');
+      if (expectedTenant && expectedTenant !== tenantId) {
+        return NextResponse.json({ error: 'SNIPPET_TENANT_CHANGED' }, { status: 409 });
+      }
+      let imageBytes: Buffer | undefined;
       if (body.kind === 'image') {
         // Decode + validate size and mime type. The validator throws with a
         // user-facing message we propagate as a 400.
-        let bytes: Buffer;
         try {
-          bytes = decodeAndValidateImage(body.imageBytes, body.mimeType);
+          imageBytes = decodeAndValidateImage(body.imageBytes, body.mimeType);
         } catch (err) {
           return NextResponse.json(
             {
@@ -63,59 +168,28 @@ export async function POST(req: NextRequest) {
             { status: 400 }
           );
         }
-        const result = await saveImageSnippet({
-          tenantId,
-          targetKind: body.targetKind,
-          targetId: body.targetId,
-          bytes,
-          mimeType: body.mimeType,
-          width: body.width ?? null,
-          height: body.height ?? null,
-          sourceUrl: body.sourceUrl,
-          pageType: body.pageType,
-          tagSlugs: body.tagSlugs,
-          note: body.note,
-          sessionId: body.sessionId,
-        });
-        return NextResponse.json({ success: true, ...result });
       }
-
-      if (body.kind === 'link') {
-        const result = await saveLinkSnippet({
-          tenantId,
-          targetKind: body.targetKind,
-          targetId: body.targetId,
-          href: body.href,
-          linkText: body.linkText,
-          sourceUrl: body.sourceUrl,
-          pageType: body.pageType,
-          tagSlugs: body.tagSlugs,
-          note: body.note,
-          sessionId: body.sessionId,
-        });
-        return NextResponse.json({ success: true, ...result });
-      }
-
-      // Default (`kind` omitted) and explicit `kind: 'text'` path.
-      const result = await saveTextSnippet({
-        tenantId,
-        targetKind: body.targetKind,
-        targetId: body.targetId,
-        text: body.text,
-        sourceUrl: body.sourceUrl,
-        pageType: body.pageType,
-        tagSlugs: body.tagSlugs,
-        note: body.note,
-        mentionContactIds: body.mentionContactIds,
-        sessionId: body.sessionId,
-      });
-      return NextResponse.json({ success: true, ...result });
+      const response = await saveSnippetOnce(extensionId, tenantId, body, imageBytes);
+      return response
+        ? NextResponse.json(response)
+        : NextResponse.json({ error: 'SNIPPET_REQUEST_ID_CONFLICT' }, { status: 409 });
     } catch (err) {
       console.error('[Snippet] save failed:', err);
       return NextResponse.json(
         { error: 'INTERNAL_ERROR', message: (err as Error).message },
         { status: 500 }
       );
+    }
+  });
+}
+
+export async function GET(req: NextRequest) {
+  if (!RESEARCH_FLAGS.snippets) return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 });
+  return withExtensionAuth(req, async () => {
+    try {
+      return NextResponse.json({ tenantId: await getDefaultTenantId() });
+    } catch {
+      return NextResponse.json({ error: 'INTERNAL_ERROR' }, { status: 500 });
     }
   });
 }
@@ -127,6 +201,11 @@ function validateSnippetBody(
     return { ok: false, message: 'Body must be an object' };
   }
   const b = body as Record<string, unknown>;
+
+  if (b.requestId !== undefined && (typeof b.requestId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(b.requestId))) {
+    return { ok: false, message: 'requestId must be a UUID' };
+  }
 
   // Common fields.
   if (b.targetKind !== 'self' && b.targetKind !== 'contact' && b.targetKind !== 'company') {

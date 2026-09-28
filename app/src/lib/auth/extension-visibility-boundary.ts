@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateExtensionToken } from '@/lib/auth/extension-auth';
 import { checkRateLimit } from '@/lib/middleware/extension-rate-limiter';
-import { isAllowedExtensionOrigin, requireLocalDashboardRequest, trustedLocalOrigin } from './local-request-boundary';
+import { isAllowedExtensionOrigin, isOriginlessExtensionRead, requireLocalDashboardRequest, trustedLocalOrigin } from './local-request-boundary';
 
 /** Route-level guard for visibility endpoints used by both the local UI and extension. */
 export async function requireVisibilityPrincipal(
   request: NextRequest, json = false, rateLimit = true
 ): Promise<NextResponse | null> {
   const origin = request.headers.get('origin');
-  if (!origin?.startsWith('chrome-extension://')) {
+  const originlessRead = isOriginlessExtensionRead(request);
+  if (!origin?.startsWith('chrome-extension://') && !originlessRead) {
     return requireLocalDashboardRequest(request, json);
   }
 
-  if (!trustedLocalOrigin(request) || !isAllowedExtensionOrigin(origin)) {
+  if (!trustedLocalOrigin(request) || (origin !== null && !isAllowedExtensionOrigin(origin))) {
     return NextResponse.json({ error: 'Untrusted extension origin' }, { status: 403 });
   }
   if (json && !/^application\/json(?:\s*;|\s*$)/i.test(request.headers.get('content-type') ?? '')) {

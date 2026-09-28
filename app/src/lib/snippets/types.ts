@@ -24,6 +24,7 @@ export type SnippetKind = 'text' | 'image' | 'link';
  * shipped Phase 1 extension bundle.
  */
 export interface SnippetSaveTextRequest {
+  requestId?: string;
   kind?: 'text';
   targetKind: SnippetTargetKind;
   targetId: string;
@@ -45,6 +46,7 @@ export interface SnippetSaveTextRequest {
  * Size cap: 5 MB. Mime type: image/png, image/jpeg, image/webp.
  */
 export interface SnippetSaveImageRequest {
+  requestId?: string;
   kind: 'image';
   targetKind: SnippetTargetKind;
   targetId: string;
@@ -75,6 +77,7 @@ export interface SnippetSaveImageRequest {
  * `source_records` layer.
  */
 export interface SnippetSaveLinkRequest {
+  requestId?: string;
   kind: 'link';
   targetKind: SnippetTargetKind;
   targetId: string;

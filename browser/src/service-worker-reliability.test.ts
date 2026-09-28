@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
 import type { CapturePayload } from './types/index.ts';
 
 test('worker keeps one replay owner and reports offline, submitted, limit and missing-script outcomes', async () => {
@@ -31,8 +32,8 @@ test('worker keeps one replay owner and reports offline, submitted, limit and mi
   const event = <T extends (...args: never[]) => unknown>(save: (listener: T) => void) => ({ addListener: save });
   (globalThis as unknown as { chrome: unknown }).chrome = {
     storage: { local: {
-      get(key: string, callback?: (value: Record<string, unknown>) => void) {
-        const value = { [key]: storage[key] };
+      get(key: string | string[], callback?: (value: Record<string, unknown>) => void) {
+        const value = Object.fromEntries((Array.isArray(key) ? key : [key]).map((entry) => [entry, storage[entry]]));
         callback?.(value);
         return Promise.resolve(value);
       },
@@ -87,7 +88,7 @@ test('worker keeps one replay owner and reports offline, submitted, limit and mi
     const bundle = await build({ entryPoints: ['src/service-worker.ts'], bundle: true, write: false, platform: 'browser', format: 'iife' });
     runInNewContext(bundle.outputFiles[0].text, {
       chrome: (globalThis as unknown as { chrome: unknown }).chrome,
-      fetch: globalThis.fetch, Response, AbortController, URL, crypto, Date,
+      fetch: globalThis.fetch, Response, AbortController, URL, crypto, Date, TextEncoder, Uint8Array,
       setTimeout: (callback: (...args: unknown[]) => void, delay: number) => setTimeout(callback, delay === 10000 ? 0 : delay),
       clearTimeout, console,
     });
@@ -141,7 +142,9 @@ test('worker keeps one replay owner and reports offline, submitted, limit and mi
     assert.equal((storage.captureQueue as CapturePayload[]).length, 0);
     assert.equal(storage[dayKey], 3);
 
-    storage.snippetQueue = [{ id: 'synthetic-snippet', createdAt: payload.capturedAt, path: '/api/extension/snippet', body: { kind: 'text', text: 'synthetic' }, retryCount: 0 }];
+    storage.snippetQueue = [{ id: 'synthetic-snippet', createdAt: payload.capturedAt, path: '/api/extension/snippet', body: { kind: 'text', text: 'synthetic' }, retryCount: 0,
+      destination: { appUrl: storage.appUrl, tokenFingerprint: createHash('sha256').update(String(storage.extensionToken)).digest('hex'),
+        tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } }];
     const started = new Promise<void>((resolve) => { snippetStarted = resolve; });
     const firstFlush = alarmListener({ name: 'snippet-queue-flush' });
     await Promise.race([started, new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error('snippet replay did not start')), 250))]);

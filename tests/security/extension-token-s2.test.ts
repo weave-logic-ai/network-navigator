@@ -140,6 +140,26 @@ test('operator mints, lists masked token, registers full token, and revokes it',
     { params: Promise.resolve({ extensionId }) })).status).toBe(404);
 });
 
+test('MV3 originless GET uses a full token without admitting dashboard or originless POST', async () => {
+  const { token } = (await (await mint(req('/api/extension/tokens', 'POST', await operator()))).json()).data;
+  const headers = { 'x-extension-token': token, 'sec-fetch-site': 'none' };
+  const read = req('/api/extension/health', 'GET', headers);
+  expect((await middleware(read)).status).toBe(200);
+  const handler = jest.fn(async () => NextResponse.json({ ok: true }));
+  expect((await withExtensionAuth(read, handler)).status).toBe(200);
+  expect(handler).toHaveBeenCalledTimes(1);
+
+  expect((await withExtensionAuth(req('/api/extension/health', 'GET', {
+    ...headers, 'sec-fetch-site': 'same-origin',
+  }), handler)).status).toBe(401);
+  expect((await middleware(req('/api/extension/health', 'GET', {
+    ...headers, 'sec-fetch-site': 'cross-site',
+  }))).status).toBe(403);
+  expect((await withExtensionAuth(req('/api/extension/health', 'POST', headers), handler)).status).toBe(401);
+  expect((await middleware(req('/api/dashboard', 'GET', headers))).status).toBe(401);
+  expect(handler).toHaveBeenCalledTimes(1);
+});
+
 test('expired established sockets cannot receive pushes or remain connected', () => {
   const extensionId = '11111111-1111-4111-8111-111111111111';
   const socket = { extensionId, expiresAt: Date.now() - 1,

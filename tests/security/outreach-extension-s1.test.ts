@@ -69,6 +69,16 @@ test('middleware admits only extension GET templates and POST personalize', asyn
   }))).status).toBe(403);
 });
 
+test('originless MV3 template GET authenticates without admitting other local routes', async () => {
+  const headers = { 'x-extension-token': token, 'sec-fetch-site': 'none' };
+  const request = req('/api/outreach/templates', 'GET', headers);
+  list.mockResolvedValue([]);
+  expect((await middleware(request)).status).toBe(200);
+  expect((await templates(request)).status).toBe(200);
+  expect((await middleware(req('/api/outreach/templates', 'POST', headers, '{}'))).status).toBe(401);
+  expect((await middleware(req('/api/extension/tokens', 'GET', headers))).status).toBe(401);
+});
+
 test('registration accepts a full generated-format token for explicit popup re-auth', async () => {
   dbQuery.mockResolvedValueOnce({ rows: [tokenRow] })
     .mockResolvedValueOnce({ rows: [{ extension_id: id }], rowCount: 1 });
