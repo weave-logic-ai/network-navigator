@@ -15,13 +15,15 @@ function audience(request: NextRequest): Audience | null {
   return { tier, limit };
 }
 
-const MATCHES = `SELECT c.id, c.full_name, cs.tier FROM contacts c
+// Owner-basis scores rank ahead of legacy-unverified ones (058); legacy rows
+// stay eligible but are marked so the operator can tell them apart.
+const MATCHES = `SELECT c.id, c.full_name, cs.tier, cs.basis_kind FROM contacts c
   JOIN contact_scores cs ON cs.contact_id = c.id
   WHERE c.is_archived = FALSE AND c.degree > 0
     AND ($2::text IS NULL OR cs.tier = $2)
     AND NOT EXISTS (SELECT 1 FROM outreach_states os
       WHERE os.contact_id = c.id AND os.campaign_id = $1)
-  ORDER BY cs.composite_score DESC NULLS LAST, c.id LIMIT $3`;
+  ORDER BY (cs.basis_kind = 'owner') DESC, cs.composite_score DESC NULLS LAST, c.id LIMIT $3`;
 
 class AudienceConflict extends Error {}
 
@@ -35,7 +37,7 @@ async function handle(request: NextRequest, context: Context, enroll: boolean) {
     if (!enroll) {
       const campaign = await query<{ status: string }>('SELECT status FROM outreach_campaigns WHERE id = $1', [id]);
       if (!campaign.rows[0]) return NextResponse.json({ error: 'Campaign not found' }, { status: 404 });
-      const matches = await query<{ id: string; full_name: string | null; tier: string }>(MATCHES, [id, selection.tier, selection.limit]);
+      const matches = await query<{ id: string; full_name: string | null; tier: string; basis_kind: string }>(MATCHES, [id, selection.tier, selection.limit]);
       return NextResponse.json({ data: matches.rows, count: matches.rows.length, limit: selection.limit });
     }
     let body: unknown;

@@ -415,6 +415,27 @@ testIfDisposable('real PostgreSQL: manual stages survive later delivery events a
       enrollAudience(req(url, cookie!, 'POST', JSON.stringify({ contact_ids: ids })), context);
     expect(await previewIds(urlA, contextA)).toContain(candidate);
 
+    // Legacy-unverified scores stay eligible but rank after owner scores, even
+    // with a higher composite, and are marked in the preview.
+    const legacyTop = 'cccccccc-1111-4111-8111-cccccccccccc';
+    await query('INSERT INTO contacts (id, full_name, linkedin_url, degree) VALUES ($1, $2, $3, 1)',
+      [legacyTop, 'Legacy Top', 'https://www.linkedin.com/in/u7-legacy-top']);
+    const restoreClient = await getPool().connect();
+    try {
+      await restoreClient.query('BEGIN');
+      await restoreClient.query("SELECT set_config('app.score_owner_restore', 'true', true)");
+      await restoreClient.query(`INSERT INTO contact_scores (contact_id, composite_score, tier, basis_kind, basis_hash)
+        VALUES ($1, 0.95, 'gold', 'legacy-unverified', NULL)`, [legacyTop]);
+      await restoreClient.query('COMMIT');
+    } finally {
+      restoreClient.release();
+    }
+    const ranked = (await (await previewAudience(req(urlA, cookie!), contextA)).json()).data as
+      Array<{ id: string; basis_kind: string }>;
+    expect(ranked.findIndex(c => c.id === candidate)).toBeLessThan(ranked.findIndex(c => c.id === legacyTop));
+    expect(ranked.find(c => c.id === legacyTop)?.basis_kind).toBe('legacy-unverified');
+    await query('DELETE FROM contacts WHERE id = $1', [legacyTop]);
+
     // A new high-ranked contact displaces the preview's 100th row. The old
     // preview cannot enroll that unseen contact or a silently changed set.
     await query(`INSERT INTO contacts (full_name, linkedin_url, degree)
