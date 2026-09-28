@@ -290,6 +290,13 @@ export async function getCampaign(id: string): Promise<CampaignRow | null> {
   return (await listCampaigns()).find(c => c.id === id) ?? null;
 }
 
+/** Mirrors the outreach_campaigns.status CHECK in 006-outreach-schema.sql. */
+export const CAMPAIGN_STATUSES = ['draft', 'active', 'paused', 'completed', 'archived'] as const;
+export type CampaignStatus = typeof CAMPAIGN_STATUSES[number];
+export function isCampaignStatus(value: unknown): value is CampaignStatus {
+  return typeof value === 'string' && (CAMPAIGN_STATUSES as readonly string[]).includes(value);
+}
+
 export async function createCampaign(data: {
   name: string;
   description?: string;

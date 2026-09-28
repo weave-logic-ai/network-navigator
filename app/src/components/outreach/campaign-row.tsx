@@ -2,6 +2,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { Pencil } from "lucide-react";
 
@@ -28,16 +29,29 @@ interface CampaignRowProps {
   campaign: Campaign;
   onEdit: (campaign: Campaign) => void;
   onAudience: (campaign: Campaign) => void;
+  onStatusChange: (campaign: Campaign, status: string) => void;
 }
 
-export function CampaignRow({ campaign, onEdit, onAudience }: CampaignRowProps) {
+// Keep in sync with CAMPAIGN_STATUSES (server validates).
+const STATUSES = ["draft", "active", "paused", "completed", "archived"];
+
+export function CampaignRow({ campaign, onEdit, onAudience, onStatusChange }: CampaignRowProps) {
   return (
     <TableRow>
       <TableCell className="font-medium">{campaign.name}</TableCell>
       <TableCell>
-        <Badge variant={STATUS_VARIANT[campaign.status] ?? "outline"}>
-          {campaign.status}
-        </Badge>
+        <Select value={campaign.status} onValueChange={(status) => onStatusChange(campaign, status)}>
+          <SelectTrigger className="h-7 w-[120px] border-none px-0 shadow-none" aria-label={`Status of ${campaign.name}`}>
+            <SelectValue>
+              <Badge variant={STATUS_VARIANT[campaign.status] ?? "outline"}>{campaign.status}</Badge>
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {STATUSES.map((status) => (
+              <SelectItem key={status} value={status}>{status}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </TableCell>
       <TableCell className="text-right">{campaign.target_count}</TableCell>
       <TableCell className="text-right">{campaign.sent_count}</TableCell>

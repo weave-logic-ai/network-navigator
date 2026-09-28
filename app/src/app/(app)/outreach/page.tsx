@@ -134,7 +134,7 @@ export default function OutreachPage() {
   const [campaignForm, setCampaignForm] = useState({ name: "", description: "" });
   const [audienceCampaign, setAudienceCampaign] = useState<Campaign | null>(null);
   const [audienceTier, setAudienceTier] = useState("all");
-  const [audiencePreview, setAudiencePreview] = useState<Array<{ id: string; full_name: string | null; tier: string }> | null>(null);
+  const [audiencePreview, setAudiencePreview] = useState<Array<{ id: string; full_name: string | null; tier: string; basis_kind?: string }> | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
 
   const [perfStats, setPerfStats] = useState<PerfStat[]>([]);
@@ -269,6 +269,18 @@ export default function OutreachPage() {
     setCampaignDialogOpen(false);
     setEditingCampaign(null);
     setCampaignForm({ name: "", description: "" });
+    fetchCampaigns();
+  };
+
+  const changeCampaignStatus = async (campaign: Campaign, status: string) => {
+    if (status === campaign.status) return;
+    setCampaignError(null);
+    const res = await fetch(`/api/outreach/campaigns/${campaign.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) { setCampaignError("Could not change campaign status."); return; }
     fetchCampaigns();
   };
 
@@ -503,7 +515,7 @@ export default function OutreachPage() {
                     setEditingCampaign(campaign);
                     setCampaignForm({ name: campaign.name, description: campaign.description ?? "" });
                     setCampaignDialogOpen(true);
-                  }} onAudience={(campaign) => {
+                  }} onStatusChange={changeCampaignStatus} onAudience={(campaign) => {
                     setAudienceCampaign(campaign); setAudienceTier("all"); setAudiencePreview(null);
                     previewAudience(campaign, "all");
                   }} />
@@ -563,7 +575,7 @@ export default function OutreachPage() {
               </Select>
               <p className="text-sm">{audiencePreview ? `${audiencePreview.length} eligible contacts (first 100)` : "Loading preview..."}</p>
               <div className="max-h-48 overflow-y-auto text-sm">
-                {audiencePreview?.map(contact => <p key={contact.id}>{contact.full_name ?? "Unnamed contact"} · {contact.tier}</p>)}
+                {audiencePreview?.map(contact => <p key={contact.id}>{contact.full_name ?? "Unnamed contact"} · {contact.tier}{contact.basis_kind === "legacy-unverified" && <span className="text-muted-foreground"> · unverified score</span>}</p>)}
               </div>
               <DialogFooter><Button disabled={!audiencePreview?.length || audienceCampaign?.status !== 'draft'} onClick={enrollAudience}>Enroll previewed audience</Button></DialogFooter>
             </DialogContent>

@@ -2,7 +2,7 @@
 // POST /api/outreach/campaigns - create campaign
 
 import { NextRequest, NextResponse } from 'next/server';
-import { listCampaigns, createCampaign } from '@/lib/db/queries/outreach';
+import { CAMPAIGN_STATUSES, createCampaign, isCampaignStatus, listCampaigns } from '@/lib/db/queries/outreach';
 import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 export async function GET(request: NextRequest) {
@@ -27,6 +27,9 @@ export async function POST(request: NextRequest) {
 
     if (!body.name || typeof body.name !== 'string') {
       return NextResponse.json({ error: 'name is required' }, { status: 400 });
+    }
+    if (body.status !== undefined && !isCampaignStatus(body.status)) {
+      return NextResponse.json({ error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` }, { status: 400 });
     }
 
     const campaign = await createCampaign({
