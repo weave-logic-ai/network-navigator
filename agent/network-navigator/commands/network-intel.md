@@ -184,12 +184,14 @@ curl -s -X POST http://localhost:3750/api/outreach/campaigns \
   -d '{"name":"Q1 AI Leaders","description":"Outreach to AI decision-makers","templateId":"<template-uuid>"}' | jq .
 ```
 
-Populate a campaign with top-scored contacts:
+Populate a draft campaign with top-scored contacts. Preview first, then enroll
+exactly the previewed IDs with the same `tier` and `limit` (a changed audience returns 409):
 
 ```bash
-curl -s -X POST http://localhost:3750/api/outreach/campaigns/<campaign-id>/populate \
+curl -s "http://localhost:3750/api/outreach/campaigns/<campaign-id>/populate?tier=gold&limit=50" | jq .
+curl -s -X POST "http://localhost:3750/api/outreach/campaigns/<campaign-id>/populate?tier=gold&limit=50" \
   -H "Content-Type: application/json" \
-  -d '{"criteria":{"minScore":0.55,"tier":"gold","limit":50}}' | jq .
+  -d '{"contact_ids":["<previewed-id>", "..."]}' | jq .
 ```
 
 List available templates:
@@ -318,7 +320,7 @@ User: "What should I say to this contact?"
 -> GET /api/outreach/recommend?contactId=... -> present recommended approach and template
 
 User: "Create a campaign for my gold contacts"
--> POST /api/outreach/campaigns -> POST /api/outreach/campaigns/[id]/populate with gold criteria -> confirm
+-> POST /api/outreach/campaigns -> GET /api/outreach/campaigns/[id]/populate?tier=gold -> confirm -> POST the previewed contact_ids
 
 User: "Write a personalized message for John"
 -> Find John -> POST /api/claude/personalize with contactId -> present message

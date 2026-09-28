@@ -52,10 +52,10 @@ export const columns: ColumnDef[] = [
     accessor: (c) => c.enrichmentStatus,
   },
   {
-    key: "outreachState",
-    label: "Outreach",
+    key: "outreachStage",
+    label: "Outreach stage (latest activity)",
     width: "120px",
     sortable: false,
-    accessor: (c) => c.outreachState,
+    accessor: (c) => c.outreachStage,
   },
 ];

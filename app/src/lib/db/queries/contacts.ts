@@ -2,6 +2,7 @@
 
 import { query, transaction } from '../client';
 import { reconcileContactIdentity } from '../../contacts/identity-lifecycle';
+import { OUTREACH_STAGE_JOIN_SQL } from './outreach';
 
 interface ListContactsOptions {
   page?: number;
@@ -16,6 +17,7 @@ interface ListContactsOptions {
   icpId?: string;
   nicheId?: string;
   includeArchived?: boolean;
+  campaignId?: string;
 }
 
 interface PaginationResult {
@@ -55,6 +57,7 @@ interface ContactRow {
   referral_tier?: string | null;
   enrichment_status?: 'has_data' | 'no_data';
   outreach_state?: string | null;
+  outreach_stage?: string | null;
   tier?: string | null;
 }
 
@@ -110,6 +113,7 @@ export async function listContacts(
     icpId,
     nicheId,
     includeArchived = false,
+    campaignId,
   } = options;
 
   const conditions: string[] = [];
@@ -154,6 +158,11 @@ export async function listContacts(
     );
     params.push(`%${search}%`);
     paramIdx++;
+  }
+  if (campaignId) {
+    conditions.push(`EXISTS (SELECT 1 FROM outreach_states member
+      WHERE member.contact_id = c.id AND member.campaign_id = $${paramIdx++})`);
+    params.push(campaignId);
   }
 
   // ICP filter: match contacts against ICP criteria (roles + industries) in real-time
@@ -211,21 +220,30 @@ export async function listContacts(
   const total = parseInt(countResult.rows[0].count, 10);
 
   // Data query
-  const dataParams = [...params, limit, offset];
+  // Contacts has one stage per row: selected campaign when supplied, otherwise
+  // the campaign with the latest server-assigned event order. Timestamps can
+  // come from clients or be edited, so they cannot establish event precedence.
+  const campaignParam = campaignId ? `$${paramIdx++}` : null;
+  const dataParams = campaignId ? [...params, campaignId, limit, offset] : [...params, limit, offset];
   const dataResult = await query<ContactRow>(
     `SELECT c.*, co.name AS company_name, co.industry AS company_industry,
             cs.composite_score, cs.referral_likelihood, cs.referral_tier, cs.tier,
             CASE WHEN ${HAS_ENRICHMENT_DATA}
               THEN 'has_data' ELSE 'no_data' END AS enrichment_status,
-            os.state AS outreach_state
+            os.state AS outreach_state,
+            presentation.pipeline_stage AS outreach_stage
      FROM contacts c
      LEFT JOIN companies co ON c.current_company_id = co.id
      LEFT JOIN contact_scores cs ON cs.contact_id = c.id
      LEFT JOIN LATERAL (
-       SELECT state FROM outreach_states
+       SELECT id, state FROM outreach_states
        WHERE contact_id = c.id
-       ORDER BY updated_at DESC, id DESC LIMIT 1
+       ${campaignParam ? `AND campaign_id = ${campaignParam}` : ''}
+       ORDER BY (SELECT MAX(oe.event_order) FROM outreach_events oe
+                 WHERE oe.outreach_state_id = outreach_states.id) DESC NULLS LAST,
+                created_at DESC, id DESC LIMIT 1
      ) os ON TRUE
+     ${OUTREACH_STAGE_JOIN_SQL}
      ${whereClause}
      ORDER BY ${sortColumn} ${sortOrder} NULLS LAST, c.id ASC
      LIMIT $${paramIdx++} OFFSET $${paramIdx}`,

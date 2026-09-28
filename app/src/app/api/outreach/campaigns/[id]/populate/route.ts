@@ -1,117 +1,87 @@
-// POST /api/outreach/campaigns/:id/populate - auto-populate campaign with matching contacts
-
+// Preview and enroll a bounded audience in a draft campaign. No messages are sent.
 import { NextRequest, NextResponse } from 'next/server';
-import { query } from '@/lib/db/client';
-import { getCampaign } from '@/lib/db/queries/outreach';
+import { query, transaction } from '@/lib/db/client';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type Context = { params: Promise<{ id: string }> };
+type Audience = { tier: string | null; limit: number };
 
-interface PopulateFilters {
-  tiers?: string[];
-  personas?: string[];
-  referralPersonas?: string[];
-  nicheId?: string;
-  icpId?: string;
-  minScore?: number;
+function audience(request: NextRequest): Audience | null {
+  const tier = request.nextUrl.searchParams.get('tier');
+  const limit = Number(request.nextUrl.searchParams.get('limit') ?? '100');
+  if (tier && !['gold', 'silver', 'bronze', 'watch'].includes(tier)) return null;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) return null;
+  return { tier, limit };
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  if (!UUID_REGEX.test(id)) {
-    return NextResponse.json({ error: 'Invalid campaign ID' }, { status: 400 });
-  }
+const MATCHES = `SELECT c.id, c.full_name, cs.tier FROM contacts c
+  JOIN contact_scores cs ON cs.contact_id = c.id
+  WHERE c.is_archived = FALSE AND c.degree > 0
+    AND ($2::text IS NULL OR cs.tier = $2)
+    AND NOT EXISTS (SELECT 1 FROM outreach_states os
+      WHERE os.contact_id = c.id AND os.campaign_id = $1)
+  ORDER BY cs.composite_score DESC NULLS LAST, c.id LIMIT $3`;
 
+class AudienceConflict extends Error {}
+
+async function handle(request: NextRequest, context: Context, enroll: boolean) {
+  const denied = await requireLocalDashboardRequest(request, enroll);
+  if (denied) return denied;
+  const { id } = await context.params;
+  const selection = audience(request);
+  if (!UUID.test(id) || !selection) return NextResponse.json({ error: 'Invalid audience request' }, { status: 400 });
   try {
-    // Verify campaign exists
-    const campaign = await getCampaign(id);
-    if (!campaign) {
-      return NextResponse.json({ error: 'Campaign not found' }, { status: 404 });
+    if (!enroll) {
+      const campaign = await query<{ status: string }>('SELECT status FROM outreach_campaigns WHERE id = $1', [id]);
+      if (!campaign.rows[0]) return NextResponse.json({ error: 'Campaign not found' }, { status: 404 });
+      const matches = await query<{ id: string; full_name: string | null; tier: string }>(MATCHES, [id, selection.tier, selection.limit]);
+      return NextResponse.json({ data: matches.rows, count: matches.rows.length, limit: selection.limit });
     }
-
-    const body = await request.json();
-    const filters: PopulateFilters = body.filters ?? {};
-    const limit = Math.min(body.limit ?? 100, 500);
-
-    // Build dynamic query for matching contacts
-    const conditions: string[] = ['c.is_archived = FALSE'];
-    const params_arr: unknown[] = [];
-    let idx = 1;
-
-    // Always join contact_scores
-    const joins: string[] = [
-      'JOIN contact_scores cs ON cs.contact_id = c.id',
-    ];
-
-    if (filters.tiers && filters.tiers.length > 0) {
-      conditions.push(`cs.tier = ANY($${idx++})`);
-      params_arr.push(filters.tiers);
+    let body: unknown;
+    try { body = await request.json(); } catch {
+      return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
     }
-
-    if (filters.personas && filters.personas.length > 0) {
-      conditions.push(`cs.persona = ANY($${idx++})`);
-      params_arr.push(filters.personas);
+    const ids = typeof body === 'object' && body !== null && 'contact_ids' in body
+      ? (body as { contact_ids: unknown }).contact_ids : undefined;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > selection.limit ||
+        !ids.every((value): value is string => typeof value === 'string' && UUID.test(value)) ||
+        new Set(ids).size !== ids.length) {
+      return NextResponse.json({ error: 'Valid preview contact_ids are required' }, { status: 400 });
     }
-
-    if (filters.referralPersonas && filters.referralPersonas.length > 0) {
-      conditions.push(`cs.referral_persona = ANY($${idx++})`);
-      params_arr.push(filters.referralPersonas);
-    }
-
-    if (filters.minScore != null) {
-      conditions.push(`cs.composite_score >= $${idx++}`);
-      params_arr.push(filters.minScore);
-    }
-
-    if (filters.icpId && UUID_REGEX.test(filters.icpId)) {
-      joins.push(`JOIN contact_icp_fits cif ON cif.contact_id = c.id AND cif.icp_profile_id = $${idx++}`);
-      params_arr.push(filters.icpId);
-    }
-
-    // Exclude contacts already in ANY campaign
-    conditions.push(
-      `NOT EXISTS (SELECT 1 FROM outreach_states os WHERE os.contact_id = c.id)`
-    );
-
-    params_arr.push(limit);
-
-    const sql = `
-      SELECT c.id, c.full_name, cs.tier
-      FROM contacts c
-      ${joins.join('\n')}
-      WHERE ${conditions.join(' AND ')}
-      ORDER BY cs.composite_score DESC
-      LIMIT $${idx++}
-    `;
-
-    const matchResult = await query<{ id: string; full_name: string; tier: string }>(sql, params_arr);
-
-    let added = 0;
-    let skipped = 0;
-    const contacts: Array<{ id: string; name: string; tier: string }> = [];
-
-    for (const row of matchResult.rows) {
-      try {
-        await query(
-          `INSERT INTO outreach_states (contact_id, campaign_id, state, last_action_at)
-           VALUES ($1, $2, 'queued', NOW())
-           ON CONFLICT (contact_id, campaign_id) DO NOTHING`,
-          [row.id, id]
-        );
-        added++;
-        contacts.push({ id: row.id, name: row.full_name, tier: row.tier });
-      } catch {
-        skipped++;
+    const result = await transaction(async client => {
+      const campaign = await client.query<{ status: string }>('SELECT status FROM outreach_campaigns WHERE id = $1 FOR UPDATE', [id]);
+      if (!campaign.rows[0]) return null;
+      if (campaign.rows[0].status !== 'draft') return 'not_draft';
+      const matches = await client.query<{ id: string }>(MATCHES, [id, selection.tier, selection.limit]);
+      // A preview is an exact, ordered set. A changed score, archive status,
+      // enrollment, or newly ranked contact requires a fresh review.
+      if (matches.rows.length !== ids.length ||
+          matches.rows.some((row, index) => row.id !== ids[index])) return 'changed';
+      let added = 0;
+      for (const contactId of ids) {
+        const inserted = await client.query(
+          `INSERT INTO outreach_states (contact_id, campaign_id, state)
+           VALUES ($1, $2, 'queued') ON CONFLICT (contact_id, campaign_id) DO NOTHING`,
+          [contactId, id]);
+        added += inserted.rowCount ?? 0;
       }
-    }
-
-    return NextResponse.json({ added, skipped, contacts });
+      // A concurrent winner may appear after the preview comparison. Throw
+      // inside the transaction so even earlier successful inserts roll back.
+      if (added !== ids.length) throw new AudienceConflict();
+      return added;
+    });
+    if (result === null) return NextResponse.json({ error: 'Campaign not found' }, { status: 404 });
+    if (result === 'not_draft') return NextResponse.json({ error: 'Only draft campaigns can enroll contacts' }, { status: 409 });
+    if (result === 'changed') return NextResponse.json({ error: 'Audience changed. Preview again before enrolling.' }, { status: 409 });
+    return NextResponse.json({ added: result });
   } catch (error) {
-    return NextResponse.json(
-      { error: 'Failed to populate campaign', details: error instanceof Error ? error.message : undefined },
-      { status: 500 }
-    );
+    if (error instanceof AudienceConflict) {
+      return NextResponse.json({ error: 'Audience changed. Preview again before enrolling.' }, { status: 409 });
+    }
+    return NextResponse.json({ error: 'Audience operation failed' }, { status: 500 });
   }
 }
+
+export const GET = (request: NextRequest, context: Context) => handle(request, context, false);
+export const POST = (request: NextRequest, context: Context) => handle(request, context, true);

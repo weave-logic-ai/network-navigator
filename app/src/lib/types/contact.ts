@@ -26,6 +26,7 @@ export interface Contact {
   persona?: string | null;
   enrichmentStatus?: EnrichmentStatus;
   outreachState?: string | null;
+  outreachStage?: string | null;
   referralLikelihood?: number | null;
   referralTier?: string | null;
   referralPersona?: string | null;
@@ -53,4 +54,5 @@ export interface ContactListParams {
   search?: string;
   tier?: string;
   enrichmentStatus?: EnrichmentStatus;
+  campaignId?: string;
 }
