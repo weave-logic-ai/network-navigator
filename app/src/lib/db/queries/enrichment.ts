@@ -1,10 +1,11 @@
 // Enrichment system DB queries
 
-import { query } from '../client';
+import { query, transaction } from '../client';
 import {
   ProviderConfig,
   BudgetPeriod,
   EnrichmentTransaction,
+  EnrichmentResult,
 } from '../../enrichment/types';
 
 // Provider queries
@@ -136,16 +137,263 @@ export async function createBudgetPeriod(data: {
   return mapBudget(result.rows[0]);
 }
 
-export async function updateBudgetSpend(
-  budgetPeriodId: string,
-  costCents: number
-): Promise<void> {
-  await query(
-    `UPDATE budget_periods
-     SET spent_cents = spent_cents + $1, lookup_count = lookup_count + 1
-     WHERE id = $2`,
-    [costCents, budgetPeriodId]
+/** Create only the current monthly period; never replace an active spending policy. */
+export async function createCurrentMonthlyBudget(budgetCents: number): Promise<BudgetPeriod | null> {
+  try {
+    const result = await query<{
+      id: string; period_type: string; period_start: Date; period_end: Date;
+      budget_cents: number; spent_cents: number; lookup_count: number;
+      is_active: boolean; created_at: Date;
+    }>(
+      `INSERT INTO budget_periods (period_type, period_start, period_end, budget_cents)
+       SELECT 'monthly', date_trunc('month', CURRENT_DATE)::date,
+              (date_trunc('month', CURRENT_DATE) + interval '1 month - 1 day')::date, $1
+       WHERE NOT EXISTS (
+         SELECT 1 FROM budget_periods WHERE is_active = TRUE
+         AND period_start <= CURRENT_DATE AND period_end >= CURRENT_DATE
+       )
+       ON CONFLICT (period_type, period_start) DO NOTHING RETURNING *`,
+      [budgetCents]
+    );
+    return result.rows[0] ? mapBudget(result.rows[0]) : null;
+  } catch (error) {
+    if ((error as { code?: string }).code === '23P01') return null;
+    throw error;
+  }
+}
+
+/** The conditional UPDATE is the spending lock across concurrent requests. */
+export async function reserveBudgetSpend(budgetPeriodId: string, maxCostCents: number): Promise<boolean> {
+  if (!Number.isSafeInteger(maxCostCents) || maxCostCents <= 0) return false;
+  const result = await query(
+    `UPDATE budget_periods SET spent_cents = spent_cents + $2, lookup_count = lookup_count + 1
+     WHERE id = $1 AND is_active = TRUE AND period_start <= CURRENT_DATE
+       AND period_end >= CURRENT_DATE AND spent_cents + $2 <= budget_cents
+     RETURNING id`,
+    [budgetPeriodId, maxCostCents]
   );
+  return result.rowCount === 1;
+}
+
+/** Return unused reserved money after the provider finishes. */
+export async function settleBudgetSpend(budgetPeriodId: string, reservedCents: number, actualCents: number): Promise<void> {
+  if (!Number.isSafeInteger(actualCents) || actualCents < 0 || actualCents > reservedCents) {
+    throw new Error('Provider cost exceeded reserved budget');
+  }
+  await query('UPDATE budget_periods SET spent_cents = spent_cents - $2 WHERE id = $1',
+    [budgetPeriodId, reservedCents - actualCents]);
+}
+
+/** Consume a confirmed quote once, before any paid provider request. */
+export async function claimEnrichmentQuote(quoteId: string): Promise<boolean> {
+  const result = await query(
+    'INSERT INTO enrichment_quote_uses (quote_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING quote_id',
+    [quoteId]
+  );
+  return result.rowCount === 1;
+}
+
+export interface EnrichmentAttempt {
+  pending: { contactId: string; provider: string; reservedCents: number } | null;
+  results: Array<{ contactId: string; result: EnrichmentResult }>;
+  response: Record<string, unknown> | null;
+  response_status: number | null;
+  reconciliation_required: boolean;
+  reconciled_cents: number | null;
+  execution_state: 'running' | 'partial' | 'completed' | 'no_charge';
+}
+
+export async function getEnrichmentAttempt(quoteId: string): Promise<EnrichmentAttempt | null> {
+  const result = await query<EnrichmentAttempt>(
+    'SELECT pending, results, response, response_status, reconciliation_required, reconciled_cents, execution_state FROM enrichment_quote_uses WHERE quote_id=$1', [quoteId]);
+  return result.rows[0] ?? null;
+}
+
+/** Close a claimed quote only when no provider reservation, claim or saved result exists. */
+export async function closeUnstartedEnrichmentQuote(quoteId: string): Promise<boolean> {
+  return transaction(async client => {
+    const row = await client.query<{ pending: unknown; results: unknown[]; execution_state: string }>(
+      'SELECT pending, results, execution_state FROM enrichment_quote_uses WHERE quote_id=$1 FOR UPDATE', [quoteId]);
+    if (!row.rows[0] || row.rows[0].execution_state !== 'running' || row.rows[0].pending
+      || row.rows[0].results.length) return false;
+    const claims = await client.query('SELECT 1 FROM enrichment_provider_claims WHERE quote_id=$1 LIMIT 1', [quoteId]);
+    if (claims.rowCount) return false;
+    await client.query(`UPDATE enrichment_quote_uses SET execution_state='no_charge',
+      response='{"data":[],"partial":false,"noCharge":true,"totalCostCents":0}'::jsonb,
+      response_status=200 WHERE quote_id=$1`, [quoteId]);
+    return true;
+  });
+}
+
+/** A new quote must not charge a contact whose earlier provider request is unresolved. */
+export async function hasUnreconciledEnrichmentAttempt(contactIds: string[]): Promise<boolean> {
+  const result = await query(
+    `SELECT 1 FROM enrichment_quote_uses
+     WHERE pending IS NOT NULL AND pending->>'contactId' = ANY($1::text[]) LIMIT 1`, [contactIds]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function listClaimedEnrichmentProviders(contactId: string): Promise<string[]> {
+  const result = await query<{ provider: string }>(
+    'SELECT provider FROM enrichment_provider_claims WHERE contact_id=$1', [contactId]);
+  return result.rows.map(row => row.provider);
+}
+
+/** The durable provider claim, pending marker and budget debit commit together. */
+export async function reserveEnrichmentLookup(
+  quoteId: string, contactId: string, provider: string,
+  budgetPeriodId: string, reservedCents: number
+): Promise<boolean> {
+  if (!Number.isSafeInteger(reservedCents) || reservedCents <= 0) return false;
+  const unavailable = new Error('Enrichment lookup unavailable');
+  try {
+    await transaction(async client => {
+      const claim = await client.query(
+        `INSERT INTO enrichment_provider_claims (contact_id, provider, quote_id)
+         VALUES ($1,$2,$3) ON CONFLICT (contact_id, provider) DO NOTHING RETURNING contact_id`,
+        [contactId, provider, quoteId]);
+      if (claim.rowCount !== 1) throw unavailable;
+      const intent = await client.query(
+        `UPDATE enrichment_quote_uses SET pending=$2::jsonb || jsonb_build_object('pendingAt', now())
+         WHERE quote_id=$1 AND pending IS NULL AND response_status IS NULL
+           AND execution_state='running' RETURNING quote_id`,
+        [quoteId, JSON.stringify({ contactId, provider, reservedCents, budgetPeriodId })]);
+      if (intent.rowCount !== 1) throw unavailable;
+      const debit = await client.query(
+        `UPDATE budget_periods SET spent_cents=spent_cents+$2, lookup_count=lookup_count+1
+         WHERE id=$1 AND is_active=TRUE AND period_start<=CURRENT_DATE AND period_end>=CURRENT_DATE
+           AND spent_cents+$2<=budget_cents RETURNING id`,
+        [budgetPeriodId, reservedCents]);
+      if (debit.rowCount !== 1) throw unavailable;
+    });
+    return true;
+  } catch (error) {
+    if (error === unavailable || (error as { code?: string }).code === '23505') return false;
+    throw error;
+  }
+}
+
+/** Store returned fields before settlement, ledger writes or the HTTP response. */
+export async function saveEnrichmentResult(quoteId: string, contactId: string, result: EnrichmentResult): Promise<void> {
+  const written = await query(
+    `UPDATE enrichment_quote_uses SET results=results || $2::jsonb
+     WHERE quote_id=$1 AND execution_state='running'
+       AND pending->>'contactId'=$3 AND pending->>'provider'=$4`,
+    [quoteId, JSON.stringify([{ contactId, result }]), contactId, result.providerId]);
+  if (written.rowCount !== 1) throw new Error('Cannot persist paid enrichment result');
+}
+
+export async function flagEnrichmentReconciliation(quoteId: string): Promise<void> {
+  await query('UPDATE enrichment_quote_uses SET reconciliation_required=true WHERE quote_id=$1 AND pending IS NOT NULL', [quoteId]);
+}
+
+export async function finishEnrichmentProvider(quoteId: string, reconciliationRequired: boolean): Promise<void> {
+  const written = await query(
+    `UPDATE enrichment_quote_uses SET pending=NULL, reconciliation_required=$2
+     WHERE quote_id=$1 AND pending IS NOT NULL`, [quoteId, reconciliationRequired]);
+  if (written.rowCount !== 1) throw new Error('Cannot finalize paid enrichment attempt');
+}
+
+/** Settle a known response atomically so an interrupted ledger write cannot double-credit a reservation. */
+export async function completeEnrichmentLookup(quoteId: string, data: {
+  contactId: string; provider: string; providerId: string; costCents: number;
+  success: boolean; fieldsReturned: string[];
+}): Promise<void> {
+  await transaction(async client => {
+    const attempt = await client.query<{ pending: { contactId: string; provider: string; reservedCents: number; budgetPeriodId: string };
+      results: Array<{ contactId: string; result: EnrichmentResult }> }>(
+      'SELECT pending, results FROM enrichment_quote_uses WHERE quote_id=$1 FOR UPDATE', [quoteId]);
+    const pending = attempt.rows[0]?.pending;
+    const saved = attempt.rows[0]?.results.find(item => item.contactId === data.contactId
+      && item.result.providerId === data.provider && item.result.costCents === data.costCents
+      && item.result.success === data.success);
+    if (!pending || pending.contactId !== data.contactId || pending.provider !== data.provider
+      || !saved || saved.result.errorCode
+      || !Number.isSafeInteger(data.costCents) || data.costCents < 0 || data.costCents > pending.reservedCents) {
+      throw new Error('Invalid enrichment settlement');
+    }
+    await client.query('UPDATE budget_periods SET spent_cents=spent_cents-$2 WHERE id=$1',
+      [pending.budgetPeriodId, pending.reservedCents - data.costCents]);
+    await client.query(`INSERT INTO enrichment_transactions
+      (provider_id, contact_id, budget_period_id, cost_cents, status, fields_returned)
+      VALUES ($1,$2,$3,$4,$5,$6)`, [data.providerId, data.contactId, pending.budgetPeriodId,
+      data.costCents, data.success ? 'success' : 'failed', data.fieldsReturned]);
+    await client.query('UPDATE enrichment_quote_uses SET pending=NULL, reconciliation_required=false WHERE quote_id=$1', [quoteId]);
+    if (!data.success && data.costCents === 0) {
+      await client.query('DELETE FROM enrichment_provider_claims WHERE contact_id=$1 AND provider=$2 AND quote_id=$3',
+        [data.contactId, data.provider, quoteId]);
+    }
+  });
+}
+
+export async function listPendingEnrichmentReconciliations(): Promise<Array<{
+  quoteId: string; contactId: string; provider: string; reservedCents: number; createdAt: string;
+}>> {
+  const result = await query<{ quote_id: string; pending: { contactId: string; provider: string; reservedCents: number }; created_at: Date }>(
+    `SELECT quote_id, pending, created_at FROM enrichment_quote_uses
+     WHERE pending IS NOT NULL AND (reconciliation_required=true
+       OR COALESCE((pending->>'pendingAt')::timestamptz, created_at) < now()-interval '15 minutes')
+     ORDER BY created_at ASC`);
+  return result.rows.map(row => ({ quoteId: row.quote_id, contactId: row.pending.contactId,
+    provider: row.pending.provider, reservedCents: row.pending.reservedCents,
+    createdAt: row.created_at.toISOString() }));
+}
+
+/** Invoice-verified settlement retains the claim and quote receipt; it never calls a provider. */
+export async function reconcileEnrichmentCharge(quoteId: string, billedCents: number,
+  invoiceReference: string): Promise<boolean> {
+  if (!Number.isSafeInteger(billedCents) || billedCents < 0 || invoiceReference.trim().length < 3) {
+    throw new Error('Invalid invoice reconciliation');
+  }
+  return transaction(async client => {
+    const result = await client.query<{ pending: { contactId: string; provider: string; reservedCents: number; budgetPeriodId: string } }>(
+      `SELECT pending FROM enrichment_quote_uses WHERE quote_id=$1
+       AND (reconciliation_required=true
+       OR COALESCE((pending->>'pendingAt')::timestamptz, created_at) < now()-interval '15 minutes') FOR UPDATE`, [quoteId]);
+    const pending = result.rows[0]?.pending;
+    if (!pending || billedCents > pending.reservedCents) return false;
+    const provider = await client.query<{ id: string }>('SELECT id FROM enrichment_providers WHERE name=$1', [pending.provider]);
+    if (!provider.rows[0]) throw new Error('Provider no longer exists; reconcile through the runbook');
+    const saved = await client.query<{ results: Array<{ contactId: string; result: EnrichmentResult }> }>(
+      'SELECT results FROM enrichment_quote_uses WHERE quote_id=$1', [quoteId]);
+    const fields = saved.rows[0].results.filter(item => item.contactId === pending.contactId &&
+      item.result.providerId === pending.provider).flatMap(item => item.result.fields.map(field => field.field));
+    await client.query('UPDATE budget_periods SET spent_cents=spent_cents-$2 WHERE id=$1',
+      [pending.budgetPeriodId, pending.reservedCents - billedCents]);
+    await client.query(`INSERT INTO enrichment_transactions
+      (provider_id, contact_id, budget_period_id, cost_cents, status, fields_returned)
+      VALUES ($1,$2,$3,$4,'reconciled',$5)`,
+      [provider.rows[0].id, pending.contactId, pending.budgetPeriodId, billedCents, fields]);
+    await client.query(`UPDATE enrichment_quote_uses SET pending=NULL, reconciliation_required=false,
+      reconciliation_reference=$2, reconciled_cents=$3, reconciled_at=now() WHERE quote_id=$1`,
+      [quoteId, invoiceReference, billedCents]);
+    return true;
+  });
+}
+
+export async function saveEnrichmentResponse(quoteId: string, response: Record<string, unknown>, status: number): Promise<void> {
+  const written = await query(
+    `UPDATE enrichment_quote_uses SET response=$2::jsonb, response_status=$3,
+       execution_state=CASE WHEN $3=207 THEN 'partial' ELSE 'completed' END
+     WHERE quote_id=$1 AND response_status IS NULL AND execution_state='running'`,
+    [quoteId, JSON.stringify(response), status]);
+  if (written.rowCount !== 1) throw new Error('Cannot persist enrichment response');
+}
+
+/** Make saved provider fields reviewable after an interrupted request without freezing the final response. */
+export async function saveEnrichmentRecovery(quoteId: string, response: Record<string, unknown>): Promise<{
+  response: Record<string, unknown>; status: number | null; pending: EnrichmentAttempt['pending'];
+}> {
+  const written = await query<{ response: Record<string, unknown>; response_status: number | null;
+    pending: EnrichmentAttempt['pending'] }>(
+    `UPDATE enrichment_quote_uses SET response=$2::jsonb
+     WHERE quote_id=$1 AND response IS NULL AND response_status IS NULL AND execution_state='running'
+     RETURNING response, response_status, pending`, [quoteId, JSON.stringify(response)]);
+  if (written.rows[0]) return { response: written.rows[0].response,
+    status: written.rows[0].response_status, pending: written.rows[0].pending };
+  const existing = await getEnrichmentAttempt(quoteId);
+  if (!existing?.response) throw new Error('Cannot persist enrichment recovery');
+  return { response: existing.response, status: existing.response_status, pending: existing.pending };
 }
 
 // Transaction queries

@@ -1,16 +1,16 @@
 // POST /api/enrichment/enrich - Enrich contact(s), return delta for review
-// Supports dryRun (default true) to return results without writing,
-// or dryRun=false to auto-apply (legacy behavior).
+// A signed quote authorizes a paid preview only. Applying requires a separate review action.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { enrichContact } from '@/lib/enrichment/waterfall';
 import { enrichContactWithChain } from '@/lib/ecc/exo-chain/enrichment-adapter';
-import { extractCrossRefsFromEnrichmentResults } from '@/lib/ecc/cross-refs/enrichment-adapter';
 import { ECC_FLAGS } from '@/lib/ecc/types';
-import { getContactById, updateContact } from '@/lib/db/queries/contacts';
+import { getContactById } from '@/lib/db/queries/contacts';
+import { isSelfContact } from '@/lib/contacts/identity';
 import { FIELD_TO_COLUMN, FIELD_LABELS, isEffectivelyEmpty } from '@/lib/enrichment/field-map';
-import { triggerAutoScore } from '@/lib/scoring/auto-score';
-import { getDefaultTenantId } from '@/lib/targets/service';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
+import { readSignedEnrichmentQuote, verifyEnrichmentQuote } from '@/lib/enrichment/quote';
+import { claimEnrichmentQuote, closeUnstartedEnrichmentQuote, getEnrichmentAttempt, hasUnreconciledEnrichmentAttempt, saveEnrichmentRecovery, saveEnrichmentResponse } from '@/lib/db/queries/enrichment';
 
 interface EnrichmentDelta {
   field: string;
@@ -72,11 +72,16 @@ function buildDelta(
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = await request.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
     const {
       contactId, contactIds, targetFields, fields,
-      budgetLimitCents, dryRun = true,
+      budgetLimitCents, dryRun = true, quote,
     } = body as {
       contactId?: string;
       contactIds?: string[];
@@ -84,57 +89,129 @@ export async function POST(request: NextRequest) {
       fields?: string[];
       budgetLimitCents?: number;
       dryRun?: boolean;
+      quote?: string;
     };
     const resolvedTargetFields = targetFields || fields;
 
     const ids = contactId ? [contactId] : contactIds || [];
-    if (ids.length === 0) {
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500
+      || new Set(ids).size !== ids.length
+      || ids.some(id => typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id))
+      || (resolvedTargetFields !== undefined && (!Array.isArray(resolvedTargetFields)
+        || resolvedTargetFields.some(field => typeof field !== 'string' || field.length > 64)))
+      || (budgetLimitCents !== undefined && (!Number.isSafeInteger(budgetLimitCents) || budgetLimitCents < 0))
+      || typeof quote !== 'string' || dryRun !== true) {
       return NextResponse.json(
-        { error: 'contactId or contactIds required' },
+        { error: 'Valid contact IDs and a confirmed quote are required' },
         { status: 400 }
       );
     }
 
+    const signed = readSignedEnrichmentQuote(quote);
+    if (!signed || JSON.stringify(signed.contactIds) !== JSON.stringify(ids)
+      || JSON.stringify(signed.targetFields) !== JSON.stringify(resolvedTargetFields || [])) {
+      return NextResponse.json({ error: 'Invalid enrichment quote' }, { status: 409 });
+    }
+    let prior = await getEnrichmentAttempt(signed.id);
+    if (prior) {
+      if (prior.response) return NextResponse.json({ ...prior.response,
+        reconciliationRequired: !!prior.pending,
+        reservedBudgetCents: prior.pending?.reservedCents ?? 0,
+        ...(prior.reconciled_cents === null ? {} : { reconciledCents: prior.reconciled_cents })
+      }, { status: prior.response_status ?? 207 });
+      if (prior.results.length === 0 && !prior.pending && await closeUnstartedEnrichmentQuote(signed.id)) {
+        return NextResponse.json({ data: [], partial: false, noCharge: true, totalCostCents: 0 });
+      }
+      prior = await getEnrichmentAttempt(signed.id);
+      if (!prior) return NextResponse.json({ error: 'Quote state unavailable' }, { status: 409 });
+      if (prior.response) return NextResponse.json({ ...prior.response,
+        reconciliationRequired: !!prior.pending }, { status: prior.response_status ?? 207 });
+      if (prior.results.length === 0) return NextResponse.json({ running: true,
+        reconciliationRequired: !!prior.pending && prior.reconciliation_required,
+        reservedBudgetCents: prior.pending?.reservedCents ?? 0,
+        message: prior.pending ? 'Provider request is pending. Recover this quote later; reconcile only if the charge remains uncertain.'
+          : 'Quote is still starting. Recover this quote again shortly.' }, { status: 202 });
+      const savedResults = prior.results;
+      const savedContacts = await Promise.all(ids.map(id => getContactById(id)));
+      const data = ids.map((id, index) => {
+        const results = savedResults.filter(item => item.contactId === id).map(item => item.result);
+        return { contactId: id, results, delta: buildDelta((savedContacts[index] || {}) as Record<string, unknown>, results),
+          totalCostCents: results.reduce((sum, item) => sum + item.costCents, 0), partial: true };
+      });
+      const recovered = await saveEnrichmentRecovery(signed.id, { data, partial: true,
+        stopReason: prior.pending ? 'reconciliation_required' : 'interrupted_preview',
+        remainingContactIds: ids,
+        totalCostCents: data.reduce((sum, item) => sum + item.totalCostCents, 0) });
+      return NextResponse.json({ ...recovered.response,
+        reconciliationRequired: !!recovered.pending,
+        reservedBudgetCents: recovered.pending?.reservedCents ?? 0 },
+      { status: recovered.status ?? 207 });
+    }
+    if (await hasUnreconciledEnrichmentAttempt(ids)) {
+      return NextResponse.json({ error: 'A previous paid request for this contact needs charge reconciliation. Recover its original quote before another paid preview.',
+        reconciliationRequired: true }, { status: 409 });
+    }
+
+    const contacts = await Promise.all(ids.map(id => getContactById(id)));
+    if (contacts.some(contact => !contact)) {
+      return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    }
+    // Refuse before claiming the quote: a paid lookup for these contacts
+    // could never be applied, and self: URLs are not provider identities.
+    if (contacts.some(contact => contact!.is_archived || isSelfContact({ linkedinUrl: contact!.linkedin_url }))) {
+      return NextResponse.json({ error: 'Archived and owner contacts cannot be enriched' }, { status: 409 });
+    }
+    const snapshots = contacts.map(contact => ({
+      id: contact!.id, linkedinUrl: contact!.linkedin_url,
+      firstName: contact!.first_name, lastName: contact!.last_name,
+      fullName: contact!.full_name, email: contact!.email,
+      currentCompany: contact!.current_company, title: contact!.title,
+    }));
+    const confirmed = await verifyEnrichmentQuote(quote, snapshots, resolvedTargetFields);
+    if (!confirmed) return NextResponse.json({ error: 'Enrichment quote expired or state changed. Review a fresh estimate.' }, { status: 409 });
+    if (!await claimEnrichmentQuote(confirmed.id)) {
+      return NextResponse.json({ error: 'Quote is already running. Retry this same quote to recover its saved result; do not request another paid quote.' }, { status: 409 });
+    }
+
     const allResults = [];
+    let chargedCents = 0;
 
-    for (const id of ids) {
-      const contact = await getContactById(id);
-      if (!contact) continue;
-
-      const enrichmentContact = {
-        id: contact.id,
-        linkedinUrl: contact.linkedin_url,
-        firstName: contact.first_name,
-        lastName: contact.last_name,
-        fullName: contact.full_name,
-        email: contact.email,
-        currentCompany: contact.current_company,
-        title: contact.title,
-      };
+    for (const [index, id] of ids.entries()) {
+      const contact = contacts[index]!;
+      const enrichmentContact = snapshots[index];
+      const confirmedRemaining = Math.max(0, confirmed.maxCostCents - chargedCents);
+      const executionCap = Math.min(confirmedRemaining,
+        Math.max(0, (budgetLimitCents ?? Infinity) - chargedCents));
 
       let results;
       let chainId: string | undefined;
       if (ECC_FLAGS.exoChain) {
         const chainResult = await enrichContactWithChain(enrichmentContact, {
           targetFields: resolvedTargetFields,
-          budgetLimitCents,
+          budgetLimitCents: executionCap,
+          quoteId: confirmed.id,
         });
         results = chainResult.results;
         chainId = chainResult._chainId;
       } else {
         results = await enrichContact(enrichmentContact, {
           targetFields: resolvedTargetFields,
-          budgetLimitCents,
+          budgetLimitCents: executionCap,
+          quoteId: confirmed.id,
         });
       }
 
       // Build delta for review
       const contactRecord = contact as unknown as Record<string, unknown>;
       const delta = buildDelta(contactRecord, results);
+      const stopResult = results.find(result => result.errorCode);
+      const actualCost = results.reduce((sum, result) => sum +
+        (Number.isSafeInteger(result.costCents) && result.costCents > 0 ? result.costCents : 0), 0);
+      chargedCents += actualCost;
 
-      if (dryRun) {
+      {
         // Return delta without writing — frontend will call /apply
-        const totalCost = results.reduce((sum, r) => sum + (r.costCents || 0), 0);
+        const totalCost = actualCost;
 
         // Extract gated fields (PDL Starter tier returns true/false instead of values)
         const gatedFields: string[] = [];
@@ -150,65 +227,26 @@ export async function POST(request: NextRequest) {
           delta,
           gatedFields: [...new Set(gatedFields)],
           totalCostCents: totalCost,
+          reservedBudgetCents: stopResult?.reservedCents ?? 0,
+          partial: !!stopResult,
+          stopReason: stopResult?.errorCode,
           results,
-          _chainId: chainId,
-        });
-      } else {
-        // Legacy: auto-apply all fields that are selected in the delta
-        let fieldsUpdated = 0;
-        const updates: Record<string, unknown> = {};
-
-        for (const d of delta) {
-          if (!d.selected || !d.newValue) continue;
-          const column = FIELD_TO_COLUMN[d.field];
-          if (!column) continue;
-
-          if (d.field === 'tags') {
-            updates['tags'] = d.newValue.split(',').map(t => t.trim()).filter(Boolean);
-          } else if (d.field === 'connections_count') {
-            updates[column] = parseInt(d.newValue, 10) || null;
-          } else {
-            updates[column] = d.newValue;
-          }
-          fieldsUpdated++;
-        }
-
-        if (Object.keys(updates).length > 0) {
-          await updateContact(id, updates);
-          // Trigger auto-scoring after enrichment auto-apply
-          triggerAutoScore(id);
-        }
-
-        // Extract cross-refs (co_worker / shared_company) from the raw
-        // enrichment results — independent of whether `updates` above
-        // actually wrote anything to this contact's own row, since the
-        // relationship signal comes from what the provider returned, not
-        // from what we chose to overwrite. Fire-and-forget, matching
-        // triggerAutoScore, so a cross-ref failure never fails enrichment.
-        // ECC_FLAGS.crossRefs is checked here too (redundant with the
-        // adapter's own check) purely to skip the tenant-resolution DB
-        // round-trip entirely when the flag is off.
-        if (ECC_FLAGS.crossRefs) {
-          getDefaultTenantId()
-            .then((tenantId) => extractCrossRefsFromEnrichmentResults(id, results, tenantId))
-            .catch((err) => {
-              console.error('[cross-refs] Failed to extract cross-refs', { contactId: id, error: err });
-            });
-        }
-
-        allResults.push({
-          contactId: id,
-          fieldsUpdated,
-          updatedFields: Object.keys(updates),
-          delta,
-          results,
-          scoringTriggered: Object.keys(updates).length > 0,
           _chainId: chainId,
         });
       }
+      if (stopResult) {
+        const response = { data: allResults, partial: true, totalCostCents: chargedCents,
+          reservedBudgetCents: stopResult.reservedCents ?? 0, stopReason: stopResult.errorCode,
+          remainingContactIds: ids.slice(index),
+          reconciliationRequired: !!(stopResult.reservedCents && stopResult.errorCode !== 'budget_unavailable') };
+        await saveEnrichmentResponse(confirmed.id, response, 207);
+        return NextResponse.json(response, { status: 207 });
+      }
     }
 
-    return NextResponse.json({ data: allResults });
+    const response = { data: allResults, partial: false, totalCostCents: chargedCents };
+    await saveEnrichmentResponse(confirmed.id, response, 200);
+    return NextResponse.json(response);
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to enrich contact(s)', details: error instanceof Error ? error.message : undefined },

@@ -1,9 +1,10 @@
 // POST /api/enrichment/apply - Apply user-reviewed enrichment fields to a contact
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getContactById, updateContact } from '@/lib/db/queries/contacts';
-import { FIELD_TO_COLUMN } from '@/lib/enrichment/field-map';
 import { triggerAutoScore } from '@/lib/scoring/auto-score';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
+import { readSignedEnrichmentQuote } from '@/lib/enrichment/quote';
+import { applyReviewedEnrichment } from '@/lib/db/queries/enrichment-apply';
 
 interface ApplyField {
   field: string;
@@ -11,59 +12,46 @@ interface ApplyField {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = await request.json();
-    const { contactId, fields } = body as {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
+    const { contactId, fields, quote } = body as {
       contactId: string;
       fields: ApplyField[];
+      quote: string;
     };
 
-    if (!contactId || !fields || fields.length === 0) {
+    if (typeof contactId !== 'string' || !Array.isArray(fields) || fields.length === 0
+      || fields.length > 100 || typeof quote !== 'string'
+      || fields.some(item => !item || typeof item.field !== 'string' || typeof item.value !== 'string')
+      || new Set(fields.map(item => item.field)).size !== fields.length) {
       return NextResponse.json(
-        { error: 'contactId and fields[] required' },
+        { error: 'A quote, contactId and reviewed fields[] are required' },
         { status: 400 }
       );
     }
 
-    const contact = await getContactById(contactId);
-    if (!contact) {
-      return NextResponse.json(
-        { error: 'Contact not found' },
-        { status: 404 }
-      );
+    const signed = readSignedEnrichmentQuote(quote);
+    if (!signed || !signed.contactIds.includes(contactId)) {
+      return NextResponse.json({ error: 'Quote does not authorize this contact' }, { status: 409 });
     }
-
-    const updates: Record<string, unknown> = {};
-    const applied: string[] = [];
-
-    for (const { field, value } of fields) {
-      const column = FIELD_TO_COLUMN[field];
-      if (!column) continue;
-      if (!value && value !== '') continue;
-
-      if (field === 'tags') {
-        const newTags = value.split(',').map(t => t.trim()).filter(Boolean);
-        updates['tags'] = newTags;
-      } else if (field === 'connections_count') {
-        updates[column] = parseInt(value, 10) || null;
-      } else {
-        updates[column] = value;
-      }
-      applied.push(field);
+    const applied = await applyReviewedEnrichment(signed.id, contactId, fields);
+    if (applied.state === 'conflict' || applied.state === 'missing') {
+      return NextResponse.json({ error: applied.error }, { status: applied.state === 'missing' ? 404 : 409 });
     }
-
-    if (Object.keys(updates).length > 0) {
-      await updateContact(contactId, updates);
-      // Trigger auto-scoring after enrichment data is applied
-      triggerAutoScore(contactId);
-    }
+    if (applied.state === 'applied') triggerAutoScore(contactId);
 
     return NextResponse.json({
       data: {
         contactId,
-        fieldsApplied: applied.length,
-        appliedFields: applied,
-        scoringTriggered: Object.keys(updates).length > 0,
+        fieldsApplied: applied.appliedFields.length,
+        appliedFields: applied.appliedFields,
+        replayed: applied.state === 'replayed',
+        scoringTriggered: applied.state === 'applied',
       },
     });
   } catch (error) {
