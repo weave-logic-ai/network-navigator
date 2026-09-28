@@ -328,7 +328,7 @@ const foreignLens = '550e8400-e29b-41d4-a716-446655440022';
     expect(basis.icpProfiles.map(icp => icp.id)).toEqual([icpA]);
     expect(basis.icpProfiles.find(icp => icp.id === icpA)?.criteria.roles).toEqual(['Engineer']);
     expect(basis.criteriaByIcpId[icpA].industries).toEqual(['Software']);
-    expect(basis.referralBaselines).toEqual({ p90Mutuals: 20, p90Edges: 10, totalClusters: 1 });
+    expect(basis.referralBaselines).toEqual({ p90Mutuals: 20, p90Edges: 10, totalClusters: 1, graphCentralityDistribution: [] });
     expect(Object.isFrozen(basis.weightProfile.weights)).toBe(true);
     expect(Object.isFrozen(basis.criteriaByIcpId[icpA].roles)).toBe(true);
 

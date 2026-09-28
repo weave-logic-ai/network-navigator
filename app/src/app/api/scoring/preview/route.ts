@@ -5,6 +5,7 @@
 // computed against the ICP attached to the target's active lens; otherwise
 // the first active owner-default ICP is used (today's behavior).
 
+import { graphCentralityPercentile, rawGraphCentrality } from '@/lib/scoring/scorers/graph-centrality';
 import { NextRequest, NextResponse } from 'next/server';
 import { WeightManager } from '@/lib/scoring/weight-manager';
 import { computeCompositeScore } from '@/lib/scoring/composite';
@@ -95,10 +96,13 @@ export async function GET(request: NextRequest) {
       icpCriteria = icpProfiles[0]?.criteria;
     }
 
+    const { graphCentralityDistribution } = await scoringQueries.getScoringBaselines();
     const previews = [];
     for (const contactId of sampleIds) {
       const contact = await scoringQueries.getContactScoringData(contactId);
       if (!contact) continue;
+      contact.graphCentralityPercentile =
+        graphCentralityPercentile(rawGraphCentrality(contact), graphCentralityDistribution);
 
       const currentScore = computeCompositeScore(contact, scorers, currentWeights, icpCriteria);
       const newScore = computeCompositeScore(contact, scorers, newWeights, icpCriteria);

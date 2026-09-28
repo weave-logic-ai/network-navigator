@@ -8,6 +8,7 @@ jest.mock('@/lib/targets/service', () => ({
 jest.mock('@/lib/targets/lens-service', () => ({ getActiveLensIcps: jest.fn(async () => []) }));
 jest.mock('@/lib/db/queries/scoring', () => ({
   getAllContactIds: jest.fn(async () => []), getActiveIcpProfiles: jest.fn(async () => []),
+  getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] })),
 }));
 jest.mock('@/lib/scoring/weight-manager', () => ({ WeightManager: jest.fn().mockImplementation(() => ({
   loadProfile: jest.fn(async () => undefined), getWeights: jest.fn(() => ({})),

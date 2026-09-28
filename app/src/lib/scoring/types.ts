@@ -133,6 +133,9 @@ export interface ContactScoringData {
   pagerank: number | null;
   betweenness: number | null;
   degreeCentrality: number | null;
+  // Rank of this contact's graph centrality within the owner's network
+  // (0-1), set by owner scoring from the captured basis distribution.
+  graphCentralityPercentile?: number | null;
   // Behavioral
   observationCount: number;
   contentTopics: string[];

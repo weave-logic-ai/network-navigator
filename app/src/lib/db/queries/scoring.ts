@@ -1,6 +1,7 @@
 // Scoring engine DB queries
 
 import { query, transaction } from '../client';
+import { rawGraphCentrality } from '../../scoring/scorers/graph-centrality';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import {
   WeightProfile,
@@ -197,6 +198,8 @@ export async function getScoringBaselines(client?: PoolClient): Promise<{
   p90Mutuals: number;
   p90Edges: number;
   totalClusters: number;
+  /** Ascending raw graph centrality of every owner-scorable contact. */
+  graphCentralityDistribution: number[];
 }> {
   const result = await readQuery<{
     p90_mutuals: string;
@@ -224,10 +227,17 @@ export async function getScoringBaselines(client?: PoolClient): Promise<{
   `);
 
   const row = result.rows[0];
+  const graph = await readQuery<{ pagerank: number | null; betweenness_centrality: number | null; degree_centrality: number | null }>(client,
+    `SELECT gm.pagerank, gm.betweenness_centrality, gm.degree_centrality
+     FROM graph_metrics gm JOIN contacts contact ON contact.id = gm.contact_id
+     WHERE contact.is_archived = FALSE AND ${ownerScorableContactPredicate}`);
   return {
     p90Mutuals: Math.max(parseFloat(row?.p90_mutuals || '20'), 1),
     p90Edges: Math.max(parseFloat(row?.p90_edges || '10'), 1),
     totalClusters: Math.max(parseInt(row?.total_clusters || '5', 10), 1),
+    graphCentralityDistribution: graph.rows.map(metric => rawGraphCentrality({
+      pagerank: metric.pagerank, betweenness: metric.betweenness_centrality, degreeCentrality: metric.degree_centrality,
+    })).sort((a, b) => a - b),
   };
 }
 

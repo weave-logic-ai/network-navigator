@@ -111,7 +111,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getContactScoringData: jest.fn().mockResolvedValue(fullContact()),
       isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
-      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
+      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
         basisKind: 'owner', basisHash: null,
         compositeScore: 0.5,
@@ -285,7 +285,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getContactScoringData: jest.fn().mockResolvedValue(fullContact()),
       isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
-      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
+      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
         basisKind: 'owner', basisHash: null,
         compositeScore: 0.5,
@@ -387,7 +387,7 @@ describe('ECC_IMPULSES=true task generation — real pipeline', () => {
       getContactScoringData: jest.fn().mockResolvedValue(fullContact({ degree: 1 })),
       isOwnerScorableContact: jest.fn().mockResolvedValue(true),
       getActiveIcpProfiles: jest.fn().mockResolvedValue([]),
-      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 }),
+      getScoringBaselines: jest.fn().mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] }),
       getContactScoreBreakdown: jest.fn().mockResolvedValue({
         compositeScore: 0.5, tier: 'silver', persona: 'warm-lead',
         behavioralPersona: 'engaged-professional', scoredAt: null,

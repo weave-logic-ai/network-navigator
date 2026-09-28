@@ -17,6 +17,7 @@ import { DimensionScorer, ScoringRunResult, IcpCriteria, ContactScoringData, Icp
 import * as scoringQueries from '../db/queries/scoring';
 import { checkAndGenerateTasks } from './task-triggers';
 import { resolveTaxonomyChain } from '../taxonomy/service';
+import { graphCentralityPercentile, rawGraphCentrality } from './scorers/graph-centrality';
 import { RESEARCH_FLAGS } from '../config/research-flags';
 import { getActiveLensForTarget } from '../targets/lens-service';
 import { ECC_FLAGS } from '../ecc/types';
@@ -44,7 +45,9 @@ export class LensPreviewError extends Error {
 
 const behavioralScorer = new BehavioralScorer();
 // Bump whenever composite/referral scoring semantics change.
-const OWNER_ALGORITHM_VERSION = 1;
+// v2: graph centrality is ranked within the owner's network (percentile)
+// instead of absolute metrics that are near-flat on a star-shaped network.
+const OWNER_ALGORITHM_VERSION = 2;
 
 const ALL_SCORERS: DimensionScorer[] = [
   new IcpFitScorer(),
@@ -67,6 +70,13 @@ export interface OwnerScoringBasis {
   readonly referralBaselines: Awaited<ReturnType<typeof scoringQueries.getScoringBaselines>>;
   readonly snapshotId: string;
   readonly basisHash: string;
+}
+
+/** Rank the contact's graph position against the captured network distribution. */
+function applyGraphPercentile(contact: ContactScoringData, distribution: readonly number[] | undefined): void {
+  contact.graphCentralityPercentile = distribution
+    ? graphCentralityPercentile(rawGraphCentrality(contact), distribution)
+    : null;
 }
 
 function stableJson(value: unknown): string {
@@ -183,7 +193,8 @@ export async function captureOwnerScoringBasis(profileName?: string): Promise<Ow
         weightOverrides: structuredClone(icp.weightOverrides),
       })),
       criteriaByIcpId: structuredClone(criteriaByIcpId),
-      referralBaselines: { ...referralBaselines },
+      referralBaselines: { ...referralBaselines,
+        graphCentralityDistribution: [...referralBaselines.graphCentralityDistribution] },
       snapshotId: snapshot.rows[0].snapshot_id,
     };
     return deepFreeze({
@@ -202,6 +213,7 @@ export function restoreOwnerScoringBasis(raw: unknown): OwnerScoringBasis {
   if (typeof basis.ownerId !== 'string' || typeof basis.tenantId !== 'string' ||
       !basis.weightProfile || !Array.isArray(basis.icpProfiles) ||
       !basis.criteriaByIcpId || !basis.referralBaselines ||
+      !Array.isArray(basis.referralBaselines.graphCentralityDistribution) ||
       typeof basis.basisHash !== 'string') {
     throw new Error('Invalid persisted owner basis');
   }
@@ -304,8 +316,9 @@ export async function previewContactForTarget(
       };
     }
     const weights = weightManager.redistributeWeights(getAvailableDimensions(contact));
-    const score = computeCompositeScore(contact, ALL_SCORERS, weights, criteria, OWNER_ALGORITHM_VERSION);
     const referralBaselines = await scoringQueries.getScoringBaselines(client);
+    applyGraphPercentile(contact, referralBaselines.graphCentralityDistribution);
+    const score = computeCompositeScore(contact, ALL_SCORERS, weights, criteria, OWNER_ALGORITHM_VERSION);
     const { computeReferralScore } = await import('./referral/referral-pipeline');
     contact.existingGoldScore = score.compositeScore;
     contact.existingRelationshipStrength =
@@ -399,6 +412,7 @@ export async function scoreContact(
       if (!bestIcpCriteria) throw new Error(`Captured owner basis is missing ICP ${bestIcp.id}`);
     }
 
+    applyGraphPercentile(contact, ownerBasis.referralBaselines.graphCentralityDistribution);
     const score = computeCompositeScore(contact, ALL_SCORERS, weights, bestIcpCriteria, OWNER_ALGORITHM_VERSION);
 
     try {

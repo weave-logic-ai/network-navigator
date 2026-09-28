@@ -59,7 +59,7 @@ beforeEach(() => {
   mockedQueries.getDefaultWeightProfile.mockResolvedValue(null);
   mockedQueries.getAllContactIds.mockResolvedValue([]);
   mockedQueries.getActiveIcpProfiles.mockResolvedValue([]);
-  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 });
+  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] });
   mockedQueries.createScoringRun.mockResolvedValue('run-1');
   mockedQueries.updateScoringRun.mockResolvedValue(undefined);
   mockedQueries.getContactScoreBreakdown.mockResolvedValue(null);
@@ -101,7 +101,7 @@ it('previews different lens criteria and never writes or emits', async () => {
   expect(a.basis.scope).toBe('composite-and-referral');
   expect(a.score.referralLikelihood).toEqual(expect.any(Number));
   expect(a.score.referralDimensions).toHaveLength(6);
-  expect(a.basis.referralBaselines).toEqual({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 });
+  expect(a.basis.referralBaselines).toEqual({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] });
   expect(mockedLens).toHaveBeenCalledTimes(2);
   expect(mockedLens).toHaveBeenNthCalledWith(1, targetA,
     { tenantId: 'tenant-a', ownerId: 'owner-a' }, snapshotClient);
@@ -240,7 +240,7 @@ it('rescores only with the owner ICP basis across contacts', async () => {
     criteria: { roles: ['Engineer'] }, weightOverrides: {},
     createdAt: '2026-09-01', updatedAt: '2026-09-01',
   }]);
-  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 });
+  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] });
   mockedQueries.createScoringRun.mockResolvedValue('run-1');
   mockedQueries.updateScoringRun.mockResolvedValue(undefined);
   mockedQueries.getContactScoreBreakdown.mockResolvedValue(null);
@@ -291,7 +291,7 @@ it('does not compare owner scores with different basis hashes even at scoring ve
 
   const result = await scoreContact(contactId);
 
-  expect(result.score.scoringVersion).toBe(1);
+  expect(result.score.scoringVersion).toBe(2);
   expect(mockedQueries.upsertContactScore.mock.calls[0][2]).not.toBe('0'.repeat(64));
   expect(emitScoringImpulses).not.toHaveBeenCalled();
   expect(checkAndGenerateTasks).toHaveBeenCalledWith(contactId, null, expect.any(Object), true,
@@ -353,7 +353,7 @@ it('hashes equivalent key orders identically and changes hash with owner criteri
   });
   expect((await captureOwnerScoringBasis()).basisHash).not.toBe(first.basisHash);
   mockedQueries.getDefaultWeightProfile.mockResolvedValue(profile);
-  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 40, p90Edges: 10, totalClusters: 5 });
+  mockedQueries.getScoringBaselines.mockResolvedValue({ p90Mutuals: 40, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] });
   expect((await captureOwnerScoringBasis()).basisHash).not.toBe(first.basisHash);
 });
 
@@ -481,7 +481,7 @@ it('serves a validated read-only preview with explicit basis', async () => {
   const body = await response.json();
   expect(body.data.basis).toMatchObject({
     kind: 'lens-preview', targetId: targetA, lensId: 'lens-a', selectedIcpId: 'icp-a',
-    weightProfileId: 'default', scoringVersion: 1,
+    weightProfileId: 'default', scoringVersion: 2,
   });
   expect(mockedQueries.upsertContactScore).not.toHaveBeenCalled();
   expect(mockedQueries.upsertContactIcpFit).not.toHaveBeenCalled();

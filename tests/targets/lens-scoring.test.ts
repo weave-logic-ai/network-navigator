@@ -85,7 +85,7 @@ describe('D2 — owner baseline and transient lens preview', () => {
       }]),
       getDefaultWeightProfile: jest.fn(async () => null),
       getAllContactIds: jest.fn(async () => []),
-      getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5 })),
+      getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] })),
       getContactScoringData: jest.fn(async () => makeContact()),
       upsertContactScore: jest.fn(async () => undefined),
       upsertContactIcpFit: jest.fn(async () => undefined),
