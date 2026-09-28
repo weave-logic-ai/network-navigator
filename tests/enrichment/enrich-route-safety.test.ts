@@ -52,6 +52,21 @@ it('blocks a new paid quote for a contact with an unresolved prior provider requ
   expect(enrichContact).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['archived', { is_archived: true }],
+  ['owner', { linkedin_url: 'self:owner' }],
+])('refuses a paid preview for an %s contact before claiming the quote', async (_label, patch) => {
+  (getContactById as jest.Mock).mockResolvedValue({
+    id, linkedin_url: 'https://linkedin.com/in/dummy', first_name: 'Test',
+    last_name: 'Person', full_name: 'Test Person', email: null,
+    current_company: null, title: null, is_archived: false, ...patch,
+  });
+  const response = await POST(request({ contactId: id, quote: 'confirmed-quote', dryRun: true }));
+  expect(response.status).toBe(409);
+  expect(claimEnrichmentQuote).not.toHaveBeenCalled();
+  expect(enrichContact).not.toHaveBeenCalled();
+});
+
 it('guards apply before reading or writing a contact', async () => {
   (requireLocalDashboardRequest as jest.Mock).mockResolvedValue(new Response('denied', { status: 401 }));
   const response = await apply(new NextRequest('http://localhost/api/enrichment/apply', {

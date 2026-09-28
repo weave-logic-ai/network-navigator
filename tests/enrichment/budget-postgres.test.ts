@@ -42,7 +42,8 @@ run('U8 budget reservation on disposable PostgreSQL', () => {
       ('11111111-1111-4111-8111-111111111111'),
       ('55555555-5555-4555-8555-555555555555'),
       ('88888888-8888-4888-8888-888888888888'),
-      ('99999999-9999-4999-8999-999999999990')) AS ids(id)`);
+      ('99999999-9999-4999-8999-999999999990'),
+      ('dddddddd-dddd-4ddd-8ddd-dddddddddddd')) AS ids(id)`);
     await db.query(`INSERT INTO budget_periods(period_type,period_start,period_end,budget_cents,spent_cents)
       VALUES ('monthly','2025-01-01','2025-01-31',100,30),
              ('weekly','2025-01-10','2025-01-16',50,10)`);
@@ -343,5 +344,23 @@ run('U8 budget reservation on disposable PostgreSQL', () => {
       .toMatchObject({ reconciliation_reference: 'invoice-test', reconciled_cents: 4 });
     expect(await listClaimedEnrichmentProviders(contactId)).toEqual(['pdl']);
     expect((await db.query("SELECT count(*) FROM enrichment_transactions WHERE status='reconciled' AND contact_id=$1", [contactId])).rows[0].count).toBe('1');
+  });
+  it('measures reconciliation staleness from the current lookup, not the quote claim', async () => {
+    const { claimEnrichmentQuote, reserveEnrichmentLookup, reconcileEnrichmentCharge,
+      listPendingEnrichmentReconciliations } = await import('@/lib/db/queries/enrichment');
+    const budgetId = (await db.query('SELECT id FROM budget_periods WHERE period_start<=CURRENT_DATE AND period_end>=CURRENT_DATE')).rows[0].id;
+    const contactId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const quoteId = 'a0000000-0000-4000-8000-000000000004';
+    await db.query('UPDATE budget_periods SET budget_cents=spent_cents+100 WHERE id=$1', [budgetId]);
+    await claimEnrichmentQuote(quoteId);
+    // A long bulk quote: claimed 30 minutes ago, its current lookup just started.
+    await db.query("UPDATE enrichment_quote_uses SET created_at=now()-interval '30 minutes' WHERE quote_id=$1", [quoteId]);
+    expect(await reserveEnrichmentLookup(quoteId, contactId, 'pdl', budgetId, 10)).toBe(true);
+    expect((await listPendingEnrichmentReconciliations()).some(item => item.quoteId === quoteId)).toBe(false);
+    expect(await reconcileEnrichmentCharge(quoteId, 0, 'too-early')).toBe(false);
+    await db.query(`UPDATE enrichment_quote_uses
+      SET pending=jsonb_set(pending, '{pendingAt}', to_jsonb(now()-interval '20 minutes')) WHERE quote_id=$1`, [quoteId]);
+    expect((await listPendingEnrichmentReconciliations()).some(item => item.quoteId === quoteId)).toBe(true);
+    expect(await reconcileEnrichmentCharge(quoteId, 10, 'invoice-stale')).toBe(true);
   });
 });

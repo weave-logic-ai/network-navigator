@@ -7,6 +7,10 @@ import { listContacts } from '@/lib/db/queries/contacts';
 import { recordTransaction } from '@/lib/db/queries/enrichment';
 
 jest.mock('@/lib/scoring/auto-score', () => ({ triggerAutoScore: jest.fn() }));
+jest.mock('@/lib/auth/local-request-boundary', () => ({
+  ...jest.requireActual('@/lib/auth/local-request-boundary'),
+  requireLocalDashboardRequest: jest.fn(async () => null),
+}));
 
 const safeDatabase = process.env.DATABASE_URL ===
   'postgresql://u2test@127.0.0.1:55432/u2_fixture';

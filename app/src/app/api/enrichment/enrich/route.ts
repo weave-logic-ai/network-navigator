@@ -6,6 +6,7 @@ import { enrichContact } from '@/lib/enrichment/waterfall';
 import { enrichContactWithChain } from '@/lib/ecc/exo-chain/enrichment-adapter';
 import { ECC_FLAGS } from '@/lib/ecc/types';
 import { getContactById } from '@/lib/db/queries/contacts';
+import { isSelfContact } from '@/lib/contacts/identity';
 import { FIELD_TO_COLUMN, FIELD_LABELS, isEffectivelyEmpty } from '@/lib/enrichment/field-map';
 import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 import { readSignedEnrichmentQuote, verifyEnrichmentQuote } from '@/lib/enrichment/quote';
@@ -154,6 +155,11 @@ export async function POST(request: NextRequest) {
     const contacts = await Promise.all(ids.map(id => getContactById(id)));
     if (contacts.some(contact => !contact)) {
       return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    }
+    // Refuse before claiming the quote: a paid lookup for these contacts
+    // could never be applied, and self: URLs are not provider identities.
+    if (contacts.some(contact => contact!.is_archived || isSelfContact({ linkedinUrl: contact!.linkedin_url }))) {
+      return NextResponse.json({ error: 'Archived and owner contacts cannot be enriched' }, { status: 409 });
     }
     const snapshots = contacts.map(contact => ({
       id: contact!.id, linkedinUrl: contact!.linkedin_url,

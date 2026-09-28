@@ -254,7 +254,7 @@ export async function reserveEnrichmentLookup(
         [contactId, provider, quoteId]);
       if (claim.rowCount !== 1) throw unavailable;
       const intent = await client.query(
-        `UPDATE enrichment_quote_uses SET pending=$2::jsonb
+        `UPDATE enrichment_quote_uses SET pending=$2::jsonb || jsonb_build_object('pendingAt', now())
          WHERE quote_id=$1 AND pending IS NULL AND response_status IS NULL
            AND execution_state='running' RETURNING quote_id`,
         [quoteId, JSON.stringify({ contactId, provider, reservedCents, budgetPeriodId })]);
@@ -331,7 +331,8 @@ export async function listPendingEnrichmentReconciliations(): Promise<Array<{
 }>> {
   const result = await query<{ quote_id: string; pending: { contactId: string; provider: string; reservedCents: number }; created_at: Date }>(
     `SELECT quote_id, pending, created_at FROM enrichment_quote_uses
-     WHERE pending IS NOT NULL AND (reconciliation_required=true OR created_at < now()-interval '15 minutes')
+     WHERE pending IS NOT NULL AND (reconciliation_required=true
+       OR COALESCE((pending->>'pendingAt')::timestamptz, created_at) < now()-interval '15 minutes')
      ORDER BY created_at ASC`);
   return result.rows.map(row => ({ quoteId: row.quote_id, contactId: row.pending.contactId,
     provider: row.pending.provider, reservedCents: row.pending.reservedCents,
@@ -347,7 +348,8 @@ export async function reconcileEnrichmentCharge(quoteId: string, billedCents: nu
   return transaction(async client => {
     const result = await client.query<{ pending: { contactId: string; provider: string; reservedCents: number; budgetPeriodId: string } }>(
       `SELECT pending FROM enrichment_quote_uses WHERE quote_id=$1
-       AND (reconciliation_required=true OR created_at < now()-interval '15 minutes') FOR UPDATE`, [quoteId]);
+       AND (reconciliation_required=true
+       OR COALESCE((pending->>'pendingAt')::timestamptz, created_at) < now()-interval '15 minutes') FOR UPDATE`, [quoteId]);
     const pending = result.rows[0]?.pending;
     if (!pending || billedCents > pending.reservedCents) return false;
     const provider = await client.query<{ id: string }>('SELECT id FROM enrichment_providers WHERE name=$1', [pending.provider]);

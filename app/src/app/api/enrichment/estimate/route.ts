@@ -3,6 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createEnrichmentQuote } from '@/lib/enrichment/quote';
 import { getContactById } from '@/lib/db/queries/contacts';
+import { isSelfContact } from '@/lib/contacts/identity';
 import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 export async function POST(request: NextRequest) {
@@ -28,6 +29,9 @@ export async function POST(request: NextRequest) {
     for (const id of contactIds) {
       const contact = await getContactById(id);
       if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+      if (contact.is_archived || isSelfContact({ linkedinUrl: contact.linkedin_url })) {
+        return NextResponse.json({ error: 'Archived and owner contacts cannot be enriched' }, { status: 409 });
+      }
       contacts.push({
           id: contact.id,
           linkedinUrl: contact.linkedin_url,
