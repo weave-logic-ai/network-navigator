@@ -34,6 +34,15 @@ export function requireLocalOrigin(request: NextRequest, json = false): NextResp
   return null;
 }
 
+/** HTTP framing, not `request.body`: the served runtime exposes an empty stream
+ * for bodyless POST/DELETE, while a real body always has Content-Length or
+ * Transfer-Encoding. A malformed length is treated as a body. */
+export function hasRequestBody(request: NextRequest): boolean {
+  if (request.headers.has('transfer-encoding')) return true;
+  const length = request.headers.get('content-length');
+  return length !== null && length.trim() !== '0';
+}
+
 export function trustedLocalOrigin(request: NextRequest): string | null {
   return trustedLoopbackHost(request.headers.get('host'));
 }

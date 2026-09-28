@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { isAllowedExtensionOrigin, isOriginlessExtensionRead, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
+import { hasRequestBody, isAllowedExtensionOrigin, isOriginlessExtensionRead, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
 import { hasOperatorSession } from '@/lib/auth/operator-session';
 
 const SECRET_PROTECTED_CRON_ROUTES = new Set([
@@ -83,7 +83,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.json({ error: 'Operator session required' }, { status: 401 });
   }
 
-  if (isApi && request.body && !['GET', 'HEAD'].includes(request.method)) {
+  if (isApi && hasRequestBody(request) && !['GET', 'HEAD'].includes(request.method)) {
     const contentType = request.headers.get('content-type') ?? '';
     const expected = path === '/api/import/upload'
       ? /^multipart\/form-data(?:\s*;|\s*$)/i

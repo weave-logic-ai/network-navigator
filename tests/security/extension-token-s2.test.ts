@@ -140,6 +140,15 @@ test('operator mints, lists masked token, registers full token, and revokes it',
     { params: Promise.resolve({ extensionId }) })).status).toBe(404);
 });
 
+test('dashboard mint accepts a bodyless POST and rejects a framed body', async () => {
+  const bodyless = await mint(req('/api/extension/tokens', 'POST', { ...await operator(), 'content-length': '0' }));
+  expect(bodyless.status).toBe(201);
+  const framed = await mint(req('/api/extension/tokens', 'POST', {
+    ...await operator(), 'content-type': 'application/json', 'content-length': '2',
+  }, '{}'));
+  expect(framed.status).toBe(400);
+});
+
 test('MV3 originless GET uses a full token without admitting dashboard or originless POST', async () => {
   const { token } = (await (await mint(req('/api/extension/tokens', 'POST', await operator()))).json()).data;
   const headers = { 'x-extension-token': token, 'sec-fetch-site': 'none' };

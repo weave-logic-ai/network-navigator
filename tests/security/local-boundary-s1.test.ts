@@ -24,8 +24,11 @@ const priorSecret = process.env.LOCAL_OPERATOR_SECRET;
 const priorOrigins = process.env.EXTENSION_ALLOWED_ORIGINS;
 
 function req(path: string, method = 'GET', headers: Record<string, string> = {}, body?: string, internalHost = 'localhost:3751') {
+  // Real clients frame a body with Content-Length; the served runtime does not
+  // expose a null body for bodyless requests, so framing is what middleware reads.
+  const framing = body === undefined ? {} : { 'content-length': String(Buffer.byteLength(body)) };
   return new NextRequest(`http://${internalHost}${path}`, {
-    method, headers: { host: 'localhost:3751', ...headers }, body,
+    method, headers: { host: 'localhost:3751', ...framing, ...headers }, body,
   });
 }
 
@@ -153,6 +156,18 @@ test('non-JSON bodies fail before parse or purge effects', async () => {
   expect((await parseCapture(req('/api/extension/captures', 'POST', { ...auth, ...dashboard, 'content-type': 'text/plain' }, JSON.stringify({ captureId })))).status).toBe(415);
   expect(dbTransaction).not.toHaveBeenCalled();
   expect(parse).not.toHaveBeenCalled();
+});
+
+test('bodyless dashboard POST and DELETE pass without Content-Type; framed or malformed bodies do not', async () => {
+  const auth = await sessionHeaders();
+  const bodyless = (method: string, extra: Record<string, string> = {}) =>
+    middleware(req('/api/extension/tokens', method, { ...auth, ...dashboard, ...extra }));
+  expect((await bodyless('POST', { 'content-length': '0' })).status).toBe(200);
+  expect((await bodyless('POST')).status).toBe(200);
+  expect((await bodyless('DELETE')).status).toBe(200);
+  expect((await bodyless('POST', { 'content-length': '2', 'content-type': 'text/plain' })).status).toBe(415);
+  expect((await bodyless('POST', { 'content-length': 'x', 'content-type': 'text/plain' })).status).toBe(415);
+  expect((await bodyless('POST', { 'transfer-encoding': 'chunked', 'content-type': 'text/plain' })).status).toBe(415);
 });
 
 test('extension preflight needs configured origin and only token routes bypass operator session', async () => {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
+import { hasRequestBody, requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 import { generateExtensionToken, listExtensionTokens } from '@/lib/auth/extension-auth';
 
 const privateHeaders = { 'Cache-Control': 'no-store' };
@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
   // operator session, so no client-supplied token or secret enters this route.
   const denied = await requireLocalDashboardRequest(request);
   if (denied) return denied;
-  if (request.body) {
+  if (hasRequestBody(request)) {
     return NextResponse.json({ error: 'Request body is not supported' }, { status: 400 });
   }
   const token = await generateExtensionToken();
