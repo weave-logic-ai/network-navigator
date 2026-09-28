@@ -107,3 +107,6 @@ graphify-out/
 
 # Local ruvector vector DB (runtime artifact, like .swarm/)
 ruvector.db
+
+# Session handoff notes (local only)
+docs/handoff.md
