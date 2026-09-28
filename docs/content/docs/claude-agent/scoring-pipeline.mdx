@@ -1,199 +1,139 @@
 ---
 title: Scoring Pipeline
-description: Three-layer scoring engine, pipeline orchestration modes, dependency guards, and how agent scoring maps to the app.
+description: The app's composite and referral scoring engine, tier and persona assignment, and how the agent triggers and reads it.
 ---
 
 # Scoring Pipeline
 
-The agent scores every contact through three sequential layers, each adding more intelligence. The pipeline orchestrator (`pipeline.mjs`) manages execution order and dependency guards.
+Scoring runs entirely server-side in the app (`app/src/lib/scoring/`), backed by PostgreSQL. The agent never scores anything itself -- it triggers scoring runs and reads results through the REST API.
 
-## Three-Layer Architecture
+## Two-Phase Architecture
 
 ```
-Layer 1: ICP + Gold Score     (scorer.mjs)
+Phase 1: Composite Score   (9 weighted dimensions, computed together)
     |
     v
-Layer 2: Behavioral           (behavioral-scorer.mjs)
-    |
-    v
-Layer 3: Referral             (referral-scorer.mjs)
+Phase 2: Referral Score    (6 weighted dimensions, computed after Phase 1)
 ```
 
-Each layer requires the previous layer's scores. The pipeline enforces this: if Layer 1 fails, Layer 2 is skipped. If Layer 2 fails, Layer 3 is skipped.
+Phase 2 reads the Phase 1 result (specifically the behavioral persona) as one of its inputs, so referral scoring always runs after composite scoring completes.
 
-## Layer 1: ICP + Gold Score
+## Phase 1: Composite Score
 
-Evaluates how well each contact matches your Ideal Customer Profile and computes a composite Gold Score.
+Nine dimension scorers each produce a raw score (0-1) for a contact; the composite score is their weighted sum.
 
-### ICP Fit Score (0-1)
+| Dimension | Default Weight | What It Measures |
+|-----------|------------------|--------------------|
+| `icp_fit` | 0.20 | Role match, industry match, signal match, company size fit against active ICP profiles |
+| `relationship_strength` | 0.15 | Mutual connections, recency, proximity |
+| `network_hub` | 0.10 | Connection count, cluster breadth, connector role |
+| `signal_boost` | 0.10 | High-intent keywords in headline/about |
+| `skills_relevance` | 0.10 | Overlap between contact skills and ICP signals |
+| `behavioral` | 0.10 | Activity level, engagement signals, connection power |
+| `content_relevance` | 0.10 | Content topics, posting frequency, engagement |
+| `graph_centrality` | 0.10 | PageRank, betweenness, degree centrality |
+| `network_proximity` | 0.05 | Graph distance and shared network paths |
 
-Four weighted components:
+Weights are configurable per-profile via `PUT /api/scoring/weights` and must sum to 1.0. Dimensions with no data available for a given contact have their weight redistributed proportionally across the remaining dimensions rather than being scored as zero.
 
-| Component | Default Weight | How It Works |
-|-----------|---------------|--------------|
-| **roleLevel** | 0.35 | Matches role against `rolePatterns`. High = 1.0, Medium = 0.7, Low = 0.3, None = 0.1. Partial string matching. |
-| **industryMatch** | 0.25 | Industry keyword matches in headline/about. 2+ = 1.0, 1 = 0.5, 0 = 0.0. |
-| **signalMatch** | 0.25 | Proportion of buying signal keywords found in profile text. |
-| **companySize** | 0.15 | Defaults to 0.5 (not directly available from LinkedIn). |
+### Tier Assignment
 
-When multiple ICP profiles exist, the contact is scored against all of them and the highest score (weighted by profile weight) is used.
+| Tier | Threshold | Meaning |
+|------|-----------|---------|
+| **gold** | composite score >= 0.55 | Top prospects -- pursue immediately |
+| **silver** | >= 0.40 | Good prospects -- nurture relationship |
+| **bronze** | >= 0.28 | Some potential -- monitor and engage |
+| **watch** | < 0.28 | Low priority -- passive awareness |
 
-### Network Hub Score (0-1)
+### Persona Classification
 
-| Component | Weight | How It Works |
-|-----------|--------|--------------|
-| **Mutual connections** | 0.30 | Normalized against P90 of all mutual counts |
-| **Cluster breadth** | 0.25 | Clusters joined / total active clusters |
-| **Connector index** | 0.25 | Role-based: partner/consultant = 1.0, CEO/founder = 0.7, director/VP = 0.5 |
-| **Edge density** | 0.20 | Graph edges normalized against max |
+Computed from the raw (unweighted) dimension scores, checked in order -- first match wins:
 
-### Relationship Strength Score (0-1)
+| Persona | Condition |
+|---------|-----------|
+| `buyer` | `icp_fit` > 0.6 AND `relationship_strength` > 0.4 |
+| `warm-lead` | `icp_fit` > 0.4 AND `relationship_strength` > 0.3 |
+| `active-influencer` | `behavioral` > 0.6 AND `content_relevance` > 0.4 |
+| `hub` | `network_hub` > 0.6 |
+| `advisor` | `relationship_strength` > 0.6 AND `icp_fit` > 0.2 |
+| `passive-contact` | Default for 1st/2nd degree connections |
+| `unknown` | Default otherwise |
 
-| Component | Weight | How It Works |
-|-----------|--------|--------------|
-| **Mutual connections** | 0.40 | Normalized against max mutual count |
-| **Search term overlap** | 0.20 | Matched search terms, normalized |
-| **Recency** | 0.20 | &lt;7d = 1.0, &lt;30d = 0.7, &lt;90d = 0.4, else = 0.2 |
-| **Proximity** | 0.20 | Major metro (+0.5) + industry overlap (+0.5) |
+### Behavioral Persona Classification
 
-### Gold Score (0-1)
+A second, independent classification, also checked in order:
 
-The composite score that determines the tier:
+| Persona | Condition |
+|---------|-----------|
+| `data-insufficient` | The behavioral scorer had fewer than 2 available signal components |
+| `super-connector` | `network_hub` > 0.7 AND 500+ connections |
+| `content-creator` | `content_relevance` > 0.5 AND `behavioral` > 0.5 |
+| `silent-influencer` | `graph_centrality` > 0.5 AND `behavioral` < 0.3 |
+| `rising-connector` | Under 500 connections AND connected within the last 180 days |
+| `engaged-professional` | `behavioral` > 0.3 |
+| Default | Passive/no strong signal |
 
-```
-goldScore = icpFit * 0.35 + networkHub * 0.30 + relationship * 0.25 + signalBoost * 0.10
-```
+## Phase 2: Referral Score
 
-Weights are configurable in `goldScore` section of `icp-config.json`.
-
-### Tier and Persona Assignment
-
-**Tiers** (based on goldScore thresholds):
-
-| Tier | Default | Meaning |
-|------|---------|---------|
-| Gold | >= 0.55 | Top prospects -- pursue immediately |
-| Silver | >= 0.40 | Good prospects -- nurture |
-| Bronze | >= 0.28 | Some potential -- monitor |
-| Watch | < 0.28 | Low priority |
-
-**ICP Personas:**
-
-| Persona | Criteria |
-|---------|----------|
-| buyer | icpFit >= 0.6 AND goldScore >= 0.5 |
-| advisor | Connector index >= 0.8 |
-| hub | networkHub >= 0.6 AND icpFit < 0.5 |
-| peer | Role matches engineer/developer/architect |
-| referral-partner | Default (none of the above) |
-
-## Layer 2: Behavioral
-
-Analyzes how active, connected, and engaged each contact is. Updates the Gold Score to v2 with behavioral weight.
-
-### Six Components
+Six weighted components evaluate a contact's ability to send you business:
 
 | Component | Weight | What It Measures |
-|-----------|--------|-----------------|
-| **connectionPower** | 0.20 | Connection count. 500+ = 1.0, 300+ = 0.7, 100+ = 0.4, &lt;100 = 0.1 |
-| **connectionRecency** | 0.15 | Days since connected. &lt;30d = 1.0, &lt;90d = 0.7, &lt;180d = 0.4 |
-| **aboutSignals** | 0.25 | 8 keyword categories in About: connector, speaker, mentor, builder, etc. |
-| **headlineSignals** | 0.15 | Patterns: multi-role pipes (0.7), helping language (0.6), credentials (0.4) |
-| **superConnectorIndex** | 0.15 | Trait count / 5. 3+ traits = super-connector |
-| **networkAmplifier** | 0.10 | Mutuals (normalized) x connection power |
+|-----------|--------|--------------------|
+| `referralRole` | 0.25 | Role-based referral potential (agency, partner, consultant, advisor) |
+| `clientOverlap` | 0.20 | Whether they serve the same industries you target |
+| `networkReach` | 0.20 | Connection count, cluster breadth, edge density |
+| `amplificationPower` | 0.15 | Super-connector traits, content-creation signals |
+| `relationshipWarmth` | 0.10 | Mutual connections, existing relationship strength, recency |
+| `buyerInversion` | 0.10 | Inverse ICP fit + ecosystem keywords (partner, not buyer) |
 
-### Gold Score v2
-
-```
-goldScoreV2 = icpFit * 0.30 + networkHub * 0.25 + relationship * 0.20
-            + behavioral * 0.15 + signalBoost * 0.10
-```
-
-Tiers are reassigned. The v1 score is preserved as `goldScoreV1`.
-
-### Behavioral Personas
-
-| Persona | Criteria |
-|---------|----------|
-| **super-connector** | 3+ traits AND 500+ connections |
-| **content-creator** | Speaker/author/podcast keywords |
-| **silent-influencer** | 500+ connections, low signals |
-| **rising-connector** | &lt;500 connections, connected &lt;180 days |
-| **passive-network** | Default |
-
-## Layer 3: Referral
-
-Identifies contacts who can refer business to you. Runs after Layer 2.
-
-### Six Components
-
-| Component | Weight | What It Measures |
-|-----------|--------|-----------------|
-| **referralRole** | 0.25 | Role-based referral potential. Agency/partner = 1.0, consultant = 0.7, manager = 0.3 |
-| **clientOverlap** | 0.20 | Industry keyword overlap (60%) + service-provider signals (40%) |
-| **networkReach** | 0.20 | Connections/500 + cluster breadth + edge density |
-| **amplificationPower** | 0.15 | Super-connector traits + helping language + content signals |
-| **relationshipWarmth** | 0.10 | Mutuals (35%) + relationship strength (35%) + recency (30%) |
-| **buyerInversion** | 0.10 | Low ICP + ecosystem keywords = partner, not buyer |
+Like Phase 1, null components have their weight redistributed proportionally.
 
 ### Referral Tiers
 
 | Tier | Threshold | Meaning |
 |------|-----------|---------|
-| gold-referral | >= 0.65 | Strong referral partner |
-| silver-referral | >= 0.45 | Good potential |
-| bronze-referral | >= 0.30 | Some potential |
+| `gold-referral` | referral score >= 0.65 | Strong referral partner |
+| `silver-referral` | >= 0.45 | Good potential |
+| `bronze-referral` | >= 0.30 | Some potential |
+| (none) | < 0.30 | Not currently a referral candidate |
 
-### Referral Personas
+### Referral Persona Classification
 
-| Persona | Criteria | What They Do |
-|---------|----------|-------------|
-| **white-label-partner** | High referral role + client overlap + agency/consultancy role | Resells your services |
-| **warm-introducer** | Warmth >= 0.5 + reach >= 0.5 | Makes warm intros to decision-makers |
-| **co-seller** | Client overlap >= 0.5 + consultant/advisor role | Mutual referral arrangements |
-| **amplifier** | Amplification >= 0.5 or super-connector persona | Amplifies your brand |
-| **passive-referral** | Default | Needs relationship deepening |
+Checked in order -- first match wins:
 
-## Pipeline Orchestration
+| Persona | Condition |
+|---------|-----------|
+| `white-label-partner` | Agency/consultancy role in title or headline AND `referralRole` >= 0.7 AND `clientOverlap` >= 0.4 |
+| `warm-introducer` | `relationshipWarmth` >= 0.5 AND `networkReach` >= 0.5 |
+| `co-seller` | Consultant/advisor/freelance/fractional role AND `clientOverlap` >= 0.5 |
+| `amplifier` | `amplificationPower` >= 0.5 OR existing behavioral persona is `super-connector`/`content-creator` |
+| `passive-referral` | Default |
 
-### Pipeline Modes
+## Triggering and Reading Scoring Runs
 
-| Mode | Steps | When to Use |
-|------|-------|-------------|
-| `--full` | search, enrich, graph, score, behavioral, referral, vectorize, analyze, snapshot | First-time setup |
-| `--rebuild` | graph, score, behavioral, referral, vectorize, analyze, snapshot | After data changes (default mode) |
-| `--rescore` | score, behavioral, referral, analyze | After config weight/threshold changes |
-| `--behavioral` | behavioral, analyze(behavioral), analyze(visibility) | Behavioral-only analysis |
-| `--referrals` | referral-scorer, analyze(referrals) | Referral-only analysis |
-| `--report` | report-generator | Generate HTML dashboard |
-| `--deep-scan` | deep-scan, graph, score, behavioral, referral, report | Deep-scan then rebuild |
-| `--validate` | configure validate | Validate config |
-| `--reparse` | reparse --all | Re-extract from cached HTML |
+The agent has no scoring logic of its own -- it calls these endpoints:
 
-### Dependency Guards
+| Endpoint | Method | What It Does |
+|----------|--------|----------------|
+| `/api/scoring/rescore-all` | POST | Re-scores all contacts (composite + referral). Returns `{ runId, status: "running" }`. |
+| `/api/scoring/run` | POST | Score a single contact or batch |
+| `/api/scoring/status` | GET | Poll a run's status by `runId` (or the latest run if omitted) |
+| `/api/scoring/weights` | GET/PUT | View or update per-profile scoring weights |
+| `/api/scoring/preview` | POST | Preview score changes before applying |
 
-The pipeline tracks step success:
+```
+/network-intel rescore everything
+```
 
-- If `graph-builder.mjs` fails, `scorer.mjs` is skipped
-- If `scorer.mjs` fails, `behavioral-scorer.mjs` is skipped
-- If `behavioral-scorer.mjs` fails, `referral-scorer.mjs` is skipped
+```bash
+node agent/network-navigator/skills/linkedin-prospector/scripts/pipeline.mjs --rescore-all
+```
 
-Failed or skipped steps are clearly marked in the pipeline summary.
+`pipeline.mjs --rescore-all` kicks off the run and then polls `/api/scoring/status` every 2 seconds (up to 60 attempts, i.e. 2 minutes) until the run reports `complete`, `idle`, or `done`.
 
-### Automatic Vectorization
+### When to Rescore
 
-When ruvector is installed, `--rebuild` and `--full` modes automatically include a vectorize step after all scorers complete. Each scorer also upserts its scores into the RVF store via `upsertMetadata()`, keeping vector store metadata current without full re-vectorization.
-
-## Mapping to the App
-
-The agent and the app have parallel scoring engines. Key differences:
-
-| Aspect | Agent | App |
-|--------|-------|-----|
-| **Storage** | Local JSON files (`graph.json`, `contacts.json`) | PostgreSQL with ruvector extension |
-| **Scoring** | 3-layer JS scripts | 15-dimension SQL + TypeScript engine |
-| **Tiers** | gold/silver/bronze/watch | Same tier system, shared thresholds |
-| **Personas** | ICP + behavioral + referral personas | Same persona taxonomy |
-| **Sync** | Push to app via API after scoring | App is the source of truth for the dashboard |
-
-When both systems are running, the agent's scored output can be imported into the app via the `/api/import/from-directory` endpoint, merging agent intelligence with app-side enrichment data.
+New contacts captured via the browser extension are scored automatically. A manual rescore is needed when:
+- ICP profiles or criteria change
+- Scoring weights change
+- Enrichment data arrives in bulk (e.g. after an import)

@@ -1,9 +1,8 @@
 // WS-3 Phase 6 §7 — revoke-origin sync.
 //
 // The sidebar maintains `chrome.storage.local.approvedOrigins` as a mirror of
-// Chrome's native per-origin permission grants. The native state is
-// authoritative, but the stored list drives the sidebar UI (adding/removing
-// rows) and the content-script gating check.
+// Chrome's native permission patterns. Keep the exact scheme/pattern: an
+// http or wildcard grant cannot be revoked by removing an invented https one.
 //
 // When the user revokes an origin via chrome://extensions, we need to:
 //   1. Remove that origin from the stored list.
@@ -26,26 +25,21 @@ async function getApprovedOrigins(): Promise<string[]> {
 }
 
 async function setApprovedOrigins(next: string[]): Promise<void> {
-  // Deduplicate and sort so `storage.onChanged` doesn't churn when the list
-  // is semantically equal.
   const deduped = Array.from(new Set(next)).sort();
-  await chrome.storage.local.set({ [APPROVED_ORIGINS_KEY]: deduped });
+  const current = [...(await getApprovedOrigins())].sort();
+  if (current.length !== deduped.length || current.some((item, index) => item !== deduped[index])) {
+    await chrome.storage.local.set({ [APPROVED_ORIGINS_KEY]: deduped });
+  }
 }
 
 /**
- * Normalise a permissions.Permissions origin pattern to the sidebar's
- * `https://host.tld/*` form. chrome.permissions can return patterns like
- * `*://example.com/*` when wildcard-scheme; we collapse to https so the
- * sidebar's display list stays tidy.
+ * Validate a Chrome origin pattern without changing the native grant it names.
+ * `<all_urls>` is an optional grant and must remain visible and revocable.
  */
 function canonicalizeOrigin(pattern: string): string | null {
-  if (!pattern) return null;
-  // Keep existing https://host/* patterns untouched.
-  if (/^https:\/\/[^/]+\/\*$/.test(pattern)) return pattern;
-  // `*://host/*` or `http://host/*` → https://host/*
-  const m = pattern.match(/^(?:\*|https?):\/\/([^/]+)\/\*$/);
-  if (m) return `https://${m[1]}/*`;
-  return null;
+  if (pattern === '<all_urls>') return pattern;
+  const match = pattern.match(/^(\*|https?):\/\/([^/\s]+)\/\*$/i);
+  return match ? `${match[1].toLowerCase()}://${match[2].toLowerCase()}/*` : null;
 }
 
 /**
@@ -86,21 +80,64 @@ export async function addApprovedOrigins(
   return merged;
 }
 
-/**
- * Full reconciliation: read chrome.permissions.getAll() and rewrite the
- * approved-origins list to match. Called on service-worker startup so a
- * revoke that happened while the SW was asleep is still reflected.
- */
-export async function syncApprovedOriginsFromChrome(): Promise<string[]> {
-  try {
-    const perms = await chrome.permissions.getAll();
-    const origins = (perms.origins ?? [])
-      .map(canonicalizeOrigin)
-      .filter((v): v is string => !!v);
+/** Read the native grant list without writing the storage mirror. */
+export async function listApprovedOriginsFromChrome(): Promise<string[]> {
+  const perms = await chrome.permissions.getAll();
+  const origins = (perms.origins ?? [])
+    .map(canonicalizeOrigin)
+    .filter((v): v is string => !!v);
+  return Array.from(new Set(origins)).sort();
+}
+
+// Only the service worker calls this in production. Serialize event-driven
+// reads and writes so a late response from an earlier grant/revoke cannot
+// overwrite a newer native snapshot in the storage mirror.
+let reconciliation: Promise<void> = Promise.resolve();
+
+export function syncApprovedOriginsFromChrome(): Promise<string[]> {
+  const result = reconciliation.then(async () => {
+    const origins = await listApprovedOriginsFromChrome();
     await setApprovedOrigins(origins);
     return origins;
+  });
+  reconciliation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/**
+ * ADR-028 clause 6 — revoke a single origin from the sidebar's "Approved
+ * sites" list. This is the single entry point callers (the sidebar's revoke
+ * button) should use instead of calling chrome.permissions.remove and
+ * writing the storage mirror separately: it calls the native permission
+ * removal first, then reads Chrome again. The service worker is the sole
+ * production writer of the mirror through its permission-change listener.
+ * Native
+ * `remove()` can return false for built-in grants and broader permissions can
+ * still cover the same origin after an exact grant is removed.
+ */
+export async function revokeOrigin(origin: string): Promise<{
+  origins: string[];
+  revoked: boolean;
+}> {
+  const pattern = canonicalizeOrigin(origin);
+  if (!pattern) return { origins: await getApprovedOrigins(), revoked: false };
+  let removed = false;
+  try {
+    removed = await chrome.permissions.remove({ origins: [pattern] });
   } catch {
-    // Permissions API failure shouldn't block SW startup.
-    return getApprovedOrigins();
+    return { origins: await getApprovedOrigins(), revoked: false };
   }
+  let origins: string[];
+  try {
+    origins = await listApprovedOriginsFromChrome();
+  } catch {
+    return { origins: await getApprovedOrigins(), revoked: false };
+  }
+  let stillGranted = true;
+  try {
+    stillGranted = await chrome.permissions.contains({ origins: [pattern] });
+  } catch {
+    // If Chrome cannot confirm the result, do not claim access is gone.
+  }
+  return { origins, revoked: removed && !stillGranted && !origins.includes(pattern) };
 }

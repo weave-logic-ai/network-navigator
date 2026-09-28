@@ -2,7 +2,17 @@
 
 All notable changes to Network Navigator are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); no strict SemVer contract yet.
 
-## [Unreleased] — Release candidate `v0.5.0`
+## [Unreleased] — research tools
+
+Research-tools implementation is integrated in the local checkout through
+cached `origin/main` PR #30, but release acceptance remains open. The current
+status, dependencies, and five story gates are tracked in
+`.planning/research-tools-sprint/08-phased-delivery.md`. In particular,
+company graph focus, distinct target-scoped dashboard metrics, and the
+end-to-end story demos are not yet evidenced. Do not infer a release or
+deployment from merged code.
+
+## [v0.5.0] — 2026-04-17
 
 Scope: first tagged release on this repo. Cadence starts at `0.5.0` to
 signal pre-1.0 maturity. `app/package.json` and `service-manifest.json`
@@ -25,6 +35,12 @@ Release theme: **ECC Phase 2 hardening + owner-profile polish + extension target
   - Task-lock takes priority when the active tab URL matches a task whose `contact_id` is set; surfaces the task title as the reason.
   - Clear (×) button only shown for task-locks; resets on tab activation / navigation so each page gets a fresh decision.
 - **Auto-paginate search results**: new opt-in popup setting. After capturing a `SEARCH_PEOPLE` or `SEARCH_CONTENT` page, the service worker confirms the server created a follow-up task for `?page=N+1`, waits 2s, navigates the active tab to that page, and re-fires `CAPTURE_REQUEST` once the page finishes loading. Self-terminates at the server's `MAX_SEARCH_PAGES` cap (currently 10).
+
+### Changed — Claude Agent skill (retroactive record)
+
+- **The `agent/network-navigator/` Claude Code skill was rewritten from v1 to v2** at some point before this release, but the rewrite was never recorded here — this entry backfills it. v1 drove a local Playwright browser to search and scrape LinkedIn directly, cached HTML and scored contacts entirely in local JSON files (`contacts.json`, `graph.json`, `icp-config.json`, etc.), and shipped 17 scripts plus a local ONNX/ruvector embedder for semantic search. v2 is API-first: the skill is now exactly four thin REST-client scripts (`api-client.mjs`, `configure.mjs`, `pipeline.mjs`, `analyze.mjs`) that call the app's REST API at `localhost:3750`; there is no Playwright, no local data store, and no browser automation in the agent. LinkedIn capture now happens exclusively through the browser extension as the user browses. The retired v1 scripts are preserved for reference under `agent/network-navigator/.v1-archive/` but are not part of the shipped skill.
+- **Scoring, storage, and semantic search all moved server-side.** The 9-dimension composite scorer and 6-dimension referral scorer now run in `app/src/lib/scoring/`, backed by PostgreSQL; semantic search runs through the ruvector PostgreSQL extension (`GET /api/contacts/hybrid-search`, 384-dim all-MiniLM-L6-v2 embeddings, HNSW cosine index) instead of a local `.rvf` file and a client-side ONNX embedder.
+- **Some v1 capabilities have no v2 equivalent yet**: active 2nd-degree "deep scan" of a contact's connections (`deep-scan.mjs`/`batch-deep-scan.mjs`), the `behavioral`/`visibility`/`employers`/`similar` analyzer modes, and delta/snapshot tracking (`delta.mjs`). See `docs/content/docs/claude-agent/analysis-modes.mdx` and `docs/content/docs/claude-agent/network-expansion.mdx` for the full list.
 
 ### Changed
 
@@ -56,10 +72,13 @@ Release theme: **ECC Phase 2 hardening + owner-profile polish + extension target
 
 - **`app/e2e/smoke-all-pages.spec.ts` screenshot path**: was writing to `tests/e2e/screenshots/` (wrong, since Playwright `testDir` is `./e2e`); now writes to `e2e/screenshots/` where the rest of the e2e assets live.
 - **`.gitignore`**: now ignores `app/test-results/`, `app/playwright-report/`, `app/e2e/screenshots/`, and the legacy `app/tests/` directory that the prior path bug populated.
+- **Published docs site (`docs/content/docs/claude-agent/**`, `docs/linkedin-prospector-guide.md`, `docs/configuration-guide.md`) still documented the retired v1 agent architecture** — `npm install playwright`, a Playwright LinkedIn login flow, 17 archived scripts, a local `icp-config.json`, and a local ONNX/`.rvf` vector store, all with no deprecation notice. Rewritten to match the shipped v2 skill (four REST-client scripts, server-side scoring and search, `POST /api/icps`/`/api/niches`/`/api/offerings` configuration). Two real defects surfaced while verifying the rewrite against the app: `pipeline.mjs --export` calls `GET /api/admin/export`, which returns CSV, but `api-client.mjs` always calls `res.json()` on the response; and `analyze.mjs --mode hubs` reads flat `n.company`/`n.score`/`n.connections` fields off `GET /api/graph/data` nodes, but that endpoint nests those under `node.data.*` and wraps the payload in `{ data: { nodes, edges } }`. Also found and corrected two wrong values the agent-bundled copy of `configuration-guide.md` had carried for the composite scoring weights (`network_hub` documented as `0.15`, actually `0.10`; `graph_centrality` documented as `0.05`, actually `0.10`, per `app/src/lib/scoring/weight-manager.ts`).
 
-### Deferred (explicitly not in this release)
+### Deferred from v0.5.0 (historical release scope)
 
-See `docs/plans/browser-snippet-expansion.md`. Short version: snippet editor (multi-modal, taggable, entity-linked), capture diff view, parser rethink, graph re-centering, and primary/secondary target model refactor all live in a future joint sprint once this take is stable in production.
+See `docs/plans/browser-snippet-expansion.md` for the original plan. Several
+items were subsequently implemented in the research-tools sprint; their
+current acceptance status is in `.planning/research-tools-sprint/08-phased-delivery.md`.
 
 ### Known non-issues
 

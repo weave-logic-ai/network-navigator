@@ -3,6 +3,7 @@
 // an ICP that represents "who your network already looks like"
 
 import { query } from "../db/client";
+import { matchesRole, ROLE_GROUP_ALIASES } from "./scorers/icp-fit";
 
 export interface NaturalICPResult {
   roles: string[];
@@ -11,32 +12,41 @@ export interface NaturalICPResult {
   companySizeRanges: string[];
   profileSignals: {
     headlineKeywords: string[];
+    aboutKeywords: string[];
     skillSignals: string[];
     positionIndustries: string[];
   };
   networkSignals: {
     topRoles: Array<{ role: string; count: number }>;
     topIndustries: Array<{ industry: string; count: number }>;
+    topNiches: Array<{ niche: string; count: number }>;
   };
 }
 
 /**
  * Compute the Natural ICP from owner profile (60%) + network stats (40%).
  * Returns the criteria and stores as an icp_profiles row with source='natural'.
+ *
+ * The owner's profile lives in `owner_profiles` (the versioned LinkedIn-export
+ * table populated by app/src/lib/import/profile-importer.ts on every import;
+ * the current version is flagged `is_current = TRUE`). This is the same
+ * source every other owner-facing route in the app reads from — see
+ * app/src/lib/scoring/delta-threshold.ts and
+ * app/src/app/api/profile/desired-icp/route.ts. There is no `degree = 0`
+ * row created for the owner in `contacts` by the import pipeline, so an
+ * earlier version of this function that queried `contacts WHERE degree = 0`
+ * never found a row in practice.
  */
 export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
-  // 1. Find owner profile (degree=0)
+  // 1. Find the current owner profile
   const ownerRes = await query<{
-    id: string;
-    full_name: string | null;
     headline: string | null;
-    title: string | null;
-    about: string | null;
-    tags: string[] | null;
-    current_company: string | null;
+    summary: string | null;
+    industry: string | null;
+    skills: string[] | null;
   }>(
-    `SELECT id, full_name, headline, title, about, tags, current_company
-     FROM contacts WHERE degree = 0 AND is_archived = FALSE LIMIT 1`
+    `SELECT headline, summary, industry, skills
+     FROM owner_profiles WHERE is_current = TRUE LIMIT 1`
   );
 
   if (ownerRes.rows.length === 0) return null;
@@ -47,14 +57,14 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
   // Extract keywords from headline
   const headlineKeywords = extractKeywords(owner.headline || "");
 
-  // Extract keywords from about
-  const aboutKeywords = extractKeywords(owner.about || "");
+  // Extract keywords from summary ("about")
+  const aboutKeywords = extractKeywords(owner.summary || "");
 
-  // Skills from tags
-  const skillSignals = owner.tags || [];
+  // Skills
+  const skillSignals = owner.skills || [];
 
-  // Industry signals from headline + about
-  const profileText = [owner.headline, owner.about, owner.title]
+  // Industry signals from headline + summary + the profile's own industry field
+  const profileText = [owner.headline, owner.summary, owner.industry]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -66,31 +76,18 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
   // --- NETWORK ANALYSIS (40% weight) ---
 
   // Top 10 title patterns by frequency
-  const titleRes = await query<{ title_pattern: string; cnt: string }>(
-    `SELECT
-       CASE
-         WHEN title ILIKE '%CEO%' OR title ILIKE '%founder%' THEN 'CEO/Founder'
-         WHEN title ILIKE '%CTO%' OR title ILIKE '%chief tech%' THEN 'CTO/Tech Leader'
-         WHEN title ILIKE '%VP%' OR title ILIKE '%vice president%' THEN 'VP'
-         WHEN title ILIKE '%director%' THEN 'Director'
-         WHEN title ILIKE '%manager%' OR title ILIKE '%head of%' THEN 'Manager/Head'
-         WHEN title ILIKE '%engineer%' OR title ILIKE '%developer%' THEN 'Engineer'
-         WHEN title ILIKE '%sales%' OR title ILIKE '%account exec%' THEN 'Sales'
-         WHEN title ILIKE '%marketing%' OR title ILIKE '%growth%' THEN 'Marketing'
-         WHEN title ILIKE '%product%' THEN 'Product'
-         WHEN title ILIKE '%consult%' OR title ILIKE '%advisor%' THEN 'Consultant'
-         ELSE 'Other'
-       END AS title_pattern,
-       COUNT(*)::text AS cnt
-     FROM contacts
-     WHERE degree > 0 AND is_archived = FALSE AND title IS NOT NULL
-     GROUP BY title_pattern
-     ORDER BY COUNT(*) DESC
-     LIMIT 10`
+  const titleRes = await query<{ title: string }>(
+    `SELECT title FROM contacts
+     WHERE degree > 0 AND is_archived = FALSE AND title IS NOT NULL`
   );
-  const topRoles = titleRes.rows
-    .filter((r) => r.title_pattern !== "Other")
-    .map((r) => ({ role: r.title_pattern, count: parseInt(r.cnt, 10) }));
+  const rolePatterns = Object.keys(ROLE_GROUP_ALIASES);
+  const roleCounts = new Map<string, number>();
+  for (const { title } of titleRes.rows) {
+    const role = rolePatterns.find((pattern) => matchesRole(title, pattern));
+    if (role) roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+  }
+  const topRoles = [...roleCounts].sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([role, count]) => ({ role, count }));
 
   // Top 5 industries from company data
   const industryRes = await query<{ industry: string; cnt: string }>(
@@ -118,6 +115,22 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
      LIMIT 3`
   );
 
+  // Top niches the network already fits, via contact_icp_fits -> icp_profiles -> niche_profiles
+  const nicheRes = await query<{ niche: string; cnt: string }>(
+    `SELECT np.name AS niche, COUNT(*)::text AS cnt
+     FROM contact_icp_fits cif
+     JOIN icp_profiles ip ON ip.id = cif.icp_profile_id
+     JOIN niche_profiles np ON np.id = ip.niche_id
+     WHERE ip.niche_id IS NOT NULL
+     GROUP BY np.name
+     ORDER BY COUNT(*) DESC
+     LIMIT 10`
+  );
+  const topNiches = nicheRes.rows.map((r) => ({
+    niche: r.niche,
+    count: parseInt(r.cnt, 10),
+  }));
+
   // --- WEIGHTED MERGE ---
 
   // Roles: profile-derived targets (60%) + network top roles (40%)
@@ -133,7 +146,7 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
     0.4
   );
 
-  // Signals: owner skills + headline keywords (100% from profile)
+  // Signals: owner skills + headline/about keywords (100% from profile)
   const signals = [
     ...new Set([...headlineKeywords, ...aboutKeywords, ...skillSignals]),
   ].slice(0, 20);
@@ -148,12 +161,14 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
     companySizeRanges,
     profileSignals: {
       headlineKeywords,
+      aboutKeywords,
       skillSignals,
       positionIndustries,
     },
     networkSignals: {
       topRoles,
       topIndustries,
+      topNiches,
     },
   };
 
@@ -164,7 +179,12 @@ export async function computeNaturalICP(): Promise<NaturalICPResult | null> {
 }
 
 /**
- * Store or update the Natural ICP in the database
+ * Store or update the Natural ICP in the database.
+ *
+ * Identified by `icp_profiles.source = 'natural'` (added in migration
+ * 047-owner-profiles-metadata.sql). Older rows created before that column
+ * existed are matched and back-filled by the migration itself; this function
+ * only needs to look at `source` going forward.
  */
 async function upsertNaturalICP(icp: NaturalICPResult): Promise<void> {
   const criteria = {
@@ -174,22 +194,21 @@ async function upsertNaturalICP(icp: NaturalICPResult): Promise<void> {
     companySizeRanges: icp.companySizeRanges,
   };
 
-  // Check if natural ICP already exists
   const existing = await query<{ id: string }>(
-    `SELECT id FROM icp_profiles WHERE name = 'Natural ICP (auto-detected)' LIMIT 1`
+    `SELECT id FROM icp_profiles WHERE source = 'natural' LIMIT 1`
   );
 
   if (existing.rows.length > 0) {
     await query(
       `UPDATE icp_profiles
-       SET criteria = $1, updated_at = NOW()
+       SET criteria = $1, owner_baseline = TRUE, updated_at = NOW()
        WHERE id = $2`,
       [JSON.stringify(criteria), existing.rows[0].id]
     );
   } else {
     await query(
-      `INSERT INTO icp_profiles (name, description, criteria, is_active)
-       VALUES ($1, $2, $3, true)`,
+      `INSERT INTO icp_profiles (name, description, criteria, is_active, source, owner_baseline)
+       VALUES ($1, $2, $3, true, 'natural', TRUE)`,
       [
         "Natural ICP (auto-detected)",
         "Auto-generated from owner profile (60%) and network composition (40%)",

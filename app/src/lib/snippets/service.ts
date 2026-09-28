@@ -10,7 +10,7 @@
 // §8.1 step 8 and `.planning/research-tools-sprint/06-evidence-and-provenance.md`
 // §5. The response surfaces a warning rather than failing the API call.
 
-import { query } from '../db/client';
+import { query, withQuerySavepoint } from '../db/client';
 import { createCausalNode, createCausalEdge } from '../ecc/causal-graph/service';
 import { appendChainEntry } from '../ecc/exo-chain/service';
 import { snippetChainId, type SnippetTargetKind } from './chain';
@@ -206,6 +206,7 @@ export async function saveTextSnippet(
   const chainId = snippetChainId(input.targetKind, input.targetId);
   let chainSequence = -1;
   try {
+    await withQuerySavepoint('snippet_chain', async () => {
     // Look up the last sequence on this chain to maintain the Merkle link.
     const seqRes = await query<{ max: string | number | null; entry_hash: Buffer | null }>(
       `SELECT MAX(sequence) AS max FROM exo_chain_entries WHERE chain_id = $1`,
@@ -245,6 +246,7 @@ export async function saveTextSnippet(
       'extension'
     );
     chainSequence = appended.entry.sequence;
+    });
   } catch (err) {
     // Per spec: chain append is best-effort. Source of truth stays causal_nodes.
     warnings.push(
@@ -352,6 +354,7 @@ export async function saveImageSnippet(
   const chainId = snippetChainId(input.targetKind, input.targetId);
   let chainSequence = -1;
   try {
+    await withQuerySavepoint('snippet_chain', async () => {
     const seqRes = await query<{ max: string | number | null }>(
       `SELECT MAX(sequence) AS max FROM exo_chain_entries WHERE chain_id = $1`,
       [chainId]
@@ -393,6 +396,7 @@ export async function saveImageSnippet(
       'extension'
     );
     chainSequence = appended.entry.sequence;
+    });
   } catch (err) {
     warnings.push(
       `ExoChain append failed (non-fatal): ${

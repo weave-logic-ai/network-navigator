@@ -47,7 +47,8 @@ cd network-navigator
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
+openssl rand -hex 32  # copy output into LOCAL_OPERATOR_SECRET in .env
+# Set POSTGRES_PASSWORD in .env; keep .env out of Git.
 ```
 
 Required variables:
@@ -55,6 +56,8 @@ Required variables:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `POSTGRES_PASSWORD` | Yes | Database password |
+| `LOCAL_OPERATOR_SECRET` | Yes | Local dashboard unlock secret; generate with `openssl rand -hex 32` |
+| `EXTENSION_ALLOWED_ORIGINS` | For extension | Exact installed origin, `chrome-extension://` followed by the 32-letter ID shown in Chrome |
 | `POSTGRES_USER` | No | Database user (default: `ctox`) |
 | `POSTGRES_DB` | No | Database name (default: `ctox`) |
 | `ANTHROPIC_API_KEY` | No | For AI-powered outreach and message generation |
@@ -74,6 +77,10 @@ This starts the database (with automatic schema initialization) and the app. The
 - **App**: http://localhost:3750
 - **API health check**: http://localhost:3750/api/health
 
+Open http://localhost:3750/operator/unlock and enter the operator secret from
+your local `.env` before using the dashboard. The app and database bind to
+loopback for this local setup.
+
 ### 4. Start the docs site (optional)
 
 ```bash
@@ -89,12 +96,29 @@ npm run dev
 If you prefer running the app outside Docker:
 
 ```bash
+docker compose up -d db
 cd app
 npm install
+# Create the ignored app/.env.local as described below, then:
 npm run dev
 ```
 
-Make sure the database is running (`docker compose up db -d`) and `DATABASE_URL` in `.env` points to `localhost:5432`.
+The root `.env` supplies Docker Compose, but Next.js launched from `app/`
+loads `app/.env.local`, **not** the root file. Create `app/.env.local`
+with values from your root `.env` (do not commit either file):
+
+```dotenv
+DATABASE_URL=postgresql://ctox:<POSTGRES_PASSWORD>@127.0.0.1:5432/ctox
+LOCAL_OPERATOR_SECRET=<same secret as root .env>
+EXTENSION_ALLOWED_ORIGINS=chrome-extension://<exact installed 32-letter extension ID>
+```
+
+If you changed `POSTGRES_USER` or `POSTGRES_DB`, use those values in
+`DATABASE_URL`. Restart `npm run dev` after changing the secret or extension
+origin. The direct development server listens on `http://localhost:3000` by
+default; unlock at `http://localhost:3000/operator/unlock` before using it.
+The extension popup must point at this same app URL when pairing to the direct
+development server.
 
 ### Running tests
 
@@ -118,7 +142,16 @@ npm install
 npm run build
 ```
 
-Load the `browser/dist/` directory as an unpacked extension in Chrome (`chrome://extensions` > Developer mode > Load unpacked).
+Load the `browser/` directory as an unpacked extension in Chrome
+(`chrome://extensions` > Developer mode > Load unpacked). Copy the extension ID
+shown there into `.env` as `EXTENSION_ALLOWED_ORIGINS=chrome-extension://<id>`;
+the ID must match exactly. Run `docker compose up -d --force-recreate app` to
+apply the environment change. Then unlock the dashboard, open its **Extension**
+page, choose **Generate New Token**, and paste the full token into the extension
+popup. The full token is displayed once; a listed prefix cannot reconnect.
+If Chrome assigns a new ID after reinstalling, update the origin and recreate
+the app container again. If you revoke or lose a token, generate a new one and
+register it in the popup.
 
 ## Database
 

@@ -2,6 +2,7 @@
 
 import { WeightProfile } from './types';
 import * as scoringQueries from '../db/queries/scoring';
+import type { PoolClient } from 'pg';
 
 const DEFAULT_WEIGHTS: Record<string, number> = {
   icp_fit: 0.20,
@@ -18,11 +19,15 @@ const DEFAULT_WEIGHTS: Record<string, number> = {
 export class WeightManager {
   private profile: WeightProfile | null = null;
 
-  async loadProfile(profileName?: string): Promise<WeightProfile> {
+  constructor(profile?: WeightProfile) {
+    this.profile = profile ?? null;
+  }
+
+  async loadProfile(profileName?: string, client?: PoolClient): Promise<WeightProfile> {
     if (profileName) {
-      this.profile = await scoringQueries.getWeightProfileByName(profileName);
+      this.profile = await scoringQueries.getWeightProfileByName(profileName, client);
     } else {
-      this.profile = await scoringQueries.getDefaultWeightProfile();
+      this.profile = await scoringQueries.getDefaultWeightProfile(client);
     }
 
     if (!this.profile) {

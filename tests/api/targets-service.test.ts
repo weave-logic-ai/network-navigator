@@ -41,8 +41,10 @@ describe('targets/service', () => {
   });
 
   it('getResearchTargetState lazy-creates self-target + state row on first read', async () => {
-    const { query } = await import('@/lib/db/client');
+    const { query, transaction } = await import('@/lib/db/client');
     const mockQuery = query as jest.MockedFunction<typeof query>;
+    (transaction as jest.Mock).mockImplementation((fn: (client: { query: typeof query }) => Promise<unknown>) =>
+      fn({ query }));
 
     const calls: Array<{ sql: string; params: unknown[] }> = [];
     mockQuery.mockImplementation((sql: unknown, params?: unknown[]) => {
@@ -83,6 +85,13 @@ describe('targets/service', () => {
           primary_target_id: 'target-self-1',
           secondary_target_id: null,
           updated_at: 'x',
+        }]) as ReturnType<typeof query>;
+      }
+      if (text.includes('SELECT * FROM research_target_state')) {
+        return mockRows([{
+          tenant_id: 'tenant-1', user_id: 'owner-1',
+          primary_target_id: 'target-self-1', secondary_target_id: null,
+          revision: '0', last_used_lens_id: null, updated_at: 'x',
         }]) as ReturnType<typeof query>;
       }
       return mockRows([]) as ReturnType<typeof query>;

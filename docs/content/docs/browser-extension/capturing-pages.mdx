@@ -140,6 +140,27 @@ On successful submission, the server returns:
 
 If the app is unreachable, the capture is automatically added to the [offline queue](/docs/browser-extension/offline-mode).
 
+## Snip Mode (Snippet Capture)
+
+<Callout type="info">
+Snip mode is a **separate feature from full-page capture** described above. Full-page capture (the `Capture` button) is always available on supported LinkedIn page types. Snip mode gates a different widget — selecting a piece of text, an image, or a link from *any* approved page and saving it as a standalone snippet linked to a target.
+</Callout>
+
+As of 2026-08-20, snip mode is **opt-in per browser session**, not active by default. This matters if you're expecting the snippet widget to just work on an approved site — it won't until you turn it on:
+
+- Toggle it from the side panel's **Snip mode: Off / On** button, or the `Ctrl+Shift+S` (`Cmd+Shift+S` on Mac) global hotkey — registered as the `toggle-snip-mode` command in `manifest.json` and relayed to the side panel by the service worker (`chrome.commands` only fires in the background context).
+- State is stored in `chrome.storage.session`, so it survives closing and reopening the side panel within the same browser session, but **resets to off on browser restart**. This is deliberately different from the daily-capture counter above, which persists in `chrome.storage.local` across restarts.
+- While off, the snippet widget body stays hidden/minimized and a hint prompts you to turn it on; turning it off also resets any in-progress snippet card.
+- Granting a site permission (see **Approved sites** below) only controls *where* the snippet content script is allowed to run — it does not itself turn snip mode on. The two are independent, deliberate opt-ins (per ADR-028 clause 4).
+
+### Approved sites
+
+Snip mode's content script only runs on origins you've explicitly granted via the side panel's **Add this site** button (an `optional_host_permissions` request, since the manifest ships with `<all_urls>` as optional rather than a fixed host list). The side panel's **Approved sites** panel lists every granted origin with a **Revoke** button per row:
+
+- Revoking calls `chrome.permissions.remove` first (native state is authoritative), then removes the origin from the local storage mirror that drives the sidebar UI — so the UI never shows a site as approved when Chrome disagrees.
+- A permission revoked outside the extension (e.g. via `chrome://extensions`) is picked up automatically: the service worker reconciles the mirror against `chrome.permissions.getAll()` on startup, and a live `permissions.onRemoved`/`onAdded` listener keeps it in sync while running.
+- LinkedIn and the pre-approved research-source hosts (SEC EDGAR, Wayback Machine, major news outlets — see `host_permissions` in `manifest.json`) don't need this flow; **Approved sites** is specifically for the optional, user-granted hosts snip mode extends to.
+
 ## Related Documentation
 
 - [Extension API -- Capture](/docs/api-reference/extension) -- the `/api/extension/capture` endpoint reference

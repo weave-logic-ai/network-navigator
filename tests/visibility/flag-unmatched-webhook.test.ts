@@ -2,6 +2,9 @@
 // the DB insert succeeds, tolerates webhook failures silently, and returns
 // the dispatched flag in the response.
 
+import { NextRequest } from '../../app/node_modules/next/server';
+import { createOperatorSession, OPERATOR_COOKIE } from '@/lib/auth/operator-session';
+
 jest.mock('@/lib/db/client', () => ({
   query: jest.fn(),
 }));
@@ -26,14 +29,32 @@ jest.mock('@/lib/analytics/github-webhook', () => ({
 }));
 
 describe('POST /api/parser/flag-unmatched — webhook dispatch', () => {
+  const priorSecret = process.env.LOCAL_OPERATOR_SECRET;
+  let cookie: string;
+
+  beforeAll(async () => {
+    process.env.LOCAL_OPERATOR_SECRET = 'synthetic-operator-secret-for-parser-webhook-tests';
+    const session = await createOperatorSession();
+    if (!session) throw new Error('Synthetic operator session was not created');
+    cookie = `${OPERATOR_COOKIE}=${session}`;
+  });
+  afterAll(() => {
+    if (priorSecret === undefined) delete process.env.LOCAL_OPERATOR_SECRET;
+    else process.env.LOCAL_OPERATOR_SECRET = priorSecret;
+  });
   beforeEach(() => {
     jest.resetModules();
   });
 
-  function buildRequest(body: unknown): import('next/server').NextRequest {
-    return {
-      json: async () => body,
-    } as unknown as import('next/server').NextRequest;
+  function buildRequest(body: unknown): NextRequest {
+    return new NextRequest('http://localhost:3750/api/parser/flag-unmatched', {
+      method: 'POST',
+      headers: {
+        host: 'localhost:3750', origin: 'http://localhost:3750',
+        'sec-fetch-site': 'same-origin', 'content-type': 'application/json', cookie,
+      },
+      body: JSON.stringify(body),
+    });
   }
 
   async function seedTenant() {

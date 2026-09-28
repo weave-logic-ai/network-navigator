@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { listContacts, createContact } from '@/lib/db/queries/contacts';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -14,20 +15,30 @@ function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const { searchParams } = new URL(request.url);
 
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
-    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '20', 10)));
-    const sort = searchParams.get('sort') || 'created_at';
-    const order = searchParams.get('order') === 'asc' ? 'asc' : 'desc';
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '20', 10) || 20));
+    const sort = searchParams.get('sort_by') || searchParams.get('sort') || 'created_at';
+    const order = (searchParams.get('sort_order') || searchParams.get('order')) === 'asc' ? 'asc' : 'desc';
     const tier = searchParams.get('tier') || undefined;
+    const enrichmentStatus = searchParams.get('enrichment_status');
+    if (enrichmentStatus && !['has_data', 'no_data'].includes(enrichmentStatus)) {
+      return NextResponse.json({ error: 'Invalid enrichment_status' }, { status: 400 });
+    }
     const company = searchParams.get('company') || undefined;
     const search = searchParams.get('search') || undefined;
     const tagsParam = searchParams.get('tags');
     const tags = tagsParam ? tagsParam.split(',').map((t) => t.trim()) : undefined;
     const icpId = searchParams.get('icpId') || undefined;
     const nicheId = searchParams.get('nicheId') || undefined;
+    const campaignId = searchParams.get('campaign_id') || undefined;
+    if (campaignId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(campaignId)) {
+      return NextResponse.json({ error: 'Invalid campaign ID' }, { status: 400 });
+    }
 
     const result = await listContacts({
       page,
@@ -35,11 +46,13 @@ export async function GET(request: NextRequest) {
       sort,
       order: order as 'asc' | 'desc',
       tier,
+      enrichmentStatus: enrichmentStatus as 'has_data' | 'no_data' | undefined,
       company,
       tags,
       search,
       icpId,
       nicheId,
+      campaignId,
     });
 
     return NextResponse.json({

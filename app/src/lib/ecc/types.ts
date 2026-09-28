@@ -34,7 +34,12 @@ export type CausalEntityType =
   // Research-tools sprint (`.planning/research-tools-sprint/06-evidence-and-provenance.md` §3)
   | 'snippet'
   | 'source_record'
-  | 'target';
+  | 'target'
+  // ADR-032 field-override audit trail (`user_override` / `user_override_cleared`
+  // causal_nodes keyed on the entity the override applies to — see
+  // `lib/sources/field-override-service.ts`)
+  | 'contact'
+  | 'company';
 
 export interface CausalNode {
   id: string;

@@ -33,6 +33,7 @@ export class ApolloProvider implements EnrichmentProvider {
       };
     }
 
+    let requestStarted = false;
     try {
       const body: Record<string, string> = {};
       if (contact.linkedinUrl) body.linkedin_url = contact.linkedinUrl;
@@ -41,8 +42,10 @@ export class ApolloProvider implements EnrichmentProvider {
       if (contact.lastName) body.last_name = contact.lastName;
       if (contact.currentCompany) body.organization_name = contact.currentCompany;
 
+      requestStarted = true;
       const response = await fetch(`${this.baseUrl}/people/match`, {
         method: 'POST',
+        redirect: 'manual',
         headers: {
           'x-api-key': this.apiKey,
           'Content-Type': 'application/json',
@@ -56,8 +59,9 @@ export class ApolloProvider implements EnrichmentProvider {
           providerName: this.displayName,
           success: false,
           fields: [],
-          costCents: response.status === 404 ? 0 : this.costPerLookupCents,
+          costCents: 0,
           error: `Apollo API error: ${response.status}`,
+          errorCode: response.status === 404 ? undefined : 'provider_unknown_charge',
         };
       }
 
@@ -79,7 +83,9 @@ export class ApolloProvider implements EnrichmentProvider {
         success: false,
         fields: [],
         costCents: 0,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: requestStarted ? 'Provider request or response failed; charge requires reconciliation'
+          : error instanceof Error ? error.message : 'Unknown error',
+        errorCode: requestStarted ? 'provider_unknown_charge' : undefined,
       };
     }
   }

@@ -4,12 +4,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateExtensionToken } from '@/lib/auth/extension-auth';
 import { checkRateLimit } from './extension-rate-limiter';
+import { isAllowedExtensionOrigin, isOriginlessExtensionRead, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
 
 /**
  * Middleware that validates extension requests.
  * Checks:
  *   1. X-Extension-Token header present and valid
- *   2. Origin header matches chrome-extension:// pattern (or dev localhost)
+ *   2. Origin matches the extension allowlist, or this is a token-bearing
+ *      originless MV3 GET to a loopback extension endpoint
  *   3. Token is not revoked
  *
  * Returns 401 with JSON error body on failure.
@@ -21,7 +23,7 @@ export async function withExtensionAuth(
 ): Promise<NextResponse> {
   // 1. Validate origin
   const origin = req.headers.get('origin');
-  if (!validateOrigin(origin)) {
+  if (!trustedLocalOrigin(req) || !(validateOrigin(origin) || isOriginlessExtensionRead(req))) {
     return NextResponse.json(
       {
         error: 'INVALID_ORIGIN',
@@ -81,32 +83,8 @@ export async function withExtensionAuth(
 }
 
 /**
- * Validate Origin header for chrome-extension:// requests.
- * Also allows localhost origins for development.
+ * Validate the exact configured Chrome extension origin.
  */
 export function validateOrigin(origin: string | null): boolean {
-  // Allow requests with no origin (e.g., server-to-server, curl testing)
-  if (!origin) {
-    return true;
-  }
-
-  // Allow chrome-extension:// origins
-  if (origin.startsWith('chrome-extension://')) {
-    return true;
-  }
-
-  // Allow localhost in development
-  if (
-    process.env.NODE_ENV !== 'production' ||
-    process.env.ALLOW_DEV_ORIGIN === 'true'
-  ) {
-    if (
-      origin.startsWith('http://localhost:') ||
-      origin === 'http://localhost'
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  return !!origin && isAllowedExtensionOrigin(origin);
 }

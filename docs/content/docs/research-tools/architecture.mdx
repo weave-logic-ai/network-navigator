@@ -1,0 +1,91 @@
+---
+title: Architecture
+description: How the target model, evidence sources, causal-graph provenance, and parser telemetry fit together — and what actually runs today versus what the sprint planned.
+---
+
+Network Navigator started as a LinkedIn prospecting tool. The research-tools sprint turned it into a multi-source research platform: any contact, company, or the operator themself can become a **research target**, and evidence from several sources — LinkedIn captures, Wayback snapshots, SEC EDGAR filings, RSS/press-release feeds, news scrapers, corporate blogs, podcasts, and manually snipped text — all lands in the same provenance graph so it can be joined on one entity.
+
+This page describes the shape of that system: how the pieces relate, where the seams are, and which parts are live versus dormant. It intentionally stays architectural — the mechanics of any one feature (how a target is created, how a snippet is captured, how a source connector runs, how a lens is configured, how parser telemetry is recorded) belong to that feature's own page.
+
+<Callout type="warn">
+Every `RESEARCH_*` flag defaults to `false` in every environment, including production. None of what this page describes is enabled by default. See [Feature flags: the gate over everything](#feature-flags-the-gate-over-everything) below.
+</Callout>
+
+## The organizing entity: research targets
+
+Before the sprint, the app had one implicit subject: the owner. `research_targets` (`data/db/init/035-targets-schema.sql`) generalizes that into three kinds — `self`, `contact`, `company` — with a check constraint requiring exactly one of `owner_id`, `contact_id`, or `company_id` to be set. A target row is created on demand by `app/src/lib/targets/service.ts` the first time an entity is chosen as a target; the table is not backfilled for every contact or company in the database, so in a typical tenant it holds far fewer rows than `contacts` or `companies`.
+
+`research_target_state` persists a primary and optional secondary target per `(tenant_id, user_id)`, so switching targets survives a tab close and reload (ADR-027). `target_history` logs every switch for the breadcrumb trail, and `research_lenses` saves a named UI configuration — which panels, which node kinds, which target pair — bound to a primary/secondary target. Every downstream feature that's target-aware (scoring, ICP fit, ECC provenance panels, graph rendering) scopes its queries against whichever target is current, rather than against the old implicit owner.
+
+The pre-existing `owner_profiles` table wasn't replaced — a target of `kind='self'` points at it via `owner_id`, so existing owner-scoped code keeps working while newer code reads through the target abstraction.
+
+### The per-user toggle that isn't wired up
+
+`035-targets-schema.sql` also adds `owner_profiles.research_mode_enabled`, a boolean meant to let a user opt into the research-tools UI individually (ADR-033, April 2026). It exists as a column, and nothing reads it — zero functional reads anywhere in `app/src`, verified by grep. Toggling it today has no effect on any request.
+
+ADR-033 was superseded by **ADR-035** (2026-08-19) once an audit found the gap. The reason is structural, not an oversight: the app has no authentication. Every route resolves the current user as `owner_profiles WHERE is_current = TRUE LIMIT 1` — a singleton — so there's no per-request identity for a per-user flag to key off. ADR-035 ratifies what the code actually does: gating is a **per-deployment environment flag**, not a per-user setting. `research_mode_enabled` stays in the schema as the natural home for a real per-user gate once authentication exists, but it's dormant, not broken, and nothing should start reading it until there's a user identity to read it for.
+
+## Evidence: snippets and sources
+
+Two mechanisms feed evidence into the graph, and they're deliberately asymmetric — one is push (a user captures something), the other is pull (a connector fetches something).
+
+**Snippets** (`app/src/lib/snippets/`) are user-captured fragments — selected text, eventually images and links — pulled from any page the user has granted extension access to, tagged, and optionally linked to people mentioned inside the fragment. A snippet is not a dedicated table (ADR-027 in the original sprint numbering, since renumbered in the `docs/adr/` set): it's a `causal_nodes` row with `entity_type='snippet'`, with the actual byte content in `snippet_blobs` (deduped by `sha256`, capped at 1 MB) and tags in `snippet_tags`. Saving a snippet is one write path in `app/src/lib/snippets/service.ts`: insert the causal node, insert a `mentions` edge per linked contact, insert an `evidence_for` edge to the target, and best-effort append to the ExoChain.
+
+**Source records** (`app/src/lib/sources/`) are the canonical, deduplicated row for anything fetched once from an external system — a Wayback snapshot, an EDGAR filing, an RSS item, a news article, a podcast episode. `source_records` dedupes on `(tenant_id, source_type, source_id)`; every connector under `app/src/lib/sources/connectors/` (`wayback.ts`, `edgar.ts`, `rss.ts`, `google-news.ts`, `corporate-blog.ts`, `podcast.ts`, plus five site-specific scrapers under `news/`) routes through that single table rather than inventing its own storage.
+
+Both mechanisms converge on the same substrate below — a snippet and a source record are both, ultimately, evidence attached to a target through the causal graph.
+
+### `evidence_for` points at the target, not the person
+
+One detail worth being precise about: `resolveTargetNodeId` in `app/src/lib/snippets/service.ts` resolves a snippet's `evidence_for` edge to the **target's** causal node (`entity_type='target'`), lazily creating a `target.created` node if none exists yet. It does not point at a contact node directly. If a snippet mentions three people but the target is the company they work for, the evidence edge is `snippet -> company target`, with separate `mentions` edges to each contact. A provenance query that expects to walk from a *contact* to its evidence has to go through whichever target that contact was captured under — there's no direct `snippet -> contact` evidence edge in the current model.
+
+## The provenance substrate: causal graph and ExoChain
+
+Snippets and sources don't get their own graph engine — they plug into the ECC (causal-graph) machinery under `app/src/lib/ecc/` that was built for scoring provenance: `causal_nodes`, `causal_edges`, and `exo_chain_entries`. This was a deliberate constraint going in ("do not reinvent ECC") rather than something discovered after the fact.
+
+- `causal_nodes` gained new `entity_type` values (`snippet`, `source_record`, `target`) alongside the pre-existing scoring-run node types.
+- `exo_chain_entries` gives snippets and source ingestion tamper-evident, hash-chained provenance the same way scoring runs already had it. Chain scope is per-target for snippets (`snippet:<kind>:<target_id>`) and per-tenant for sources, per ADR-029 (renumbered from the sprint's original ADR-032).
+- Chain appends are best-effort and parallel to the primary DB write — if the ExoChain write fails, the snippet or source row is still the system of record, and the response surfaces a warning rather than failing the call.
+
+One pre-existing bug this substrate depended on getting fixed: `app/src/lib/ecc/causal-graph/scoring-adapter.ts` used to hardcode `DEFAULT_TENANT_ID='default'`, tracked as a P0 in the stub inventory. It's now resolved through a three-step fallback — caller override, then the tenant on the referenced target row, then the default tenant for single-tenant local mode — so causal nodes written during target-scoped scoring land under the correct tenant instead of a shared literal.
+
+### Trust weighting is effectively EDGAR-only
+
+ADR-030 defines a composite trust weight for reconciling disagreeing sources: `final_weight = category_default × per_item_multiplier`, materialized in `source_field_values.final_weight` — a Postgres `GENERATED ALWAYS AS (...) STORED` column, computed once at write time. In practice, only two code paths write `source_field_values` rows at all: `edgar.ts`, which derives its multiplier from a filing-recency curve, and a narrow podcast-transcript upload endpoint that writes a hardcoded `1.0` multiplier for user-supplied transcripts. Every other connector — `wayback.ts` (snapshot-age decay), `rss.ts` (cross-feed republication count), and the news-site scrapers under `news/` (a `viewCount` heuristic) — computes a per-item multiplier but stores it only in `source_records.metadata`, a JSONB column nothing reads for conflict resolution. So today, if two sources disagree on a field, EDGAR's value is the only one that actually gets a `final_weight`-driven trust ranking; everything else's computed multiplier is inert. `final_weight` also doesn't move after ingestion the way the original design intended — it's frozen at insert time, with the backfill job to recompute it after weight retuning still unbuilt.
+
+## The quality signal: parser telemetry
+
+Parser telemetry (`app/src/lib/parser/telemetry.ts`, `unmatched-dom.ts`) is the mechanism that makes parsing observable at capture time rather than discoverable in a weekly audit. Every extracted field from a parse gets a `parse_field_outcomes` row: which field, whether it produced a value, its confidence, and which extraction path won (`selector`, `heuristic`, `content-heuristic`, `title-tag`, `url-slug`, `fallback`). Separately, `unmatched-dom.ts` walks the parsed document a second time looking for text-bearing DOM regions no selector or heuristic touched, so a CSS change on the source site shows up as a named DOM path rather than a silent drop.
+
+Both are gated on `RESEARCH_FLAGS.parserTelemetry` and, like the ExoChain writes, are best-effort — a telemetry failure never blocks a parse. This is the feedback loop the rest of the platform depends on for trust: snippets and sources add breadth of evidence, but parser telemetry is what tells you whether the LinkedIn-derived evidence in that graph is still accurate.
+
+## Feature flags: the gate over everything
+
+Every research-tools surface reads `RESEARCH_FLAGS` from `app/src/lib/config/research-flags.ts`, which has 11 individual environment variables feeding it: a master flag per workstream (`RESEARCH_TARGETS`, `RESEARCH_SNIPPETS`, `RESEARCH_PARSER_TELEMETRY`, `RESEARCH_SOURCES`), a master switch plus five per-site sub-flags for the news connectors (`RESEARCH_CONNECTOR_NEWS`, `RESEARCH_CONNECTOR_NEWS_WSJ`, `_BLOOMBERG`, `_REUTERS`, `_TECHCRUNCH`, `_CNBC`), and one for podcasts (`RESEARCH_CONNECTOR_PODCAST`). All 11 default `false`. Every adapter checks the relevant flag on each call and short-circuits to pre-sprint, pass-through behavior when it's off — turning every flag off restores prior behavior exactly, and the new tables sit empty and harmless.
+
+As of this writing, all 11 flags are at least reachable through `docker-compose.yml` — a fix from a prior state where only four (`TARGETS`, `SNIPPETS`, `PARSER_TELEMETRY`, `SOURCES`) were forwarded, which meant the news and podcast connectors were structurally unreachable in local dev even by an operator who wanted to try them. Being reachable isn't the same as being on: every flag still needs to be explicitly set to `true` to activate anything.
+
+## Where the seams are
+
+The module layout mirrors the workstream boundaries closely enough that "which file touches this" and "which flag gates this" mostly line up:
+
+```
+app/src/lib/
+  parser/            existing LinkedIn parsing, extended with telemetry + unmatched-dom detection
+  snippets/          user-captured evidence: service, blob storage, PII scrubbing, tag suggestion
+  targets/           the target model: service, history, lenses, breadcrumb formatting
+  sources/           external connectors, dedup, rate limiting, robots.txt respect, trust-weight inputs
+  ecc/
+    causal-graph/    the pre-existing provenance substrate — nodes, edges, scoring adapter
+    exo-chain/       tamper-evident hash-chained append log
+```
+
+Snippets and sources are the two places evidence *enters* the graph; `ecc/causal-graph` and `ecc/exo-chain` are where it's *stored* and made verifiable; `targets` is what evidence is organized *around*; `parser` is what tells you whether the LinkedIn-sourced evidence in that graph is trustworthy right now. Each of those boundaries is also a flag boundary — `RESEARCH_SNIPPETS`, `RESEARCH_SOURCES`, `RESEARCH_TARGETS`, `RESEARCH_PARSER_TELEMETRY` respectively — so a given seam can be tested or rolled back independently of the others, with the causal-graph and ExoChain machinery underneath treated as always-available infrastructure rather than a fifth flagged surface.
+
+## What's not built yet
+
+- **Evidence-aware scoring** (a scoring dimension derived from `evidence_for` edge counts) is not implemented. It shipped as an explicitly optional, cuttable phase in the delivery plan and is currently blocked on a product decision about what "evidence depth" should mean for a target versus a contact, given that `evidence_for` edges point at targets rather than contacts.
+- **Trust-weighted conflict resolution** works end-to-end only for EDGAR-sourced fields, as described above — the composite-weight design exists in schema and in five connectors' multiplier calculations, but only EDGAR's and a narrow podcast-upload path's multipliers ever reach a `final_weight` that anything queries.
+- **Per-user research-mode gating** is deferred, not built, pending authentication landing in the app.
+
+If you're reading the original sprint planning documents under `.planning/research-tools-sprint/`, treat this page — and the code — as the more current source where they disagree. Both directions of drift (plan describing something unbuilt, and plan describing something superseded by a later decision) have been found in this sprint's history.

@@ -69,6 +69,59 @@ describe('dispatchImpulse', () => {
     await expect(dispatchImpulse('missing')).rejects.toThrow('Impulse not found');
   });
 
+  it('warns loudly when no handler is registered for the impulse type', async () => {
+    // Regression guard: an impulse with zero registered handlers returns
+    // handlersExecuted: 0, which is indistinguishable from success. That is
+    // how ECC_IMPULSES=true silently produced zero tasks while
+    // impulse_handlers went unseeded. The dispatch must say so out loud.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockQuery.mockReturnValueOnce(mockRows([impulseRow()])); // load impulse
+      mockQuery.mockReturnValueOnce(mockRows([])); // load handlers -> NONE
+
+      const result = await dispatchImpulse('imp-1');
+
+      expect(result.handlersExecuted).toBe(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toMatch(/\[ecc\/impulses\]/);
+      expect(msg).toMatch(/No enabled handler registered/);
+      expect(msg).toMatch(/tier_changed/); // names the impulse type
+      expect(msg).toMatch(/048-seed-impulse-handlers\.sql/); // points at the fix
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps a scored impulse pending when no handler is registered', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockQuery.mockReturnValueOnce(mockRows([impulseRow({ score_revision: 1 })]));
+      mockQuery.mockReturnValueOnce(mockRows([]));
+      const result = await dispatchImpulse('imp-1');
+      expect(result.results[0]).toMatchObject({ status: 'failed',
+        result: { error: 'no_enabled_handler' } });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when a handler is registered', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockQuery.mockReturnValueOnce(mockRows([impulseRow()]));
+      mockQuery.mockReturnValueOnce(mockRows([handlerRow()]));
+      mockQuery.mockReturnValueOnce(mockRows([])); // ack insert
+      (executeTaskGenerator as jest.Mock).mockResolvedValueOnce({ tasksCreated: 1 });
+
+      await dispatchImpulse('imp-1');
+
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('routes tier_changed to task_generator and records success ack', async () => {
     mockQuery.mockReturnValueOnce(mockRows([impulseRow()])); // load impulse
     mockQuery.mockReturnValueOnce(mockRows([handlerRow()])); // load handlers
@@ -158,5 +211,58 @@ describe('dispatchImpulse', () => {
     expect(executeWebhook).toHaveBeenCalledTimes(1);
     expect(result.results[0].status).toBe('success');
     expect(result.results[0].result).toEqual({ dispatched: true, status: 200, durationMs: 12 });
+    expect(executeWebhook).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'imp-1:h-1');
+  });
+
+  it('replays only unfinished handlers after a partial scored dispatch', async () => {
+    const successful = new Set<string>();
+    mockQuery.mockImplementation(async (sql, params) => {
+      const statement = String(sql);
+      if (statement.includes('SELECT * FROM impulses')) return mockRows([impulseRow({ score_revision: 1 })]);
+      if (statement.includes('SELECT * FROM impulse_handlers')) return mockRows([
+        handlerRow({ id: 'h-task' }), handlerRow({ id: 'h-webhook', handler_type: 'webhook' }),
+      ]);
+      if (statement.includes('SELECT 1 FROM impulse_acks')) return mockRows(
+        successful.has(String(params?.[1])) ? [{ '?column?': 1 }] : []
+      );
+      if (statement.includes('INSERT INTO impulse_acks') && statement.includes("'success'")) {
+        successful.add(String(params?.[1]));
+      }
+      return mockRows([]);
+    });
+    (executeTaskGenerator as jest.Mock).mockResolvedValue({ tasksCreated: 1 });
+    (executeWebhook as jest.Mock)
+      .mockResolvedValueOnce({ dispatched: false, reason: 'http_503' })
+      .mockResolvedValueOnce({ dispatched: true, status: 200 });
+
+    const first = await dispatchImpulse('imp-1');
+    expect(first.results.map(result => result.status)).toEqual(['success', 'failed']);
+    expect(successful.has('h-task')).toBe(true);
+    const retry = await dispatchImpulse('imp-1');
+    expect(retry.results.map(result => result.status)).toEqual(['skipped', 'success']);
+    expect(executeTaskGenerator).toHaveBeenCalledTimes(1);
+    expect(executeWebhook).toHaveBeenCalledTimes(2);
+    expect((executeWebhook as jest.Mock).mock.calls.map(call => call[2]))
+      .toEqual(['imp-1:h-webhook', 'imp-1:h-webhook']);
+  });
+
+  it('reuses the delivery key when a process loses its success ack after delivery', async () => {
+    let failAck = true;
+    mockQuery.mockImplementation(async sql => {
+      const statement = String(sql);
+      if (statement.includes('SELECT * FROM impulses')) return mockRows([impulseRow({ score_revision: 2 })]);
+      if (statement.includes('SELECT * FROM impulse_handlers')) return mockRows([handlerRow({ handler_type: 'webhook' })]);
+      if (statement.includes('SELECT 1 FROM impulse_acks')) return mockRows([]);
+      if (statement.includes('INSERT INTO impulse_acks') && statement.includes("'success'") && failAck) {
+        failAck = false;
+        throw new Error('connection lost before success ack');
+      }
+      return mockRows([]);
+    });
+    (executeWebhook as jest.Mock).mockResolvedValue({ dispatched: true, status: 200 });
+    expect((await dispatchImpulse('imp-1')).results[0].status).toBe('failed');
+    expect((await dispatchImpulse('imp-1')).results[0].status).toBe('success');
+    expect((executeWebhook as jest.Mock).mock.calls.map(call => call[2]))
+      .toEqual(['imp-1:h-1', 'imp-1:h-1']);
   });
 });

@@ -1,11 +1,15 @@
 ---
 title: Vertical Templates
-description: Pre-built ICP configurations for SaaS, recruiting, consulting, cybersecurity, financial advisory, marketing, and more.
+description: ICP criteria patterns for SaaS, recruiting, consulting, cybersecurity, financial advisory, marketing, and more, in the v2 ICP JSON shape.
 ---
 
 # Vertical Templates
 
-The agent ships with researched ICP configurations for 15+ industry verticals. Each template provides complete `icp-config.json` settings ready for use with `configure.mjs generate --json`.
+Researched starting points for ICP criteria across common verticals. Each template maps to a `POST /api/icps` request body (or a `configure.mjs generate` entry) using the v2 `criteria` shape: `roles`, `industries`, `signals`, `companySizeRanges`.
+
+<Callout type="warn">
+The retired v1 config format supported per-vertical scoring-weight overrides (`roleWeight`, `industryWeight`, `signalWeight`, `companySizeWeight`) that tuned how heavily each criterion counted toward ICP fit for a given profile. The v2 `icp_fit` scorer has no such per-criterion weighting -- it scores each present criterion (roles, industries, signals, company size, location, niche keywords, min connections) as an unweighted average of matched-vs-checked. The only weight you can tune in v2 is the single global `icp_fit` weight in the 9-dimension composite score (see [Scoring Pipeline](/docs/claude-agent/scoring-pipeline)). The vertical-specific weight recommendations from v1 do not carry forward -- what does carry forward is which roles/industries/signals to include.
+</Callout>
 
 ## Cross-Vertical Patterns
 
@@ -40,13 +44,15 @@ These LinkedIn profile patterns indicate high engagement regardless of industry:
 | $100K-$500K | C-suite, President | VP, SVP | Director, Manager |
 | > $500K | CEO, Board, CFO | C-suite, SVP | VP, Director |
 
+Put all of these roles into a single `criteria.roles` array (v2 has no separate high/medium/low priority tiers) -- the scoring engine treats role match as present/absent per contact, not weighted by seniority.
+
 ## SaaS Sales Rep
 
 An Account Executive or SDR selling a horizontal B2B SaaS product to mid-market and enterprise buyers.
 
-**Recommended weights:** `roleWeight: 0.30, industryWeight: 0.25, signalWeight: 0.30, companySizeWeight: 0.15`
+**Key roles:** CIO, CTO, VP IT, Director IT, Head of RevOps
 
-**Key profiles:** Enterprise Software Buyer (CIO/CTO/VP IT), Mid-Market Champion (Director IT/Head of RevOps)
+**Key industries:** saas, software, enterprise-it
 
 **Key signals:** digital transformation, cloud migration, evaluating solutions, RFP, vendor selection, tech stack consolidation
 
@@ -56,9 +62,9 @@ An Account Executive or SDR selling a horizontal B2B SaaS product to mid-market 
 
 A retained or contingency recruiter placing C-suite and VP-level candidates. Dual ICP: candidate sourcing and client development.
 
-**Recommended weights:** `roleWeight: 0.40, industryWeight: 0.15, signalWeight: 0.35, companySizeWeight: 0.10`
+**Key roles:** CEO, CHRO, CPO, board member, executive coach
 
-**Key profiles:** Hiring Authority (CEO/CHRO/CPO), Passive Candidate (C-suite executives), Referral Source (board members, executive coaches)
+**Key industries:** varies by client vertical
 
 **Key signals:** hiring, growing team, scaling, open to opportunities, succession planning
 
@@ -68,9 +74,9 @@ A retained or contingency recruiter placing C-suite and VP-level candidates. Dua
 
 A partner or senior consultant selling strategy, operations, or digital transformation advisory.
 
-**Recommended weights:** `roleWeight: 0.30, industryWeight: 0.25, signalWeight: 0.30, companySizeWeight: 0.15`
+**Key roles:** CEO, COO, Chief Strategy Officer, CIO, CDO, Chief Data Officer
 
-**Key profiles:** Transformation Sponsor (CEO/COO/Chief Strategy), Digital Strategy Buyer (CIO/CDO/Chief Data)
+**Key industries:** varies -- typically enterprise/mid-market across sectors
 
 **Key signals:** transformation, restructuring, merger, operating model, strategic review, cost optimization
 
@@ -80,9 +86,9 @@ A partner or senior consultant selling strategy, operations, or digital transfor
 
 A virtual CISO or managed security provider targeting mid-market companies without a full-time CISO.
 
-**Recommended weights:** `roleWeight: 0.30, industryWeight: 0.25, signalWeight: 0.30, companySizeWeight: 0.15`
+**Key roles:** CISO, CIO, CTO, CEO, Founder (for no-CISO companies)
 
-**Key profiles:** Security Budget Holder (CISO/CIO/CTO), No-CISO Company (CEO/Founder of growing startups)
+**Key industries:** fintech, healthtech, saas -- regulated or compliance-sensitive sectors
 
 **Key signals:** compliance, SOC 2, ISO 27001, NIST, zero trust, incident response, cyber insurance
 
@@ -92,9 +98,9 @@ A virtual CISO or managed security provider targeting mid-market companies witho
 
 A wealth manager prospecting for HNW individuals, business owners approaching exits, and Centers of Influence (estate attorneys, CPAs).
 
-**Recommended weights:** `roleWeight: 0.30, industryWeight: 0.20, signalWeight: 0.30, companySizeWeight: 0.20`
+**Key roles:** CEO, Founder, Owner, Estate Attorney, CPA, Business Broker
 
-**Key profiles:** HNW Prospect (CEO/Founder/Owner), Center of Influence (Estate Attorney/CPA/Business Broker)
+**Key industries:** varies -- prospecting is role/event-driven more than industry-driven
 
 **Key signals:** exited, acquired, sold my company, liquidity event, retirement, angel investor, succession planning
 
@@ -104,26 +110,13 @@ A wealth manager prospecting for HNW individuals, business owners approaching ex
 
 A 50-200 person marketing agency selling retainer services to B2C and B2B brands.
 
-**Recommended weights:** `roleWeight: 0.30, industryWeight: 0.25, signalWeight: 0.30, companySizeWeight: 0.15`
+**Key roles:** CMO, VP Marketing, Head of Growth, DTC/Ecommerce leader
 
-**Key profiles:** CMO/VP Marketing (senior marketing leaders), DTC/E-commerce Leader (digitally native brand founders)
+**Key industries:** consumer goods, ecommerce, saas
 
 **Key signals:** agency search, RFP, rebranding, product launch, customer acquisition, agency of record
 
 **Key niches:** cmo-brand, dtc-ecommerce, cpg-brands
-
-## Scoring Weight Recommendations
-
-| Vertical | roleWeight | industryWeight | signalWeight | companySizeWeight | Rationale |
-|----------|-----------|---------------|-------------|-------------------|-----------|
-| SaaS Sales | 0.30 | 0.25 | 0.30 | 0.15 | Signals (eval/RFP) are strong predictors |
-| Recruiter | 0.40 | 0.15 | 0.35 | 0.10 | Role + "hiring" signals dominate |
-| Cybersecurity | 0.30 | 0.25 | 0.30 | 0.15 | Compliance signals as important as role |
-| Financial Advisor | 0.30 | 0.20 | 0.30 | 0.20 | Company size proxies for wealth |
-| Healthcare IT | 0.35 | 0.30 | 0.25 | 0.10 | Industry is critical (narrow vertical) |
-| Marketing Agency | 0.30 | 0.25 | 0.30 | 0.15 | Balanced across all dimensions |
-| CRE Broker | 0.25 | 0.30 | 0.30 | 0.15 | Industry-heavy (CRE is vertical-specific) |
-| Manufacturing | 0.30 | 0.30 | 0.25 | 0.15 | Industry matters (niche vertical) |
 
 ## LinkedIn Profile Signal Taxonomy
 
@@ -149,4 +142,26 @@ Signals that predict engagement and openness to outreach, organized by detection
 - Creator mode: responsive to DMs
 - High mutual count: warm relationship potential
 
-For the full set of 15 vertical configurations with complete ICP JSON, see the agent source at `agent/network-navigator/docs/icp-vertical-research.md`.
+## Example: Assembling a Vertical Template
+
+```bash
+node scripts/configure.mjs generate --json '{
+  "profiles": {
+    "vciso": {
+      "name": "vCISO Services",
+      "description": "Virtual CISO for mid-market companies without a full-time security lead",
+      "criteria": {
+        "roles": ["CISO", "CIO", "CTO", "CEO", "Founder"],
+        "industries": ["fintech", "healthtech", "saas"],
+        "signals": ["compliance", "SOC 2", "ISO 27001", "NIST", "zero trust", "incident response", "cyber insurance"],
+        "companySizeRanges": ["51-200", "201-500"]
+      }
+    }
+  },
+  "niches": {
+    "infosec": { "name": "InfoSec", "keywords": ["CISO", "security", "compliance"] }
+  }
+}'
+```
+
+For the full set of 15 vertical configurations with additional signal research, see the source research document at `docs/icp-vertical-research.md`.

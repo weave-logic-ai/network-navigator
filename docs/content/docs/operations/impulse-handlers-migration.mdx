@@ -1,0 +1,127 @@
+---
+title: Impulse Handlers Migration (048)
+description: Why impulse_handlers needed seeding, how to apply migration 048 to an existing database by hand, and how to verify it worked.
+---
+
+# Impulse Handlers Migration (048)
+
+**What you will learn:** Why `data/db/init/048-seed-impulse-handlers.sql` exists, how to apply it manually to a database that already existed before this migration was added, how to verify the seed took effect, and what it deliberately leaves unseeded.
+
+## What 048 Does and Why
+
+SQL scripts under `data/db/init/` are Postgres **init scripts** — Docker Compose mounts that directory at `/docker-entrypoint-initdb.d` (see `docker-compose.yml`), and Postgres only executes them the very first time a database is initialized, when its data directory is empty. A fresh database picks up every script, including `048`, automatically. An **existing** database does not re-run any of them, `048` included, and nothing prompts you to apply it — it just silently doesn't happen.
+
+Migration `027-ecc-impulses.sql` created the `impulse_handlers` table, and `dispatchImpulse()` (`app/src/lib/ecc/impulses/dispatcher.ts`) routes an impulse to handlers with a plain lookup:
+
+```sql
+SELECT * FROM impulse_handlers
+WHERE tenant_id = $1 AND impulse_type = $2 AND enabled = true
+ORDER BY priority ASC
+```
+
+Nothing in the codebase ever inserted a row into that table. The practical effect: setting `ECC_IMPULSES=true` made the scoring pipeline emit impulses correctly, and `dispatchImpulse()` dispatched each one to zero handlers — no error, no tasks. Worse, `task-triggers.ts` early-returns under that same flag on the assumption the impulse path has taken over, so enabling `ECC_IMPULSES` without also seeding `impulse_handlers` silently turned off task generation altogether.
+
+`048-seed-impulse-handlers.sql` fixes this by inserting `task_generator` handler rows for the three impulse types the scoring pipeline actually emits (`emitScoringImpulses()` in `app/src/lib/ecc/impulses/scoring-adapter.ts`): `tier_changed`, `persona_assigned`, `score_computed`. This restores parity with the legacy inline task-generation path — it is a stability fix, not new behavior.
+
+<Callout type="warn">
+`048` only runs automatically on a **fresh** database (empty `data/drives/db/` volume). If your database already existed before this migration was added to the repo, you must apply it by hand — see below.
+</Callout>
+
+## Applying It Manually to an Existing Database
+
+The service name below comes from `docker-compose.yml` at the repo root. **The database name and user are NOT hardcoded here on purpose** — `.env` overrides the compose defaults, so the commands read them from the running container's own environment rather than assuming a value: the Postgres service is `db` (container name `ctox-db`), and `POSTGRES_USER`/`POSTGRES_DB` both default to `ctox` (overridable via `.env`).
+
+Run one of the following from the repository root.
+
+### Using `docker compose exec`
+
+```bash title="Terminal"
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < data/db/init/048-seed-impulse-handlers.sql
+```
+
+`-T` disables pseudo-TTY allocation, which is required when piping a file into `exec` over stdin.
+
+### Using plain `psql`
+
+If you have `psql` installed locally and the database port (`5432` by default) is reachable from your host:
+
+```bash title="Terminal"
+# Source .env first — these values are set there and OVERRIDE the
+# docker-compose.yml defaults. Do not assume the compose defaults apply:
+# on a deployment where .env sets POSTGRES_USER, using the compose
+# fallback instead will fail with `role "..." does not exist`.
+set -a && . ./.env && set +a
+
+PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -p 5432 \
+  -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -f data/db/init/048-seed-impulse-handlers.sql
+```
+
+Either form applies the same idempotent `INSERT ... WHERE NOT EXISTS` statement described below.
+
+## Verifying It Worked
+
+Query `impulse_handlers` for the `default` tenant and confirm the three `task_generator` rows are present:
+
+```bash title="Terminal"
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' -c "
+  SELECT t.slug AS tenant, h.impulse_type, h.handler_type, h.enabled, h.priority
+  FROM impulse_handlers h
+  JOIN tenants t ON t.id = h.tenant_id
+  WHERE t.slug = 'default'
+  ORDER BY h.impulse_type;
+"
+```
+
+Expected output — exactly three rows, all `task_generator`, all `enabled = t`:
+
+```
+ tenant  |  impulse_type    |  handler_type  | enabled | priority
+---------+-------------------+-----------------+---------+----------
+ default | persona_assigned | task_generator | t       |        0
+ default | score_computed   | task_generator | t       |        0
+ default | tier_changed     | task_generator | t       |        0
+(3 rows)
+```
+
+If the query returns zero rows, the migration has not been applied yet — re-run the command from [Applying It Manually](#applying-it-manually-to-an-existing-database) above.
+
+## Safety: Re-Running Is Fine
+
+`048` is idempotent, but not via `ON CONFLICT` — `impulse_handlers` has no unique constraint on `(tenant_id, impulse_type, handler_type)` for `ON CONFLICT` to target. Instead, the `INSERT` is guarded by a `WHERE NOT EXISTS` subquery that checks for a matching row before inserting. Running the script against a database that already has these rows is a no-op; it will not create duplicates. This means you can safely re-run the manual-apply command above if you're ever unsure whether it already ran.
+
+## What Is Deliberately NOT Seeded
+
+`048` seeds only `task_generator` handlers for the three types the scoring pipeline emits. Three other handler types that exist in the codebase are intentionally left unseeded:
+
+| Handler type | Why it's excluded |
+|---|---|
+| `notification` | Its `email` and `webhook` channels currently return `{ sent: false, reason: 'not_implemented' }`. Seeding it today would register a handler that silently does nothing useful. It will be wired up as separate work. |
+| `campaign_enroller` | Enrolling contacts into campaigns is a real behavior change for a tenant's data, not parity restoration with the pre-impulse behavior. Turning it on is a product decision, not a migration's job. |
+| `webhook` | Fires outbound HTTP to a configured URL. Outbound calls to arbitrary endpoints must be an explicit, deliberate opt-in — never a migration default. |
+
+If you want any of these, insert the corresponding `impulse_handlers` row yourself (with a `config` payload appropriate to that handler type) rather than assuming `048` covers it.
+
+## New Tenants Do Not Inherit These Rows
+
+The seed is scoped to the tenant with `slug = 'default'` — the single-user local tenant created by `020-tenant-schema.sql`. It does not touch any other tenant, including ones created after `048` ran. If you provision a new tenant and want impulse-driven task generation for it, you need to insert its `impulse_handlers` rows explicitly. This is consistent with the `tenant_id` column on `impulse_handlers`: registration is per-tenant and opt-in, not inherited automatically.
+
+## Reading the `dispatchImpulse` Warning
+
+`dispatchImpulse()` now logs a warning whenever it finds zero enabled handlers for an impulse, instead of silently succeeding with `handlersExecuted: 0`:
+
+```
+[ecc/impulses] No enabled handler registered for impulse_type "<type>"
+(tenant <tenantId>, impulse <impulseId>). The impulse was recorded but
+nothing acted on it. Register a row in impulse_handlers for this tenant
+and impulse type — see data/db/init/048-seed-impulse-handlers.sql.
+```
+
+If you see this in application logs, it means:
+
+1. `ECC_IMPULSES=true` is set, and an impulse of the named type was emitted for the named tenant.
+2. No matching, enabled row exists in `impulse_handlers` for that `(tenant_id, impulse_type)` pair.
+3. The impulse itself was still recorded in the `impulses` table, but nothing consumed it — no task, notification, or other side effect happened.
+
+The most common cause is exactly the scenario this page covers: `048` hasn't been applied to this database yet. Apply it per [Applying It Manually](#applying-it-manually-to-an-existing-database) above, then confirm with the verification query. If the warning names an impulse type outside the three seeded by `048` (`tier_changed`, `persona_assigned`, `score_computed`), that handler was never meant to be seeded automatically — see [What Is Deliberately NOT Seeded](#what-is-deliberately-not-seeded) and register it manually with intent.

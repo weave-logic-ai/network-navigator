@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { profileWebsite } from "@/lib/import/profile-website";
 import {
   Briefcase,
   GraduationCap,
@@ -60,9 +61,9 @@ interface OwnerProfile {
   endorsements_received_count: number;
   recommendations_given_count: number;
   recommendations_received_count: number;
-  total_messages_sent: number;
-  total_messages_received: number;
-  total_conversations: number;
+  total_messages_sent: number | null;
+  total_messages_received: number | null;
+  total_conversations: number | null;
   invitations_sent: number;
   invitations_received: number;
   ad_targeting: Record<string, unknown>;
@@ -71,13 +72,31 @@ interface OwnerProfile {
   updated_at: string;
 }
 
+export const safeProfileWebsite = profileWebsite;
+
+export function ProfileWebsiteLink({ entry }: { entry: unknown }) {
+  const website = safeProfileWebsite(entry);
+  if (!website) {
+    return <span className="text-xs text-muted-foreground" title="Invalid website URL">
+      {typeof entry === 'string' ? entry : 'Invalid website entry'}
+    </span>;
+  }
+  return <a href={website.href} target="_blank" rel="noopener noreferrer"
+    className="text-xs text-primary hover:underline flex items-center gap-1">
+    <Globe className="h-3 w-3" />
+    {website.label}{website.label !== website.host && (
+      <span className="text-muted-foreground">({website.host})</span>
+    )}
+  </a>;
+}
+
 function StatCard({
   label,
   value,
   icon: Icon,
 }: {
   label: string;
-  value: string | number;
+  value: string | number | null;
   icon: React.ComponentType<{ className?: string }>;
 }) {
   return (
@@ -87,7 +106,7 @@ function StatCard({
       </div>
       <div>
         <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="text-lg font-semibold">{value}</p>
+        <p className="text-lg font-semibold">{value ?? 'Unavailable'}</p>
       </div>
     </div>
   );
@@ -258,20 +277,9 @@ export function ProfileView() {
                   </span>
                 )}
               </div>
-              {profile.websites && profile.websites.length > 0 && (
+              {Array.isArray(profile.websites) && profile.websites.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2">
-                  {profile.websites.map((url, i) => (
-                    <a
-                      key={i}
-                      href={url.startsWith("http") ? url : `https://${url}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-primary hover:underline flex items-center gap-1"
-                    >
-                      <Globe className="h-3 w-3" />
-                      {url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-                    </a>
-                  ))}
+                  {profile.websites.map((entry, i) => <ProfileWebsiteLink key={i} entry={entry} />)}
                 </div>
               )}
             </div>
@@ -490,7 +498,7 @@ export function ProfileView() {
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Messages Sent</span>
                   <span className="font-medium">
-                    {profile.total_messages_sent.toLocaleString()}
+                    {profile.total_messages_sent?.toLocaleString() ?? 'Unavailable'}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
@@ -498,13 +506,13 @@ export function ProfileView() {
                     Messages Received
                   </span>
                   <span className="font-medium">
-                    {profile.total_messages_received.toLocaleString()}
+                    {profile.total_messages_received?.toLocaleString() ?? 'Unavailable'}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Conversations</span>
                   <span className="font-medium">
-                    {profile.total_conversations.toLocaleString()}
+                    {profile.total_conversations?.toLocaleString() ?? 'Unavailable'}
                   </span>
                 </div>
               </CardContent>

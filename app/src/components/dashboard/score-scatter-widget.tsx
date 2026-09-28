@@ -27,19 +27,21 @@ export function ScoreScatterWidget() {
           const contacts: ScatterContact[] = (json.data || [])
             .filter(
               (c: Record<string, unknown>) =>
-                c.composite_score !== null && c.composite_score !== undefined
+                typeof c.compositeScore === "number" &&
+                typeof c.referralLikelihood === "number"
             )
             .map(
               (c: {
-                full_name?: string;
-                composite_score?: number;
+                fullName?: string;
+                compositeScore?: number;
+                referralLikelihood?: number;
                 tier?: string;
-                connections_count?: number;
+                connectionsCount?: number;
               }) => ({
-                name: c.full_name || "Unknown",
-                compositeScore: c.composite_score ?? 0,
-                referralLikelihood: Math.random() * 0.5 + (c.composite_score ?? 0) * 0.5,
-                connections: c.connections_count ?? 50,
+                name: c.fullName || "Unknown",
+                compositeScore: c.compositeScore ?? 0,
+                referralLikelihood: c.referralLikelihood ?? 0,
+                connections: c.connectionsCount ?? 0,
                 tier: c.tier || "watch",
               })
             );

@@ -1,6 +1,54 @@
 # ADR-033: Research-mode rollout — per-user flag plus suggestion-engine nudge
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: **SUPERSEDED (2026-08-19) by
+[ADR-035](./ADR-035-research-mode-gating-supersedes-033.md)** — originally
+Accepted 2026-04-17, but never implemented; the code does the literal thing
+this ADR rejects. ADR-035 ratifies per-deployment `RESEARCH_*` env flags
+(Q10 Option B) on the grounds that this product has no authentication, so
+the per-user premise below does not yet exist. **Option A is deferred
+pending auth, not rejected** — revisit when authentication lands.
+
+> ## ⚠️ DRIFT WARNING — read this before trusting anything below
+> **(added 2026-08-19, verified against code)**
+>
+> This ADR's decision has never been implemented, and the code running in
+> production today does the exact thing this ADR explicitly rejected. Do
+> not read the Decision section below and assume research-mode gating
+> works as designed — it does not.
+>
+> - Decision point 3 states: "No tenant-level force... Explicitly rejects
+>   the `RESEARCH_*` env-flag pattern." Alternatives lists that pattern as
+>   the rejected Q10 Option B.
+> - Every research surface in the app gates on `RESEARCH_*` environment
+>   variables read through `app/src/lib/config/research-flags.ts`
+>   (`RESEARCH_TARGETS`, `RESEARCH_SNIPPETS`, `RESEARCH_PARSER_TELEMETRY`,
+>   `RESEARCH_SOURCES`, `RESEARCH_CONNECTOR_NEWS`,
+>   `RESEARCH_CONNECTOR_PODCAST`, etc.) — exactly the rejected pattern, and
+>   process-wide rather than even per-tenant, so it is not even a faithful
+>   build of the rejected option, just its shape.
+> - `owner_profiles.research_mode_enabled` (added by migration
+>   `035-targets-schema.sql:37`, per Decision point 1) exists as a column
+>   but has **zero functional reads** anywhere in `app/src` — verified by
+>   grep across the whole app source tree. The only other reference to it
+>   is a comment in `research-flags.ts:9-10` stating that per-user gating
+>   "lives on `owner_profiles.research_mode_enabled` — not in this
+>   module": a comment describing a design that was never wired up.
+> - Net effect: a user toggling their personal Research Mode setting today
+>   has **no effect on any UI or API behavior whatsoever**. The real gate
+>   is a deployment-time env var shared by every user of a given
+>   deployment — the opposite of "different users in one tenant can opt in
+>   independently," which is this ADR's stated selling point.
+> - **This is a product decision, not an engineering fix, and is not made
+>   by this annotation.** Two honest paths forward: (a) implement the
+>   per-user gate this ADR actually specifies — wire `useResearchMode()`
+>   (Decision/Negative already anticipates this hook) to read
+>   `research_mode_enabled` at the UI-gating call sites this ADR names
+>   (target switching, source panels, conflict banners, snippet panels),
+>   and retire the `RESEARCH_*` envs; or (b) write a new ADR that formally
+>   supersedes this one, documenting that per-deployment env flags are the
+>   real, accepted design and that Q10 Option B was in fact adopted.
+>   Neither the agent that found this drift nor the one annotating it
+>   should make that call.
 
 ## Context
 
@@ -30,6 +78,8 @@ overrode that:
 
 ## Decision
 
+**⚠️ Not implemented — see the drift warning at the top of this file.**
+
 Research mode is a **per-user** feature flag, augmented by a
 suggestion-engine nudge:
 
@@ -40,9 +90,12 @@ suggestion-engine nudge:
    comparison lens, source panels, and main-app conflict banners render only
    when `researchModeEnabled = true` for the current user.
    (`10-decisions.md` Q10, lines 187-189)
-3. **No tenant-level force**: tenant admins cannot force-enable or
+3. ~~**No tenant-level force**: tenant admins cannot force-enable or
    force-disable. It is strictly a user choice. Explicitly rejects the
-   `RESEARCH_*` env-flag pattern.
+   `RESEARCH_*` env-flag pattern.~~ **INVERTED IN PRACTICE (2026-08-19)**:
+   the shipped code gates every research surface on `RESEARCH_*` env
+   vars — precisely the rejected pattern. See the drift warning at the top
+   of this file.
    (`10-decisions.md` Q10, lines 191-192)
 4. **Suggestion-engine nudge**: the existing engine in
    `app/src/components/suggestion-engine-provider.tsx` gains a detector rule.
@@ -60,20 +113,27 @@ suggestion-engine nudge:
 
 ### Positive
 
-- **Finer-grained control**. Different users in one tenant can opt in
+- ~~**Finer-grained control**. Different users in one tenant can opt in
   independently. A sales rep who only updates their own profile sees no
-  research UI; a BD lead researching accounts gets the full surface.
+  research UI; a BD lead researching accounts gets the full surface.~~
+  **Not realized (2026-08-19)**: the flag actually gating research
+  surfaces is deployment-wide (`RESEARCH_*` env vars), not per-user. See
+  the drift warning at the top of this file.
   (`10-decisions.md` Q10, lines 193-196)
 - **Discoverability without force-on defaults**. The suggestion engine's
   nudge replaces what a per-tenant default-on would have provided — it
   surfaces the feature when the user's behavior already looks like research.
-- **No `RESEARCH_*` env flag churn**. Ops doesn't manage per-tenant env
+- ~~**No `RESEARCH_*` env flag churn**. Ops doesn't manage per-tenant env
   vars; settings live in the database, editable via normal user-settings
-  flows.
+  flows.~~ **Inverted in practice (2026-08-19)**: `RESEARCH_*` env vars are
+  exactly what gates every research surface today. See the drift warning
+  at the top of this file.
 - **Backward compatibility preserved**. Default-off means existing users
   log in to unchanged behavior. Day-one ship is safe for all tenants.
-- **Clean flag surface**. One column, one toggle, one UI gate pattern.
-  Everything research-related checks the same boolean.
+- ~~**Clean flag surface**. One column, one toggle, one UI gate pattern.
+  Everything research-related checks the same boolean.~~ **Not
+  implemented (2026-08-19)**: nothing in `app/src` reads that boolean. See
+  the drift warning at the top of this file.
 
 ### Negative
 

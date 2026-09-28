@@ -1,7 +1,7 @@
 // Auto-scoring hooks — fire-and-forget scoring triggers
 // Called from enrichment, import, and extension capture endpoints.
 
-import { scoreContact } from './pipeline';
+import { assertOwnerBaseline, captureOwnerScoringBasis, scoreContact } from './pipeline';
 import * as scoringQueries from '../db/queries/scoring';
 
 /**
@@ -19,23 +19,23 @@ export function triggerAutoScore(contactId: string): void {
  */
 export function triggerBatchAutoScore(contactIds: string[]): void {
   if (contactIds.length === 0) return;
-  // Score in parallel with a concurrency cap
+  // Capture once so an import run cannot mix owner settings across contacts.
   const CONCURRENCY = 5;
-  let idx = 0;
-
-  async function next(): Promise<void> {
-    while (idx < contactIds.length) {
-      const id = contactIds[idx++];
-      try {
-        await scoreContact(id);
-      } catch (err) {
-        console.error(`[auto-score] Failed to score contact ${id}:`, err);
+  (async () => {
+    const basis = await captureOwnerScoringBasis();
+    let idx = 0;
+    async function next(): Promise<void> {
+      while (idx < contactIds.length) {
+        const id = contactIds[idx++];
+        try {
+          await scoreContact(id, undefined, undefined, basis);
+        } catch (err) {
+          console.error(`[auto-score] Failed to score contact ${id}:`, err);
+        }
       }
     }
-  }
-
-  const workers = Array.from({ length: Math.min(CONCURRENCY, contactIds.length) }, () => next());
-  Promise.all(workers).catch((err) => {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, contactIds.length) }, () => next()));
+  })().catch((err) => {
     console.error('[auto-score] Batch scoring failed:', err);
   });
 }
@@ -45,13 +45,12 @@ export function triggerBatchAutoScore(contactIds: string[]): void {
  * Creates a scoring_run record and updates progress.
  * Returns the run ID for status polling.
  *
- * Phase 1.5 — WS-4 per-target ICP plumbing. When `targetId` is provided (and
- * the targets flag is on), the background loop feeds it to `scoreContact` so
- * every contact is rescored under the target's active lens. Callers that do
- * not pass it get today's owner-default behavior.
+ * Only the owner baseline may be persisted by a full rescore.
  */
 export async function triggerRescoreAll(targetId?: string): Promise<string> {
+  assertOwnerBaseline(targetId);
   const contactIds = await scoringQueries.getAllContactIds();
+  const basis = await captureOwnerScoringBasis();
   const runId = await scoringQueries.createScoringRun('rescore-all', contactIds.length);
 
   // Run in background
@@ -61,7 +60,7 @@ export async function triggerRescoreAll(targetId?: string): Promise<string> {
 
     for (const id of contactIds) {
       try {
-        await scoreContact(id, undefined, targetId);
+        await scoreContact(id, undefined, undefined, basis);
         scored++;
       } catch (err) {
         failed++;

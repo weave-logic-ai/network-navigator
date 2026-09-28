@@ -1,6 +1,7 @@
 // Import pipeline: ordered multi-CSV processing (10-file dependency order)
 
 import { readFile, stat } from 'fs/promises';
+import { createHash } from 'crypto';
 import { basename } from 'path';
 import { PoolClient } from 'pg';
 import { ImportFileType, ImportSummary, ImportError } from './types';
@@ -20,21 +21,13 @@ import { importSkills } from './skills-importer';
 import { importCompanyFollows } from './company-follows-importer';
 import { generateEmbeddings } from './embedding-generator';
 import { seedTaxonomyIfEmpty } from '../taxonomy/seed';
+import { computeNaturalICP } from '../scoring/natural-icp';
+import { detectContactFileType } from './mapping-preview';
+import { parseCsv } from './csv-parser';
 
 // File type detection from filename
 function detectFileType(filename: string): ImportFileType | null {
-  const lower = filename.toLowerCase();
-  if (lower.includes('connection')) return 'connections';
-  if (lower.includes('message')) return 'messages';
-  if (lower.includes('invitation')) return 'invitations';
-  if (lower.includes('endorsement')) return 'endorsements';
-  if (lower.includes('recommendation')) return 'recommendations';
-  if (lower.includes('position')) return 'positions';
-  if (lower.includes('education')) return 'education';
-  if (lower.includes('skill')) return 'skills';
-  if (lower.includes('company') && lower.includes('follow')) return 'company_follows';
-  if (lower.includes('profile')) return 'profile';
-  return null;
+  return detectContactFileType(filename);
 }
 
 // Processing order for dependency resolution
@@ -58,13 +51,27 @@ interface FileInfo {
   sizeBytes: number;
 }
 
+export interface ImportContentSnapshot {
+  readonly bytes: Buffer;
+  readonly sha256: string;
+}
+
 export async function runImportPipeline(
   client: PoolClient,
   filePaths: string[],
   selfContactId: string,
   selfName: string = '',
-  existingSessionId?: string
+  existingSessionId?: string,
+  snapshots?: ReadonlyMap<string, ImportContentSnapshot>
 ): Promise<ImportSummary> {
+  if (snapshots) {
+    for (const path of filePaths) {
+      const snapshot = snapshots.get(path);
+      if (!snapshot || createHash('sha256').update(snapshot.bytes).digest('hex') !== snapshot.sha256) {
+        throw new Error('Import snapshot integrity mismatch');
+      }
+    }
+  }
   const startTime = Date.now();
   const allErrors: ImportError[] = [];
   let totalRecords = 0;
@@ -80,12 +87,12 @@ export async function runImportPipeline(
     if (!fileType) continue;
 
     try {
-      const fileStat = await stat(filePath);
+      const sizeBytes = snapshots ? snapshots.get(filePath)!.bytes.byteLength : (await stat(filePath)).size;
       files.push({
         path: filePath,
         filename,
         fileType,
-        sizeBytes: fileStat.size,
+        sizeBytes,
       });
     } catch {
       allErrors.push({ file: filename, message: 'File not found or unreadable' });
@@ -110,6 +117,21 @@ export async function runImportPipeline(
   const sortedFiles = files.sort(
     (a, b) => PROCESSING_ORDER.indexOf(a.fileType) - PROCESSING_ORDER.indexOf(b.fileType)
   );
+  // Only the captured Profile.csv identifies the owner for this export. A
+  // caller-supplied name (or the synthetic self contact) is not proof.
+  let verifiedSelfName = '';
+  const profileFile = sortedFiles.find(file => file.fileType === 'profile');
+  if (profileFile) {
+    const profileContent = snapshots
+      ? snapshots.get(profileFile.path)!.bytes.toString('utf-8')
+      : await readFile(profileFile.path, 'utf-8');
+    const profile = parseCsv(profileContent, { preambleLines: 0 });
+    const first = profile.rows[0]?.first_name?.trim();
+    const last = profile.rows[0]?.last_name?.trim();
+    if (profile.rows.length === 1 && profile.errors.length === 0 && first && last) {
+      verifiedSelfName = `${first} ${last}`;
+    }
+  }
 
   let processedCount = 0;
 
@@ -123,7 +145,9 @@ export async function runImportPipeline(
     );
 
     try {
-      const content = await readFile(file.path, 'utf-8');
+      const content = snapshots
+        ? snapshots.get(file.path)!.bytes.toString('utf-8')
+        : await readFile(file.path, 'utf-8');
 
       let fileResult: { totalRows: number; newRecords: number; updatedRecords?: number; skippedRecords: number; errors: ImportError[] };
 
@@ -132,7 +156,13 @@ export async function runImportPipeline(
           fileResult = await importConnections(client, content, sessionId, selfContactId);
           break;
         case 'messages':
-          fileResult = await importMessages(client, content, sessionId, selfContactId, selfName);
+          if (verifiedSelfName) {
+            fileResult = await importMessages(client, content, sessionId, selfContactId, verifiedSelfName);
+          } else {
+            const rowCount = parseCsv(content).rowCount;
+            fileResult = { totalRows: rowCount, newRecords: 0, skippedRecords: rowCount,
+              errors: [{ file: file.filename, message: 'Messages skipped: a valid Profile.csv with owner first and last name is required' }] };
+          }
           break;
         case 'invitations':
           fileResult = await importInvitations(client, content, selfContactId);
@@ -172,7 +202,7 @@ export async function runImportPipeline(
       await updateImportFileRecord(client, fileRecordId, {
         recordCount: fileResult.totalRows,
         processedCount: fileResult.newRecords + (fileResult.updatedRecords ?? 0) + fileResult.skippedRecords,
-        status: fileResult.errors.length > 0 ? 'completed_with_errors' : 'completed',
+        status: file.fileType === 'profile' ? 'skipped' : fileResult.errors.length > 0 ? 'completed_with_errors' : 'completed',
         errors: fileResult.errors,
       });
     } catch (err) {
@@ -211,8 +241,30 @@ export async function runImportPipeline(
     allErrors.push({ message: 'Taxonomy seed failed (non-critical)' });
   }
 
+  // Post-import: recompute the Natural ICP (docs/plans/icp-alignment-engine.md
+  // specifies it "runs automatically during import"). This is a network-wide
+  // aggregation over ALL contacts/companies (not just this batch) and over
+  // whatever owner profile currently exists in `owner_profiles` -- it is not
+  // scoped to this import, so it only needs to run once, here, after every
+  // file in this import has been committed, rather than per file or per
+  // contact. It uses its own pooled connection via `query()` (see
+  // ../scoring/natural-icp.ts) rather than the transaction-scoped `client`
+  // used above, and every statement on `client` in this pipeline commits
+  // immediately (no explicit BEGIN/COMMIT is used), so the rows it reads are
+  // already visible.
+  //
+  // Fire-and-forget: intentionally NOT awaited. Natural ICP computation is
+  // pure derived state (recomputed from scratch on every import and on every
+  // profile-page load, see app/src/app/api/profile/natural-icp/route.ts), so
+  // there is nothing to roll back and nothing the rest of the import needs
+  // from it. It must never make an otherwise-successful import slower or
+  // fail, so its result is not folded into `allErrors` or `finalStatus`.
+  computeNaturalICP().catch(() => {
+    // Swallowed intentionally -- see comment above.
+  });
+
   // Complete session
-  const finalStatus = allErrors.length > 0 && newRecords === 0 ? 'failed' : 'completed';
+  const finalStatus = allErrors.length > 0 ? 'failed' : 'completed';
   await completeSession(client, sessionId, finalStatus, allErrors);
 
   return {

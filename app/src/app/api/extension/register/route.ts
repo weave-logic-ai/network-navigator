@@ -1,22 +1,26 @@
 // POST /api/extension/register
-// Token exchange: extension sends displayToken, receives full token + settings
-// This endpoint does NOT require X-Extension-Token (it IS the exchange mechanism)
+// Extension sends its full token and receives its ID + settings.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { validateDisplayToken } from '@/lib/auth/extension-auth';
 import { DEFAULT_EXTENSION_SETTINGS } from '@/types/extension-auth';
+import { isAllowedExtensionOrigin, trustedLocalOrigin } from '@/lib/auth/local-request-boundary';
 
 
 export async function POST(req: NextRequest) {
-  // Registration is the bootstrap endpoint — allow any origin
-  // (token validation provides the security, not origin)
+  if (!trustedLocalOrigin(req) || !isAllowedExtensionOrigin(req.headers.get('origin') ?? '')) {
+    return NextResponse.json({ error: 'INVALID_ORIGIN' }, { status: 403 });
+  }
+  if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers.get('content-type') ?? '')) {
+    return NextResponse.json({ error: 'Content-Type must be application/json' }, { status: 415 });
+  }
   try {
     const body = await req.json();
-    const { displayToken } = body;
+    const displayToken = body && typeof body === 'object' ? body.displayToken : undefined;
 
     if (!displayToken || typeof displayToken !== 'string') {
       return NextResponse.json(
-        { error: 'VALIDATION_ERROR', message: 'displayToken is required' },
+        { error: 'VALIDATION_ERROR', message: 'Full extension token is required' },
         { status: 400 }
       );
     }
@@ -25,7 +29,7 @@ export async function POST(req: NextRequest) {
 
     if (!result.valid || !result.extensionId) {
       return NextResponse.json(
-        { error: 'INVALID_TOKEN', message: 'Invalid display token' },
+        { error: 'INVALID_TOKEN', message: 'Invalid extension token' },
         { status: 401 }
       );
     }

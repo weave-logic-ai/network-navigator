@@ -19,6 +19,7 @@ import { recordFieldOutcomes } from '@/lib/parser/telemetry';
 import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { recordEvent } from '@/lib/analytics/events';
 import { query } from '@/lib/db/client';
+import { requireVisibilityPrincipal } from '@/lib/auth/extension-visibility-boundary';
 import { toSelectorConfig } from '@/types/selector-config';
 import type {
   SelectorConfig,
@@ -76,6 +77,8 @@ async function loadConfig(pageType: LinkedInPageType): Promise<SelectorConfig | 
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireVisibilityPrincipal(request, true);
+  if (denied) return denied;
   let body: RegressionReportBody;
   try {
     body = (await request.json()) as RegressionReportBody;

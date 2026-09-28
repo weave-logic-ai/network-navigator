@@ -14,17 +14,26 @@
 // Both are copied to clipboard via the async Clipboard API; we silently swallow
 // failures (test envs without clipboard just no-op).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { X, Copy, Trash2, Check } from "lucide-react";
 import { buildLensShareUrls } from "@/lib/targets/lens-url";
+import { contextController, useTargetContext } from "@/lib/targets/context-controller";
 
 interface LensDto {
   id: string;
   name: string;
-  isDefault: boolean;
   createdAt: string;
   config: Record<string, unknown>;
+  icpProfileIds: string[];
 }
+
+interface LensListState {
+  targetId: string;
+  revision: string | undefined;
+  status: "loading" | "ready" | "error";
+  lenses: LensDto[];
+}
+const EMPTY_LENSES: LensDto[] = [];
 
 interface LensManagerProps {
   primaryTargetId: string;
@@ -33,6 +42,7 @@ interface LensManagerProps {
   onChanged?: () => void;
   /** Current config the user would save as a new lens (ICPs, filters, etc.). */
   currentConfig?: Record<string, unknown>;
+  currentIcpProfileIds?: string[];
 }
 
 function formatRelativeTime(iso: string): string {
@@ -67,69 +77,92 @@ export function LensManager({
   onClose,
   onChanged,
   currentConfig,
+  currentIcpProfileIds,
 }: LensManagerProps) {
-  const [lenses, setLenses] = useState<LensDto[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [list, setList] = useState<LensListState | null>(null);
+  const { snapshot } = useTargetContext();
+  const activeId = snapshot?.activeLensId ?? null;
+  const [error, setError] = useState<string | null>(null);
   const [savingName, setSavingName] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const loadSequence = useRef(0);
+  const invalidateLoad = useCallback(() => { loadSequence.current++; }, []);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const sequence = ++loadSequence.current;
+    const revision = contextController.getSnapshot().snapshot?.revision;
+    const isCurrent = () => sequence === loadSequence.current &&
+      revision === contextController.getSnapshot().snapshot?.revision;
+    setList({ targetId: primaryTargetId, revision, status: "loading", lenses: [] });
     try {
-      const res = await fetch(`/api/targets/${primaryTargetId}/lenses`);
-      if (!res.ok) return;
-      const json = (await res.json()) as { data: LensDto[] };
-      setLenses(json.data ?? []);
+      const res = await fetch(`/api/targets/${primaryTargetId}/lenses`, { cache: "no-store" });
+      if (!res.ok) throw new Error("Lens list unavailable");
+      const json = (await res.json()) as { data: LensDto[]; activeLensId: string | null };
+      if (!Array.isArray(json.data)) throw new Error("Invalid lens list");
+      if (isCurrent()) setList({ targetId: primaryTargetId, revision, status: "ready", lenses: json.data });
     } catch {
-      /* silent */
-    } finally {
-      setLoading(false);
+      if (isCurrent()) setList({ targetId: primaryTargetId, revision, status: "error", lenses: [] });
     }
   }, [primaryTargetId]);
 
+  const currentList = list?.targetId === primaryTargetId && list.revision === snapshot?.revision
+    ? list : null;
+  const listStatus = currentList?.status ?? "loading";
+  const lenses = listStatus === "ready" ? currentList!.lenses : EMPTY_LENSES;
+  const canAct = useCallback(() => {
+    const current = contextController.getSnapshot().snapshot;
+    return listStatus === "ready" && current?.revision === snapshot?.revision &&
+      (current?.secondaryTargetId ?? current?.primaryTargetId) === primaryTargetId;
+  }, [listStatus, snapshot?.revision, primaryTargetId]);
+
   useEffect(() => {
     if (open) void load();
-  }, [open, load]);
+    return invalidateLoad;
+  }, [open, load, snapshot?.revision, invalidateLoad]);
 
   const handleActivate = useCallback(
     async (lensId: string) => {
+      if (!canAct() || !lenses.some(lens => lens.id === lensId)) return;
       try {
-        await fetch(`/api/targets/${primaryTargetId}/lenses/${lensId}/activate`, {
-          method: "PUT",
-        });
+        setError(null);
+        await contextController.activateLens(primaryTargetId, lensId);
         await load();
         onChanged?.();
-      } catch {
-        /* silent */
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Lens activation failed");
       }
     },
-    [primaryTargetId, load, onChanged]
+    [primaryTargetId, load, onChanged, lenses, canAct]
   );
 
   const handleDelete = useCallback(
     async (lensId: string) => {
+      if (!canAct() || !lenses.some(lens => lens.id === lensId)) return;
       try {
-        await fetch(`/api/targets/${primaryTargetId}/lenses/${lensId}`, {
+        const response = await fetch(`/api/targets/${primaryTargetId}/lenses/${lensId}`, {
           method: "DELETE",
         });
+        if (!response.ok) throw new Error("Lens deletion failed");
+        contextController.invalidate();
         await load();
         onChanged?.();
-      } catch {
-        /* silent */
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Lens deletion failed");
       }
     },
-    [primaryTargetId, load, onChanged]
+    [primaryTargetId, load, onChanged, lenses, canAct]
   );
 
   const handleShareTenantLocal = useCallback(
     async (lens: LensDto) => {
+      if (!canAct() || !lenses.some(item => item.id === lens.id)) return;
       const { tenantLocal } = buildLensShareUrls({
         origin:
           typeof window !== "undefined" ? window.location.origin : "",
         pathname:
           typeof window !== "undefined" ? window.location.pathname : "/",
         lensId: lens.id,
-        config: lens.config,
+        config: { ...lens.config, icpProfileIds: lens.icpProfileIds },
         lensName: lens.name,
       });
       const ok = await copyToClipboard(tenantLocal);
@@ -138,17 +171,18 @@ export function LensManager({
         setTimeout(() => setCopiedId(null), 1600);
       }
     },
-    []
+    [lenses, canAct]
   );
 
   const handleShareOpaque = useCallback(async (lens: LensDto) => {
+    if (!canAct() || !lenses.some(item => item.id === lens.id)) return;
     const { opaque } = buildLensShareUrls({
       origin:
         typeof window !== "undefined" ? window.location.origin : "",
       pathname:
         typeof window !== "undefined" ? window.location.pathname : "/",
       lensId: lens.id,
-      config: lens.config,
+      config: { ...lens.config, icpProfileIds: lens.icpProfileIds },
       lensName: lens.name,
     });
     const ok = await copyToClipboard(opaque);
@@ -156,27 +190,47 @@ export function LensManager({
       setCopiedId(`opaque:${lens.id}`);
       setTimeout(() => setCopiedId(null), 1600);
     }
-  }, []);
+  }, [lenses, canAct]);
 
   const handleSave = useCallback(async () => {
     const name = savingName.trim();
-    if (!name) return;
+    if (!name || !canAct()) return;
     try {
-      await fetch(`/api/targets/${primaryTargetId}/lenses`, {
+      const response = await fetch(`/api/targets/${primaryTargetId}/lenses`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name,
           config: currentConfig ?? {},
+          icpProfileIds: currentIcpProfileIds ?? [],
         }),
       });
+      if (!response.ok) throw new Error("Lens save failed");
       setSavingName("");
       await load();
       onChanged?.();
-    } catch {
-      /* silent */
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Lens save failed");
     }
-  }, [primaryTargetId, savingName, currentConfig, load, onChanged]);
+  }, [primaryTargetId, savingName, currentConfig, currentIcpProfileIds, load, onChanged, canAct]);
+
+  const handleDuplicate = useCallback(async (lens: LensDto) => {
+    if (!canAct() || !lenses.some(item => item.id === lens.id)) return;
+    try {
+      setError(null);
+      const response = await fetch(`/api/targets/${primaryTargetId}/lenses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `${lens.name} copy`, config: lens.config,
+          icpProfileIds: lens.icpProfileIds }),
+      });
+      if (!response.ok) throw new Error("Lens duplication failed");
+      await load();
+      onChanged?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Lens duplication failed");
+    }
+  }, [primaryTargetId, lenses, load, onChanged, canAct]);
 
   if (!open) return null;
 
@@ -203,11 +257,16 @@ export function LensManager({
           </button>
         </div>
 
+        {error && <div role="alert" className="px-4 py-2 text-xs text-destructive">{error}</div>}
+        {listStatus === "error" && <div role="alert" className="flex gap-2 px-4 py-2 text-xs text-destructive">
+          Lens list unavailable.
+          <button type="button" onClick={() => void load()} className="underline">Retry</button>
+        </div>}
         <div className="max-h-96 overflow-auto">
-          {loading && (
+          {listStatus === "loading" && (
             <div className="px-4 py-3 text-xs text-muted-foreground">Loading...</div>
           )}
-          {!loading && lenses.length === 0 && (
+          {listStatus === "ready" && lenses.length === 0 && (
             <div className="px-4 py-6 text-center text-xs text-muted-foreground">
               No lenses yet. Save the current view below.
             </div>
@@ -225,7 +284,7 @@ export function LensManager({
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{lens.name}</span>
-                  {lens.isDefault ? (
+                  {lens.id === activeId ? (
                     <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase text-primary">
                       Active
                     </span>
@@ -234,6 +293,15 @@ export function LensManager({
                 <div className="text-[11px] text-muted-foreground">
                   Created {formatRelativeTime(lens.createdAt)}
                 </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void handleDuplicate(lens)}
+                className="rounded border border-border/60 px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted"
+                aria-label={`Duplicate lens ${lens.name}`}
+              >
+                Duplicate
               </button>
 
               <button
@@ -289,7 +357,7 @@ export function LensManager({
           <button
             type="button"
             onClick={handleSave}
-            disabled={!savingName.trim()}
+            disabled={!savingName.trim() || listStatus !== "ready"}
             className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground transition disabled:opacity-50"
           >
             Save as new lens

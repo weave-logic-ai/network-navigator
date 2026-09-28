@@ -4,6 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db/client";
 import { IcpCriteria } from "@/lib/scoring/types";
+import { matchesRole } from "@/lib/scoring/scorers/icp-fit";
 
 interface CriterionResult {
   criterion: string;
@@ -139,9 +140,8 @@ export async function GET(
     // 1. Role match
     if (criteria.roles && criteria.roles.length > 0) {
       totalChecks++;
-      const titleLower = (contact.title || contact.headline || "").toLowerCase();
       const matchedRole = criteria.roles.find((r) =>
-        titleLower.includes(r.toLowerCase())
+        matchesRole(contact.title || contact.headline, r)
       );
       const matched = !!matchedRole;
       if (matched) matchedChecks++;

@@ -3,6 +3,8 @@
 
 import { query, transaction } from '@/lib/db/client';
 import { triggerAutoScore } from '@/lib/scoring/auto-score';
+import { reconcileContactIdentity } from '@/lib/contacts/identity-lifecycle';
+import type { ContactIdentityRow } from '@/lib/contacts/identity';
 import type { ProfileParseData, SearchResultEntry } from './types';
 
 interface UpsertResult {
@@ -91,10 +93,14 @@ export async function upsertContactFromProfile(
         updates.push(`updated_at = now()`);
         values.push(contact.id);
 
-        await client.query(
-          `UPDATE contacts SET ${updates.join(', ')} WHERE id = $${paramIdx}`,
+        const changed = await client.query<ContactIdentityRow>(
+          `UPDATE contacts SET ${updates.join(', ')} WHERE id = $${paramIdx}
+           RETURNING full_name, first_name, last_name, linkedin_url, degree, is_archived`,
           values
         );
+        if (fieldsUpdated.includes('full_name') && changed.rows[0]) {
+          await reconcileContactIdentity(client, contact.id, changed.rows[0]);
+        }
       }
 
       // Upsert work history
@@ -221,36 +227,45 @@ export async function upsertContactsFromSearch(
 
       if (existing.rows.length > 0) {
         // Update with any new info from search results
-        const contact = existing.rows[0];
-        const updates: string[] = [];
-        const values: unknown[] = [];
-        let idx = 1;
+        await transaction(async (client) => {
+          const locked = await client.query<{ id: string; full_name: string | null }>(
+            `SELECT id, full_name FROM contacts WHERE id = $1 FOR UPDATE`,
+            [existing.rows[0].id]
+          );
+          const contact = locked.rows[0];
+          if (!contact) return;
+          const updates: string[] = [];
+          const values: unknown[] = [];
+          let idx = 1;
 
-        if (entry.name && !contact.full_name) {
-          updates.push(`full_name = $${idx++}`);
-          values.push(entry.name);
-        }
+          if (entry.name && !contact.full_name) {
+            updates.push(`full_name = $${idx++}`);
+            values.push(entry.name);
+          }
 
-        if (entry.headline) {
-          updates.push(`headline = COALESCE(headline, $${idx++})`);
-          values.push(entry.headline);
-        }
+          if (entry.headline) {
+            updates.push(`headline = COALESCE(headline, $${idx++})`);
+            values.push(entry.headline);
+          }
 
-        if (entry.location) {
-          updates.push(`location = COALESCE(location, $${idx++})`);
-          values.push(entry.location);
-        }
+          if (entry.location) {
+            updates.push(`location = COALESCE(location, $${idx++})`);
+            values.push(entry.location);
+          }
 
-        // Ensure discovered_via includes extension_search
-        updates.push(`discovered_via = CASE WHEN NOT (discovered_via @> ARRAY['extension_search']) THEN array_append(COALESCE(discovered_via, '{}'), 'extension_search') ELSE discovered_via END`);
+          // Ensure discovered_via includes extension_search
+          updates.push(`discovered_via = CASE WHEN NOT (discovered_via @> ARRAY['extension_search']) THEN array_append(COALESCE(discovered_via, '{}'), 'extension_search') ELSE discovered_via END`);
 
-        if (updates.length > 0) {
           values.push(contact.id);
-          await query(
-            `UPDATE contacts SET ${updates.join(', ')}, updated_at = now() WHERE id = $${idx}`,
+          const changed = await client.query<ContactIdentityRow>(
+            `UPDATE contacts SET ${updates.join(', ')}, updated_at = now() WHERE id = $${idx}
+             RETURNING full_name, first_name, last_name, linkedin_url, degree, is_archived`,
             values
           );
-        }
+          if (updates.some((part) => part.startsWith('full_name')) && changed.rows[0]) {
+            await reconcileContactIdentity(client, contact.id, changed.rows[0]);
+          }
+        });
         updated++;
       } else {
         // Parse name into first/last

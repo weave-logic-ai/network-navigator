@@ -1,5 +1,5 @@
 # Stage 1: Development
-FROM node:20-alpine AS dev
+FROM node:24-alpine AS dev
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --legacy-peer-deps
@@ -7,7 +7,7 @@ EXPOSE 3000
 CMD ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]
 
 # Stage 2: Build application
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --legacy-peer-deps
@@ -16,7 +16,7 @@ RUN mkdir -p public
 RUN npm run build
 
 # Stage 3: Production runtime (slim for glibc/ONNX compat)
-FROM node:20-slim AS runner
+FROM node:24-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

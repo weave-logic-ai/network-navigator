@@ -9,6 +9,10 @@ import type {
   ExtensionToken,
 } from '@/types/extension-auth';
 
+// Existing schema records creation time but has no expires_at column.
+// A bounded lifetime prevents a copied token from remaining valid forever.
+export const EXTENSION_TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
+
 /**
  * Hash a token for secure storage. We never store raw tokens in the DB.
  */
@@ -43,55 +47,56 @@ export async function generateExtensionToken(): Promise<TokenGenerationResult> {
 export async function validateExtensionToken(
   token: string
 ): Promise<TokenValidationResult> {
-  if (!token) {
+  if (!/^ext_[A-Za-z0-9_-]{43}$/.test(token)) {
     return { valid: false, error: 'INVALID_TOKEN' };
   }
 
-  // Try hash lookup first (for ext_ prefixed tokens)
   const tokenHash = hashToken(token);
-  let result = await query<{
+  const result = await query<{
     extension_id: string;
     is_revoked: boolean;
     token_hash: string;
+    created_at: string | Date;
   }>(
-    `SELECT extension_id, is_revoked, token_hash FROM extension_tokens
+    `SELECT extension_id, is_revoked, token_hash, created_at FROM extension_tokens
      WHERE token_hash = $1`,
     [tokenHash]
   );
 
-  // Fall back to display prefix match (for raw display tokens)
-  if (result.rows.length === 0) {
-    result = await query<{
-      extension_id: string;
-      is_revoked: boolean;
-      token_hash: string;
-    }>(
-      `SELECT extension_id, is_revoked, token_hash FROM extension_tokens
-       WHERE display_prefix = $1`,
-      [token]
-    );
-  }
-
-  if (result.rows.length === 0) {
+  const row = result.rows[0];
+  const expected = Buffer.from(tokenHash, 'hex');
+  const stored = row && /^[0-9a-f]{64}$/i.test(row.token_hash)
+    ? Buffer.from(row.token_hash, 'hex')
+    : Buffer.alloc(expected.length);
+  // Compare fixed-length digests even on a miss. A display prefix is never a
+  // bearer credential, including for registration and WebSocket upgrades.
+  if (!crypto.timingSafeEqual(expected, stored) || !row) {
     return { valid: false, error: 'INVALID_TOKEN' };
   }
-
-  const row = result.rows[0];
 
   if (row.is_revoked) {
     return { valid: false, error: 'REVOKED_TOKEN' };
   }
+  const created = new Date(row.created_at).getTime();
+  const now = Date.now();
+  if (!Number.isFinite(created) || created > now || now - created >= EXTENSION_TOKEN_LIFETIME_MS) {
+    return { valid: false, error: 'EXPIRED_TOKEN' };
+  }
 
-  // Update last_used_at timestamp (fire and forget)
-  query(
+  // Record successful use, and reject a token revoked between the read and
+  // this write. A failed audit write must not authenticate a stale row.
+  const used = await query<{ extension_id: string }>(
     `UPDATE extension_tokens SET last_used_at = now(), updated_at = now()
-     WHERE token_hash = $1`,
-    [row.token_hash]
-  ).catch(() => {
-    // Non-critical
-  });
+     WHERE token_hash = $1 AND is_revoked = false
+     RETURNING extension_id`,
+    [tokenHash]
+  );
+  if (used.rowCount !== 1) {
+    return { valid: false, error: 'REVOKED_TOKEN' };
+  }
 
-  return { valid: true, extensionId: row.extension_id };
+  return { valid: true, extensionId: row.extension_id,
+    expiresAt: created + EXTENSION_TOKEN_LIFETIME_MS };
 }
 
 /**
@@ -99,14 +104,15 @@ export async function validateExtensionToken(
  */
 export async function revokeExtensionToken(
   extensionId: string
-): Promise<boolean> {
-  const result = await query(
+): Promise<string | null> {
+  const result = await query<{ token_hash: string }>(
     `UPDATE extension_tokens
      SET is_revoked = true, updated_at = now()
-     WHERE extension_id = $1 AND is_revoked = false`,
+     WHERE extension_id = $1 AND is_revoked = false
+     RETURNING token_hash`,
     [extensionId]
   );
-  return (result.rowCount ?? 0) > 0;
+  return result.rows[0]?.token_hash ?? null;
 }
 
 /**
@@ -137,45 +143,14 @@ export async function listExtensionTokens(): Promise<ExtensionToken[]> {
 }
 
 /**
- * Validate a token for the registration flow.
- * Accepts either a full token (hashed for lookup) or a display prefix.
+ * Validate a full token for the registration flow. Display prefixes identify
+ * rows in operator listings but never authenticate.
  */
 export async function validateDisplayToken(
   token: string
 ): Promise<{ valid: boolean; extensionId?: string; tokenHash?: string }> {
-  // Try full token hash lookup first
-  const tokenHash = hashToken(token);
-  let result = await query<{
-    extension_id: string;
-    token_hash: string;
-    is_revoked: boolean;
-  }>(
-    `SELECT extension_id, token_hash, is_revoked FROM extension_tokens
-     WHERE token_hash = $1`,
-    [tokenHash]
-  );
-
-  // Fall back to display prefix match
-  if (result.rows.length === 0) {
-    result = await query<{
-      extension_id: string;
-      token_hash: string;
-      is_revoked: boolean;
-    }>(
-      `SELECT extension_id, token_hash, is_revoked FROM extension_tokens
-       WHERE display_prefix = $1`,
-      [token]
-    );
-  }
-
-  if (result.rows.length === 0) {
-    return { valid: false };
-  }
-
-  const row = result.rows[0];
-  if (row.is_revoked) {
-    return { valid: false };
-  }
-
-  return { valid: true, extensionId: row.extension_id, tokenHash: row.token_hash };
+  const result = await validateExtensionToken(token);
+  return result.valid
+    ? { valid: true, extensionId: result.extensionId, tokenHash: hashToken(token) }
+    : { valid: false };
 }

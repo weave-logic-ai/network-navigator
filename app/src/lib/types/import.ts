@@ -26,4 +26,6 @@ export interface ImportSession {
   startedAt: string;
   completedAt: string | null;
   error: string | null;
+  errors: Array<{ file?: string; row?: number; message: string }>;
+  errorTotal: number;
 }

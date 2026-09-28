@@ -1,0 +1,142 @@
+---
+title: Evidence & Provenance
+description: How snippets, source records, and targets wire into the ECC causal graph and ExoChain, and what's actually queryable today.
+---
+
+Every fact the research-tools surface introduces — a saved snippet, a fetched source record, a target's state change — is meant to be auditable back to where it came from. This page covers the concrete wiring: which tables it lands in, what the graph actually connects, and where the hash-linked audit trail does and doesn't reach yet.
+
+This is integration on top of the ECC substrate that already existed (`causal_nodes`, `causal_edges`, `exo_chain_entries`) — nothing here changes ECC's core semantics, it extends the vocabulary those tables accept.
+
+## `causal_nodes` and `causal_edges`
+
+Two tables, both free-form-TEXT-typed so new vocabulary is additive (`data/db/init/025-ecc-causal-graph.sql`):
+
+```sql
+CREATE TABLE causal_nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  inputs JSONB DEFAULT '{}',
+  output JSONB DEFAULT '{}',
+  session_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE causal_edges (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_node_id UUID NOT NULL REFERENCES causal_nodes(id) ON DELETE CASCADE,
+  target_node_id UUID NOT NULL REFERENCES causal_nodes(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL,
+  weight REAL DEFAULT 1.0,
+  metadata JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+The research-tools sprint adds three `entity_type` values (`app/src/lib/ecc/types.ts`): `snippet`, `source_record`, `target` — alongside the pre-existing `score`, `dimension`, `input`, `weight`, `enrichment`, `graph_metric`. It also adds six `relation` values: `evidence_for`, `mentions`, `cited_from`, `fetched_from`, `identifies`, `recentered_from` — alongside `caused`, `enabled`, `weighted_by`, `derived_from`, `merged_into`, `counterfactual`.
+
+Not every new relation is wired to a writer yet. What's actually implemented, per `app/src/lib/snippets/service.ts`:
+
+- **`evidence_for`** — written on every snippet save, from the snippet's node to the target's node. This is the load-bearing edge; see the next section for exactly what it points at.
+- **`mentions`** — written from a snippet's node to each linked contact's node, when the user (or `extractPersonMentionCandidates()`) attaches contact mentions to the snippet.
+- **`cited_from`, `fetched_from`, `identifies`, `recentered_from`** — defined in the type union and documented in the planning spec (`.planning/research-tools-sprint/06-evidence-and-provenance.md` §4) as the edges connectors would write (source-record-to-target, source-record-to-entity, etc.), but no connector code writes them today. They exist as reserved vocabulary, not live behavior.
+
+## `evidence_for` points at the target, not the contact
+
+This is the detail most likely to trip up anything built against this data: an `evidence_for` edge runs from a snippet's `causal_node` to the **target's** `causal_node` (`entity_type = 'target'`) — never directly to a contact or company's own node.
+
+`resolveTargetNodeId()` (`app/src/lib/snippets/service.ts`) makes this explicit:
+
+```ts
+const existing = await query<{ id: string }>(
+  `SELECT id FROM causal_nodes
+   WHERE tenant_id = $1 AND entity_type = 'target' AND entity_id = $2
+   ORDER BY created_at DESC LIMIT 1`,
+  [tenantId, targetId]
+);
+```
+
+`targetId` here is a `research_targets.id`, not a `contacts.id` or `companies.id`. If no target node exists yet, one is lazily created (`operation = 'created'`) so the edge has somewhere to land.
+
+Why this matters: `research_targets` is **sparse**. A row only exists for a contact or company once a user has explicitly designated it a research target — most contacts and companies in the system never get one. So "does this contact have evidence?" is not answerable by walking `evidence_for` edges directly off the contact; you first have to resolve whether the contact has (or ever had) a `research_targets` row, then walk from that target's node. A reader who assumes snippet evidence attaches to the contact directly will build a query that silently returns nothing for the overwhelming majority of contacts, not an error.
+
+Separately, `mentions` edges *do* point at a contact's node directly — but that node is resolved from `causal_nodes` rows of `entity_type IN ('score', 'enrichment')`, i.e. whatever causal history that contact already has from scoring or enrichment, with a lazy placeholder node created if none exists. `mentions` is evidence "this snippet talks about contact X"; `evidence_for` is evidence "this snippet is about the target the user is researching." They answer different questions and neither one is a substitute for the other.
+
+## ExoChain — the hash-linked audit trail
+
+`exo_chain_entries` (`data/db/init/026-ecc-exo-chain.sql`) is an append-only table, one row per event, hash-linked within a `chain_id`:
+
+```sql
+CREATE TABLE exo_chain_entries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  chain_id TEXT NOT NULL,      -- widened from UUID by migration 038; see below
+  sequence INT NOT NULL,
+  prev_hash BYTEA,
+  entry_hash BYTEA NOT NULL,
+  operation TEXT NOT NULL,
+  data JSONB NOT NULL,
+  actor TEXT NOT NULL DEFAULT 'system',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_chain_sequence UNIQUE (chain_id, sequence)
+);
+```
+
+Hashing (`app/src/lib/ecc/exo-chain/hash.ts`) uses BLAKE3 via `@noble/hashes`:
+
+```ts
+const input = [prevHash ?? '', operation, JSON.stringify(data), timestamp].join('|');
+const hashBytes = blake3(new TextEncoder().encode(input));
+```
+
+Each entry's hash covers the previous entry's hash, the operation, the JSON-serialized data, and the timestamp — so altering any past entry (data, order, or timestamp) breaks the hash chain from that point forward. `verifyChainHashes()` recomputes every hash in sequence and reports the first broken link, if any.
+
+### Chain scoping
+
+`026-ecc-exo-chain.sql` originally declared `chain_id` as `UUID`. That doesn't fit the namespaced string form the research-tools sprint needed (`snippet:contact:<uuid>`, etc.), so `data/db/init/038-exo-chain-text-chain-id.sql` widens the column to `TEXT` — a real, necessary migration, not a formality (ADR-029's original text called it unnecessary; that claim was wrong and has since been corrected in the ADR).
+
+Per ADR-029 (`docs/adr/ADR-029-exochain-snippet-chain-scope.md`), snippet chains are scoped **per target, kind-qualified** (`app/src/lib/snippets/chain.ts`):
+
+```ts
+chain_id = 'snippet:' + target.kind + ':' + target.id
+// e.g. snippet:contact:a8f2-…, snippet:company:de91-…, snippet:self:<owner_id>
+```
+
+Each target gets its own independently-verifiable Merkle chain — appends to one target's chain don't serialize against another target's. `saveTextSnippet()` looks up the chain's current max `sequence`, threads the previous entry's hash forward, and appends with operation `snippet_captured`. The chain append is explicitly **best-effort**: if it fails, the snippet's `causal_nodes` row (already written) remains the source of truth, and the failure surfaces only as a response warning — it does not fail the save.
+
+The planning doc also proposed a per-tenant chain for source-record fetches (`chain_id = 'source:<tenant_id>'`). That form does not appear anywhere in `app/src/lib` — it was never implemented. Source-record fetches don't currently append to any ExoChain.
+
+Pre-existing chains are unaffected: the enrichment waterfall (`app/src/lib/ecc/exo-chain/enrichment-adapter.ts`) still forms its own per-run `chain_id` via `crypto.randomUUID()` and appends operations like `budget_check`, `provider_select`, `enrich_result`, `budget_debit`, `waterfall_complete` — a UUID string is a valid value in the now-`TEXT` column, so nothing there needed to change.
+
+### Verifying a chain
+
+There is one route for reading and verifying a chain, and it's a pre-existing, generically-named one — not a dedicated endpoint built for this sprint:
+
+```
+GET /api/enrichment/chain/[chainId]?verify=true
+```
+
+(`app/src/app/api/enrichment/chain/[chainId]/route.ts`.) It calls `getChain(chainId)` / `verifyChain(chainId)` with no filtering on chain-id shape, so it works for a snippet chain (`snippet:contact:<uuid>`) exactly as well as an enrichment-waterfall chain (a bare UUID) — the name is a historical artifact of what it was originally built for. The planning doc's proposed dedicated route, `GET /api/ecc/exo-chain/verify/:chainId`, does not exist; no `app/src/app/api/ecc/` directory exists at all.
+
+## The conflict banner does not use an impulse
+
+`06-evidence-and-provenance.md` §10 lists a `source.mismatch` impulse meant to fire the target-page conflict banner when a projected field disagrees with a source or with a user override. That impulse type was never added to `ImpulseType` (`app/src/lib/ecc/types.ts`, currently `score_computed | tier_changed | persona_assigned | enrichment_complete | contact_created | edge_created`), and per an amendment to ADR-032 (`docs/adr/ADR-032-conflict-resolution-banner.md`, 2026-08-20) it has been **withdrawn**, not merely deferred.
+
+The reason is structural, not an oversight: field conflicts are computed **on demand**, synchronously, inside the `GET` handler that serves the banner's data (`detectFieldConflictsForEntity`). There is no ingestion-time moment at which a "newly-computed projection disagrees" — the banner's own fetch *is* the computation that would need to trigger the impulse, so an impulse emitted there would fire after the response already carrying the answer had been sent. It could never arrive in time to do anything useful.
+
+`SourceConflictBanner` (`app/src/components/targets/source-conflict-banner.tsx`) instead fetches `/api/targets/{id}/field-conflicts` on component mount — a plain REST call, not a push notification. This is the accepted mechanism, treated by the ADR amendment as architecturally correct for this codebase rather than a stopgap. One consequence worth knowing: dismissal state for a banner is `useState` on the client, not persisted anywhere — a page reload re-shows every conflict, including ones a user already dismissed.
+
+## Feature flags
+
+Snippets, targets, source records, and parser telemetry are each gated independently through `RESEARCH_FLAGS` (`app/src/lib/config/research-flags.ts`), all defaulting to `false`:
+
+| Flag | Gates |
+|---|---|
+| `RESEARCH_TARGETS` | Target model, state, and breadcrumbs (`research_targets`, `research_target_state`). |
+| `RESEARCH_SNIPPETS` | Snippet capture and the `causal_nodes`/`causal_edges`/ExoChain writes described on this page. |
+| `RESEARCH_SOURCES` | Source connectors — see [Source Connectors](/docs/research-tools/sources). |
+| `RESEARCH_PARSER_TELEMETRY` | `parse_field_outcomes` writes. |
+
+`owner_profiles.research_mode_enabled` also exists as a column, but it is not read anywhere in the codebase — it's formally dormant per ADR-035 (`docs/adr/ADR-035-research-mode-gating-supersedes-033.md`), which supersedes ADR-033's original per-user-flag design. ADR-033 rejected the `RESEARCH_*` env-var pattern in favor of per-user gating, but that never shipped: the application has no authentication today (routes resolve the owner as the single `owner_profiles` row where `is_current = TRUE`), so a per-user toggle has nothing to key off of. `RESEARCH_*` env flags are gating everything above in practice, and are expected to keep doing so until real user identity exists.

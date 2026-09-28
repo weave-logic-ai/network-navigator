@@ -3,7 +3,7 @@
 import { PoolClient } from 'pg';
 import { parseCsv } from './csv-parser';
 import { CompanyResolver } from './company-resolver';
-import { deduplicateContact } from './deduplication';
+import { deduplicateContact, normalizedLinkedInProfileUrl } from './deduplication';
 import { createConnectionEdge } from './edge-builder';
 import { ImportError } from './types';
 
@@ -47,10 +47,12 @@ export async function importConnections(
 
   for (let i = 0; i < parsed.rows.length; i++) {
     const row = parsed.rows[i];
+    let rowTransactionStarted = false;
     try {
       const firstName = row['first_name'] || '';
       const lastName = row['last_name'] || '';
-      const linkedinUrl = row['url'] || '';
+      const rawLinkedinUrl = row['url'] || '';
+      const linkedinUrl = normalizedLinkedInProfileUrl(rawLinkedinUrl);
       const email = row['email_address'] || '';
       const company = row['company'] || '';
       const title = row['position'] || '';
@@ -61,11 +63,15 @@ export async function importConnections(
         result.errors.push({
           file: 'Connections.csv',
           row: i + 1,
-          message: 'Missing LinkedIn URL, skipping row',
+          message: rawLinkedinUrl.trim() ? 'Invalid LinkedIn profile URL, skipping row' : 'Missing LinkedIn URL, skipping row',
         });
         result.skippedRecords++;
         continue;
       }
+
+      // Keep a contact identity update and its task/goal reconciliation atomic.
+      await client.query('BEGIN');
+      rowTransactionStarted = true;
 
       // Resolve company
       const companyRecord = await companyResolver.resolve(company);
@@ -102,17 +108,29 @@ export async function importConnections(
 
       // Create CONNECTED_TO edge
       await createConnectionEdge(client, selfContactId, dedupResult.contactId, connectedOn);
+      await client.query('COMMIT');
+      rowTransactionStarted = false;
 
       // Update counters
       if (dedupResult.action === 'created') result.newRecords++;
       else if (dedupResult.action === 'updated') result.updatedRecords++;
       else result.skippedRecords++;
     } catch (err) {
+      if (rowTransactionStarted) {
+        try {
+          await client.query('ROLLBACK');
+        } finally {
+          // The resolver may cache a company inserted by this row. A rollback
+          // removes that company, so its ID must never reach a later row.
+          companyResolver.clearCache();
+        }
+      }
       result.errors.push({
         file: 'Connections.csv',
         row: i + 1,
         message: err instanceof Error ? err.message : 'Unknown error',
       });
+      result.skippedRecords++;
     }
   }
 

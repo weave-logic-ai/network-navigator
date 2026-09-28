@@ -1,0 +1,96 @@
+---
+title: Lenses
+description: How saved lenses scope a research target's view, how the deep-link ?lens= parameter works, and how the lens manager UI works.
+---
+
+# Lenses
+
+A **lens** is a saved view of a [research target](/docs/browser-extension/target-panel) — a bundle of `(target, config)` stored in `research_lenses`. The config JSONB currently holds `icpProfileIds`, the set of ICP profiles used to score contacts for that target. Two lenses on the same target let you score the same contact two different ways — for example, "hiring manager fit" vs. "technical evaluator fit" — without duplicating the target itself.
+
+<Callout type="info">
+Lenses ship behind `RESEARCH_FLAGS.targets`. The backend routes documented here are always callable so scoring can thread a `targetId` through the pipeline; the UI surfaces (selector, manager, deep-link banner) only render when the flag is on.
+</Callout>
+
+## What a lens scopes
+
+Today a lens's `config` carries one thing that matters to scoring: `icpProfileIds`. `getActiveLensIcps(targetId)` resolves the target's active lens and returns the ICP profiles referenced there, falling back to an empty array (which callers treat as "use the owner's default ICP list") when the target has no lens, the lens has no ICP ids, or every referenced ICP is inactive.
+
+The `config` object is otherwise open-ended — `createLensForTarget` accepts a `configExtras` bag that gets merged in alongside `icpProfileIds`, so future filter/view state can ride the same column without a schema change.
+
+## The current read path (migration 046)
+
+Lenses shipped in two stages, and it matters which one a piece of code is actually on:
+
+- **Phase 1.5 (migration 035, as it landed)** had no `research_target_icps.lens_id` and no `research_target_state.last_used_lens_id`. "Which lens is active" was simulated by flipping `research_lenses.is_default` across every sibling lens for a target on every activation — a global-per-target flag, not a per-user one. Two people researching the same target could clobber each other's active lens.
+- **Migration `046-lens-schema-cleanup.sql`** (originally drafted as migration 045, then renumbered to 046 to avoid colliding with WS-5's `045-source-field-overrides.sql`, already on `main`) replaces that workaround with real columns:
+  - `research_target_icps.lens_id` — nullable FK to `research_lenses`, back-filled from each target's `is_default` lens. Not yet the read path for ICP resolution (`getActiveLensIcps` still reads `config.icpProfileIds`), but exposed for downstream consumers.
+  - `research_target_state.last_used_lens_id` — nullable FK to `research_lenses`. This is the real "which lens is active for this user on this target" pointer, back-filled from each target's default lens.
+
+`app/src/lib/targets/lens-service.ts` resolves the active lens (`getActiveLensForTarget`) in this order:
+
+1. `research_target_state.last_used_lens_id` for the current owner — but only if it points at a non-deleted lens whose `primary_target_id` matches the target being asked about. A stale pointer left over from another target falls through to step 2.
+2. The target's `is_default = TRUE` lens (oldest wins on a tie).
+3. The oldest non-deleted lens attached to the target.
+4. `null` if the target has no lenses at all.
+
+`activateLensForTarget(targetId, lensId)` writes to `research_target_state.last_used_lens_id` for the current owner (`owner_profiles.is_current = TRUE` — this is a single-tenant-v1 read, not real multi-user auth). `is_default` is still touched, but only opportunistically: if the target has no default lens yet, the newly activated lens is promoted to default so state-less callers (background jobs, anonymous reads) keep resolving to *something* sensible. An existing default on a sibling lens is never overwritten by activation.
+
+<Callout type="warn">
+The activate route's own comment (`app/src/app/api/targets/[id]/lenses/[lensId]/activate/route.ts`) still describes the pre-046 behavior — "marks this row as `is_default=true` and clears the flag on every sibling," and cites migration 035 as not having the column. That comment is stale; the function it calls (`activateLensForTarget`) was updated for migration 046 and writes `last_used_lens_id` as described above. Read the service file, not that route comment, for current behavior.
+</Callout>
+
+### A UI nuance worth knowing
+
+The lens list endpoint (`GET /api/targets/:id/lenses`) returns each lens's `isDefault` flag but does not call `getActiveLensForTarget`. Both `LensSelector` and `LensManager` use `isDefault` as their notion of "which lens is active" for display and for the selected `<option>`. That is a reasonable proxy most of the time — `is_default` and `last_used_lens_id` usually agree — but they are not the same pointer, and `getActiveLensForTarget` (the function scoring actually calls) prefers `last_used_lens_id`. After a page reload, the lens shown as "Active" in the selector is the target's `is_default` lens; the lens actually driving ICP resolution is whichever one `last_used_lens_id` points at for the current owner. These only diverge if a target already had a default lens set before `last_used_lens_id` starts pointing somewhere else — which activation's "don't clobber an existing default" rule makes possible.
+
+## The lens selector and manager UI
+
+`LensSelector` (`app/src/components/targets/lens-selector.tsx`) renders in the side panel next to a locked target:
+
+- With zero or one lens, it shows a plain "Manage lenses" button.
+- With two or more lenses, it shows a `<select>` of lens names plus a trailing "Manage lenses..." option. Picking a lens calls `PUT /api/targets/:id/lenses/:lensId/activate` and optimistically updates local state.
+
+`LensManager` (`app/src/components/targets/lens-manager.tsx`) is the modal opened from either path. Per lens row it offers:
+
+- **Activate** — click the row to call the same activate endpoint.
+- **Link** — copies a tenant-local share URL (`?lens=<lensId>`).
+- **Opaque** — copies a self-contained share URL (`?lens=opaque:<base64>`).
+- **Delete** — soft-deletes via `DELETE /api/targets/:id/lenses/:lensId`.
+
+A footer input lets you save the panel's current config as a new lens (`POST /api/targets/:id/lenses`). The first lens created for a target is automatically marked default.
+
+## The `?lens=` deep link
+
+`app/src/lib/targets/lens-url.ts` defines two URL shapes, both handled by `LensDeepLink` (`app/src/components/targets/lens-deep-link.tsx`):
+
+| Form | Meaning | Effect |
+|------|---------|--------|
+| `?lens=<lensId>` | Tenant-local. References a row in `research_lenses` by id. | Fetches the target's lens list; if the id is found and not already active, activates it server-side (a real DB write) and shows an "activated" banner. If not found — either it belongs to another target or was soft-deleted — shows a "deleted; viewing default" banner. |
+| `?lens=opaque:<base64>` | Self-contained. The lens's `config` (and optional `name`) are encoded directly into the URL, versioned with `v: 1`. | Decoded **client-side only** — no server round-trip, no DB write, no activation. Shows a "viewing through shared lens (transient, not saved)" banner. |
+
+The opaque form is deliberately unsigned. `lens-url.ts` explains why: the use case is a colleague sharing "here's the lens I'm using," not an auth-bearing capability, and the decoded config is applied transiently — worst case a tampered blob shows the viewer a different (but harmless) view, never a DB write. The decoder rejects anything that isn't valid JSON, is missing `v`, or has a `v` other than `1`; it never throws, so a malformed link falls back to the default view instead of crashing the page.
+
+<Callout type="warn">
+As of this writing, the opaque banner tells the user what's happening but the decoded `config` is not actually threaded into any client-side filter state — `lens-deep-link.tsx`'s own comment calls this out as deferred scope ("deeper client-state propagation... is deferred"). The banner is honest, not aspirational: don't expect `?lens=opaque:...` to change what's rendered beyond the banner text itself yet.
+</Callout>
+
+Dismissing the banner strips `?lens=` from the URL via `router.replace` so a reload doesn't re-trigger it.
+
+## Soft delete
+
+Deleting a lens (`softDeleteLens`) sets `deleted_at` rather than removing the row, and also clears `is_default`. This exists specifically so a previously-shared tenant-local `?lens=<id>` link can distinguish "this lens never existed" (404 from `getLensById`) from "this lens existed but was deleted" (the row is still there, just filtered out of `listLensesForTarget`). Deleting the active default does **not** auto-promote a sibling lens — the target falls through to whatever `getActiveLensForTarget`'s next-in-order rule picks, and a new activation is left as an explicit user action.
+
+## Related tables
+
+| Table | Column added by | Purpose |
+|-------|------------------|---------|
+| `research_lenses` | — (base table) | The lens row: name, `primary_target_id`, `secondary_target_id`, `config` JSONB, `is_default`. |
+| `research_lenses.deleted_at` | `044-targets-lens-history.sql` | Soft-delete marker. |
+| `research_target_state.history` | `044-targets-lens-history.sql` | A bounded ring buffer (capped at 20 by application code) of recent `{targetId, lensId, openedAt}` entries, feeding the breadcrumb hover card / swap-back UI. |
+| `research_target_icps.lens_id` | `046-lens-schema-cleanup.sql` | FK from a target↔ICP row to the lens it belongs to. Back-filled; not yet the ICP read path. |
+| `research_target_state.last_used_lens_id` | `046-lens-schema-cleanup.sql` | The real per-owner active-lens pointer described above. |
+
+## See also
+
+- [Target Panel](/docs/browser-extension/target-panel) — how a target gets locked in the side panel; lenses scope the view once a target is locked.
+- [Parser Telemetry](/docs/research-tools/parser-telemetry) — a different, unrelated Research Tools Sprint work stream.

@@ -27,7 +27,7 @@
 //     still return gracefully so the dispatcher records a clean ack rather
 //     than entering the dead-letter path.
 
-import { query } from '../../../db/client';
+import { transaction } from '../../../db/client';
 import type { Impulse } from '../../types';
 
 type Channel = 'log' | 'task' | 'email' | 'webhook';
@@ -109,22 +109,6 @@ async function persistAsTask(
 ): Promise<string | null> {
   const contactId = isUuid(impulse.sourceEntityId) ? impulse.sourceEntityId : null;
 
-  // Dedup: do not pile up identical pending notifications for the same impulse
-  // (same impulse id in metadata -> skip). We look for a pending notification
-  // task whose description already references this impulse id.
-  const existing = await query<{ id: string }>(
-    `SELECT id FROM tasks
-     WHERE task_type = 'notification'
-       AND status = 'pending'
-       AND source = 'impulse'
-       AND metadata->>'impulseId' = $1
-     LIMIT 1`,
-    [impulse.id]
-  );
-  if (existing.rows.length > 0) {
-    return existing.rows[0].id;
-  }
-
   const metadata = JSON.stringify({
     impulseId: impulse.id,
     impulseType: impulse.impulseType,
@@ -133,14 +117,27 @@ async function persistAsTask(
     payload: impulse.payload,
   });
 
-  const inserted = await query<{ id: string }>(
-    `INSERT INTO tasks (title, description, task_type, status, priority, contact_id, source, metadata)
-     VALUES ($1, $2, 'notification', 'pending', $3, $4, 'impulse', $5::jsonb)
-     RETURNING id`,
-    [title, body, priority, contactId, metadata]
-  );
-
-  return inserted.rows[0]?.id ?? null;
+  return transaction(async client => {
+    // The impulse row serializes concurrent retries of this same delivery.
+    const locked = await client.query('SELECT id FROM impulses WHERE id = $1 FOR UPDATE', [impulse.id]);
+    if (locked.rows.length === 0) throw new Error(`Impulse not found: ${impulse.id}`);
+    const existing = await client.query<{ task_id: string | null }>(
+      'SELECT task_id FROM impulse_notification_tasks WHERE impulse_id = $1', [impulse.id]
+    );
+    if (existing.rows[0]) return existing.rows[0].task_id;
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO tasks (title, description, task_type, status, priority, contact_id, source, metadata)
+       VALUES ($1, $2, 'notification', 'pending', $3, $4, 'impulse', $5::jsonb)
+       RETURNING id`,
+      [title, body, priority, contactId, metadata]
+    );
+    const taskId = inserted.rows[0].id;
+    await client.query(
+      'INSERT INTO impulse_notification_tasks (impulse_id, task_id) VALUES ($1, $2)',
+      [impulse.id, taskId]
+    );
+    return taskId;
+  });
 }
 
 function isUuid(value: string): boolean {

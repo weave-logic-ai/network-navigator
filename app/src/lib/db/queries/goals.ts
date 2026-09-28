@@ -1,6 +1,7 @@
 // Goal CRUD query functions
 
 import { query } from '../client';
+import { reconcileSuggestedGoalIdentities } from '../../contacts/identity-lifecycle';
 
 export interface GoalRow {
   id: string;
@@ -47,6 +48,7 @@ export interface TaskRow {
 export async function listGoals(
   opts: { status?: string; limit?: number } = {}
 ): Promise<GoalRow[]> {
+  await reconcileSuggestedGoalIdentities();
   const { status, limit = 50 } = opts;
 
   const conditions: string[] = [];

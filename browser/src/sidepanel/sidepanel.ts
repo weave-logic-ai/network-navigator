@@ -16,10 +16,15 @@ import {
   summarizePiiDetection,
 } from '../shared/pii-scrubber';
 import {
-  enqueueSnippet,
-  getSnippetQueueDepth,
+  getSnippetQueue,
   SNIPPET_QUEUE_KEY,
+  draftSnippetDestination, snippetTargetFromLock,
+  type SnippetDestination,
 } from '../shared/snippet-queue';
+import { createSnippetQueuePanel, queueSnippetAndReset } from './snippet-queue-panel';
+import { listApprovedOriginsFromChrome, revokeOrigin } from '../shared/approved-origins';
+import { getSnipModeActive, setSnipModeActive } from '../shared/snip-mode';
+import { ExtensionAuthError, fetchOutreachTemplates, isFullExtensionToken, personalizeOutreachTemplate, registerFullExtensionToken } from '../shared/outreach-api';
 
 // ============================================================
 // DOM References
@@ -54,6 +59,10 @@ const spCopyTemplateBtn = document.getElementById('sp-copy-template-btn')!;
 const spPersonalizeBtn = document.getElementById('sp-personalize-btn')!;
 const spPersonalizeContactName = document.getElementById('sp-personalize-contact-name')!;
 const spTemplateStatus = document.getElementById('sp-template-status')!;
+const spReauth = document.getElementById('sp-reauth')!;
+const spReauthMessage = document.getElementById('sp-reauth-message')!;
+const spReauthToken = document.getElementById('sp-reauth-token') as HTMLInputElement;
+const spReauthSubmit = document.getElementById('sp-reauth-submit') as HTMLButtonElement;
 
 // ============================================================
 // Status Update
@@ -209,6 +218,7 @@ function renderGoals(goals: Goal[]): void {
 // ============================================================
 
 let spLoadedTemplates: OutreachTemplate[] = [];
+let spTemplatesFromServer = false;
 let spSelectedTemplate: OutreachTemplate | null = null;
 let spCurrentContactName: string = 'contact';
 let spCurrentContactUrl: string = '';
@@ -248,7 +258,40 @@ function formatCategoryLabel(category: string): string {
   return category.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function showSidepanelReauth(message: string): void {
+  spTemplatesFromServer = false;
+  spPersonalizeBtn.setAttribute('disabled', 'true');
+  spReauthMessage.textContent = message;
+  spReauth.style.display = 'block';
+}
+
+spReauthSubmit.addEventListener('click', async () => {
+  const token = spReauthToken.value.trim();
+  if (!isFullExtensionToken(token)) {
+    showSidepanelReauth('Enter the full extension token, not its display prefix.');
+    return;
+  }
+  spReauthSubmit.disabled = true;
+  try {
+    const { appUrl } = await chrome.storage.local.get('appUrl');
+    const data = await registerFullExtensionToken((appUrl as string) || 'http://localhost:3750', token);
+    await chrome.storage.local.set({ extensionToken: token,
+      extensionId: data.extensionId, settings: data.settings });
+    spReauthToken.value = '';
+    spReauth.style.display = 'none';
+    await loadSidepanelTemplates();
+    await updateStatus();
+  } catch {
+    showSidepanelReauth('Registration failed. Check the full token and local app connection.');
+  } finally {
+    spReauthSubmit.disabled = false;
+  }
+});
+
 async function loadSidepanelTemplates(): Promise<void> {
+  spTemplatesFromServer = false;
+  spSelectedTemplate = null;
+  templatePreviewPanel.style.display = 'none';
   try {
     const appUrl = await new Promise<string>((resolve) => {
       chrome.storage.local.get('appUrl', (result) => {
@@ -256,20 +299,23 @@ async function loadSidepanelTemplates(): Promise<void> {
       });
     });
 
-    const response = await fetch(`${appUrl}/api/outreach/templates`, {
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.templates && data.templates.length > 0) {
-        spLoadedTemplates = data.templates;
-        renderTemplateCards();
-        return;
-      }
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const templates = await fetchOutreachTemplates(appUrl, extensionToken);
+    if (templates.length > 0) {
+      spLoadedTemplates = templates;
+      spTemplatesFromServer = true;
+      spReauth.style.display = 'none';
+      renderTemplateCards();
+      return;
     }
-  } catch {
-    // API unavailable, use defaults
+  } catch (error) {
+    if (error instanceof ExtensionAuthError) {
+      showSidepanelReauth(error.status === 401
+        ? 'Token expired or revoked. Enter a new full token to reconnect.'
+        : 'Extension origin is not allowed. Check local app configuration.');
+    } else if (error instanceof Error && /Full extension token/.test(error.message)) {
+      showSidepanelReauth('Enter a full extension token to reconnect.');
+    }
   }
 
   spLoadedTemplates = SP_DEFAULT_TEMPLATES;
@@ -353,6 +399,8 @@ function openTemplatePreview(templateId: string): void {
   previewTemplateName.textContent = tpl.name;
   templateFullPreview.innerHTML = highlightVariables(tpl.body);
   spPersonalizeContactName.textContent = spCurrentContactName;
+  spPersonalizeBtn.toggleAttribute('disabled', !spTemplatesFromServer);
+  spPersonalizeBtn.title = spTemplatesFromServer ? '' : 'Personalization requires a saved template';
   templatePreviewPanel.style.display = 'block';
 }
 
@@ -383,7 +431,7 @@ spCopyTemplateBtn.addEventListener('click', async () => {
 });
 
 spPersonalizeBtn.addEventListener('click', async () => {
-  if (!spSelectedTemplate) return;
+  if (!spSelectedTemplate || !spTemplatesFromServer) return;
 
   spPersonalizeBtn.setAttribute('disabled', 'true');
   spPersonalizeBtn.textContent = 'Personalizing...';
@@ -398,21 +446,17 @@ spPersonalizeBtn.addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const contactUrl = tabs[0]?.url || spCurrentContactUrl;
 
-    const response = await fetch(`${appUrl}/api/claude/personalize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ templateId: spSelectedTemplate.id, contactUrl }),
-    });
-
-    if (!response.ok) throw new Error('Personalization failed');
-
-    const data = await response.json();
-    templateFullPreview.innerHTML = escapeHtml(data.personalizedText);
+    const { extensionToken } = await chrome.storage.local.get('extensionToken');
+    const content = await personalizeOutreachTemplate(appUrl, extensionToken, spSelectedTemplate.id, contactUrl);
+    templateFullPreview.innerHTML = escapeHtml(content);
     showSpTemplateStatus('Template personalized', 'success');
-  } catch {
+  } catch (error) {
+    if (error instanceof ExtensionAuthError) {
+      showSidepanelReauth('Token expired or revoked. Enter a new full token to reconnect.');
+    }
     showSpTemplateStatus('Could not personalize. Check app connection.', 'error');
   } finally {
-    spPersonalizeBtn.removeAttribute('disabled');
+    spPersonalizeBtn.toggleAttribute('disabled', !spTemplatesFromServer);
     spPersonalizeBtn.innerHTML = `Personalize for <span id="sp-personalize-contact-name">${escapeHtml(spCurrentContactName)}</span>`;
   }
 });
@@ -476,6 +520,9 @@ interface LockedTarget {
 
 // Cache of the currently rendered target to avoid redundant fetches
 let lastRenderedLock: string = '';
+let targetResolution = 0;
+let snippetConfigRevision = 0;
+let currentTargetTabId: number | undefined;
 
 async function getAppUrlBase(): Promise<string> {
   return new Promise((resolve) => {
@@ -493,7 +540,7 @@ async function fetchWithAuth(path: string): Promise<Response | null> {
     );
     const res = await fetch(`${appUrl}${path}`, {
       headers: extensionToken
-        ? { Authorization: `Bearer ${extensionToken}` }
+        ? { 'X-Extension-Token': extensionToken }
         : {},
     });
     return res;
@@ -649,9 +696,13 @@ function renderTarget(lock: LockedTarget | null): void {
 let taskLockCleared = false;
 
 async function updateTargetPanel(): Promise<void> {
+  const resolution = ++targetResolution;
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (resolution !== targetResolution) return;
   const tab = tabs[0];
+  currentTargetTabId = tab?.id;
   if (!tab?.url) {
+    lastRenderedLock = 'none';
     renderTarget(null);
     return;
   }
@@ -676,6 +727,10 @@ async function updateTargetPanel(): Promise<void> {
       if (company) lock = { target: company, source: 'page' };
     }
   }
+
+  if (resolution !== targetResolution) return;
+  const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (resolution !== targetResolution || activeTabs[0]?.id !== tab.id || activeTabs[0]?.url !== url) return;
 
   const cacheKey = lock
     ? `${lock.source}:${lock.target.kind}:${lock.target.id}`
@@ -721,14 +776,19 @@ targetClearBtn.addEventListener('click', () => {
 });
 
 // Reset task-lock clear when the tab URL changes (new page, fresh decision)
-chrome.tabs.onActivated.addListener(() => {
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  currentTargetTabId = tabId;
+  targetResolution++;
   taskLockCleared = false;
   lastRenderedLock = '';
+  void updateTargetPanel();
 });
-chrome.tabs.onUpdated.addListener((_id, info) => {
-  if (info.status === 'complete' || info.url) {
+chrome.tabs.onUpdated.addListener((id, info) => {
+  if (id === currentTargetTabId && (info.status === 'complete' || info.url)) {
+    targetResolution++;
     taskLockCleared = false;
     lastRenderedLock = '';
+    void updateTargetPanel();
   }
 });
 
@@ -742,11 +802,13 @@ captureBtn.addEventListener('click', () => {
 
   chrome.runtime.sendMessage(
     { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage,
-    (_response) => {
-      captureBtn.textContent = 'Captured!';
+    (response: { status?: string; message?: string } | undefined) => {
+      const status = response?.status;
+      captureBtn.textContent = status === 'submitted' ? 'Submitted' : status === 'queued' ? 'Queued locally' : status === 'limit' ? 'Limit reached' : 'Capture failed';
+      captureBtn.setAttribute('title', response?.message || chrome.runtime.lastError?.message || '');
       setTimeout(() => {
-        captureBtn.removeAttribute('disabled');
-        captureBtn.textContent = 'Capture This Page';
+        if (status !== 'limit') captureBtn.removeAttribute('disabled');
+        if (status === 'submitted' || status === 'queued') captureBtn.textContent = 'Capture This Page';
         updateStatus();
       }, 1500);
     }
@@ -758,14 +820,28 @@ captureBtn.addEventListener('click', () => {
 // ============================================================
 
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes.extensionToken || changes.appUrl) {
+    snippetConfigRevision++;
+    targetResolution++;
+    lastRenderedLock = '';
+    renderTarget(null);
+    snippetEnabled = false;
+    if (snippetSection) snippetSection.style.display = 'none';
+    void updateTargetPanel();
+    void loadSnippetTags();
+    void loadSidepanelTemplates();
+  }
   if (changes.connectionState) {
     updateConnectionStatus(changes.connectionState.newValue);
   }
   // WS-3 Phase 6 §7 — approvedOrigins is rewritten by the service worker on
-  // chrome.permissions.onRemoved / onAdded. Re-render the grant CTA so the
-  // UI reflects the new state without a sidebar reload.
+  // chrome.permissions.onRemoved / onAdded (and by this panel's own
+  // grant/revoke handlers). Re-render the grant CTA and the revoke list
+  // (ADR-028 clause 6) so the UI reflects the new state without a reload —
+  // including a revoke made through chrome://extensions instead of here.
   if (changes.approvedOrigins) {
     void updateAddHostButton();
+    void renderApprovedOrigins();
   }
   if (changes.pendingTasks) {
     // Re-resolve target lock when the task list changes — a new task may now match the current URL
@@ -825,6 +901,10 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo) => {
 async function init(): Promise<void> {
   await updateStatus();
   await updatePageInfo();
+  // ADR-028 clauses 4 & 6 — restore this session's snip-mode toggle state
+  // and render the current approved-origins/revoke list.
+  await loadSnipModeState();
+  await renderApprovedOrigins();
 
   // Load tasks from storage
   chrome.storage.local.get('pendingTasks', (result) => {
@@ -955,6 +1035,15 @@ const snippetSaveBtn = document.getElementById('sp-snippet-save-btn');
 const snippetCancelBtn = document.getElementById('sp-snippet-cancel-btn');
 const snippetErrorEl = document.getElementById('sp-snippet-error');
 const addHostBtn = document.getElementById('sp-add-host-btn');
+// ADR-028 clause 4 — Snip mode opt-in toggle + the widget body it gates
+const snipModeToggleBtn = document.getElementById('sp-snip-mode-toggle');
+const snipModeHint = document.getElementById('sp-snip-mode-hint');
+const snippetWidgetBody = document.getElementById('sp-snippet-widget-body');
+// ADR-028 clause 6 — approved-origins revoke UI
+const approvedOriginsList = document.getElementById('sp-approved-origins-list');
+const approvedOriginsEmpty = document.getElementById('sp-approved-origins-empty');
+const approvedOriginsStatus = document.getElementById('sp-approved-origins-status');
+const approvedOriginsRetry = document.getElementById('sp-approved-origins-retry');
 // Phase 1.5 — image tab DOM
 const snippetTabText = document.getElementById('sp-snippet-tab-text');
 const snippetTabImage = document.getElementById('sp-snippet-tab-image');
@@ -985,10 +1074,45 @@ const snippetLinkPrepBtn = document.getElementById('sp-snippet-link-prep-btn');
 // WS-3 Phase 6 §9/§10 additions
 const snippetPiiBanner = document.getElementById('sp-snippet-pii-banner');
 const snippetQueueDepthEl = document.getElementById('sp-snippet-queue-depth');
+const snippetQueueSection = document.getElementById('sp-snippet-queue-section');
+const snippetQueueList = document.getElementById('sp-snippet-queue-list');
+const snippetQueueError = document.getElementById('sp-snippet-queue-error');
+const snippetQueueReadRetry = document.getElementById('sp-snippet-queue-read-retry') as HTMLButtonElement | null;
+
+function changeSnippetQueue(action: 'QUEUE_SNIPPET' | 'RETRY_SNIPPET' | 'DISCARD_SNIPPET', payload: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: action, payload }, (response: { status?: string; message?: string } | undefined) => {
+      const error = chrome.runtime.lastError?.message || response?.message;
+      if (response?.status !== 'ok') {
+        const failure = new Error(error || 'Snippet queue unavailable');
+        if (action === 'QUEUE_SNIPPET') snippetQueuePanel?.showEnqueueFailure(failure);
+        reject(failure);
+      } else {
+        if (action === 'QUEUE_SNIPPET') snippetQueuePanel?.enqueueSucceeded();
+        resolve();
+      }
+    });
+  });
+}
 
 let availableTags: SidebarTagRow[] = [];
 let currentSnippet: SidebarSnippetPayload | null = null;
+const snippetRequestIds = new WeakMap<SidebarSnippetPayload, string>();
+let snippetDraftConfigRevision = 0;
+let snippetDraftDestination: SnippetDestination | null = null;
+let snippetDraftTarget: ReturnType<typeof snippetTargetFromLock> = null;
+
+function markFreshSnippet(target = snippetTargetFromLock(lastRenderedLock)): void {
+  snippetDraftConfigRevision = snippetConfigRevision;
+  snippetDraftDestination = null;
+  snippetDraftTarget = target;
+}
 let snippetEnabled = false;
+// ADR-028 clause 4 — Snip mode is off by default every session; capturing is
+// a deliberate act, not an ambient one. Backed by chrome.storage.session so
+// it survives a side-panel close/reopen within the browser session but is
+// gone on browser restart (matching the ADR's "opt-in per session" wording).
+let snipModeActive = false;
 
 function extractPersonBigrams(text: string): string[] {
   if (!text) return [];
@@ -1325,17 +1449,13 @@ if (addHostBtn) {
       const origin = new URL(tab.url).origin + '/*';
       const granted = await chrome.permissions.request({ origins: [origin] });
       if (granted) {
-        // Mirror the grant in local storage for UI state (source of truth
-        // remains chrome.permissions per ADR-028).
-        const stored = await new Promise<{ approvedOrigins?: string[] }>((r) =>
-          chrome.storage.local.get('approvedOrigins', (v) => r(v)),
-        );
-        const next = new Set(stored.approvedOrigins ?? []);
-        next.add(origin);
-        await chrome.storage.local.set({ approvedOrigins: Array.from(next) });
+        // The service worker mirrors the native grant on permissions.onAdded.
+        // The panel reads the native list directly so it does not race that
+        // single writer or hide a broad/HTTP grant under an HTTPS alias.
         // Re-inject so snipping works immediately without a reload.
         await injectSnippetContentScript(tab.id);
         await updateAddHostButton();
+        await renderApprovedOrigins();
       }
     } catch (err) {
       logger.warn('Add-host request failed:', (err as Error).message);
@@ -1343,8 +1463,149 @@ if (addHostBtn) {
   });
 }
 
+// ============================================================
+// Approved-origins revoke UI (ADR-028 clause 6)
+// ============================================================
+//
+// Read native patterns before rendering: the storage list is only a mirror.
+
+async function getApprovedOriginsForDisplay(): Promise<string[]> {
+  return listApprovedOriginsFromChrome();
+}
+
+async function handleRevokeClick(origin: string): Promise<void> {
+  if (approvedOriginsStatus) approvedOriginsStatus.textContent = 'Checking site permission…';
+  const result = await revokeOrigin(origin);
+  if (approvedOriginsStatus) {
+    approvedOriginsStatus.textContent = result.revoked
+      ? `Access to ${origin} was revoked.`
+      : result.origins.includes(origin)
+        ? `Chrome did not remove ${origin}. It may be included with the extension.`
+        : `Chrome did not confirm that access to ${origin} is gone. Check extension permissions for broader grants.`;
+  }
+  await renderApprovedOrigins();
+  await updateAddHostButton();
+}
+
+let approvedOriginsRenderRevision = 0;
+
+async function renderApprovedOrigins(): Promise<void> {
+  if (!approvedOriginsList || !approvedOriginsEmpty) return;
+  const revision = ++approvedOriginsRenderRevision;
+  let origins: string[];
+  try {
+    origins = await getApprovedOriginsForDisplay();
+  } catch {
+    if (revision !== approvedOriginsRenderRevision) return;
+    approvedOriginsList.style.display = 'none';
+    approvedOriginsList.innerHTML = '';
+    approvedOriginsEmpty.style.display = '';
+    approvedOriginsEmpty.textContent = 'Site permissions could not be verified.';
+    if (approvedOriginsRetry) approvedOriginsRetry.style.display = '';
+    if (approvedOriginsStatus) approvedOriginsStatus.textContent = 'Permission check unavailable. Retry to refresh.';
+    return;
+  }
+  if (revision !== approvedOriginsRenderRevision) return;
+  if (approvedOriginsRetry) approvedOriginsRetry.style.display = 'none';
+  if (approvedOriginsStatus?.textContent === 'Permission check unavailable. Retry to refresh.') {
+    approvedOriginsStatus.textContent = '';
+  }
+  approvedOriginsEmpty.textContent = 'No sites approved yet.';
+  if (origins.length === 0) {
+    approvedOriginsList.style.display = 'none';
+    approvedOriginsList.innerHTML = '';
+    approvedOriginsEmpty.style.display = '';
+    return;
+  }
+  approvedOriginsEmpty.style.display = 'none';
+  approvedOriginsList.style.display = '';
+  approvedOriginsList.innerHTML = '';
+  const fixedOrigins = new Set(chrome.runtime.getManifest().host_permissions ?? []);
+  for (const origin of origins) {
+    const li = document.createElement('li');
+    li.className = 'approved-origin-row';
+    const label = document.createElement('span');
+    label.className = 'approved-origin-label';
+    label.textContent = origin === '<all_urls>' ? 'All sites (optional)' : origin.replace(/\/\*$/, '');
+    const revokeBtn = document.createElement('button');
+    revokeBtn.className = 'btn-icon';
+    if (fixedOrigins.has(origin)) {
+      revokeBtn.disabled = true;
+      revokeBtn.title = `${origin} is included with the extension`;
+      revokeBtn.textContent = 'Included';
+    } else {
+      revokeBtn.title = `Revoke access to ${origin}`;
+      revokeBtn.setAttribute('aria-label', `Revoke access to ${origin}`);
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', () => {
+        void handleRevokeClick(origin);
+      });
+    }
+    li.appendChild(label);
+    li.appendChild(revokeBtn);
+    approvedOriginsList.appendChild(li);
+  }
+}
+
+approvedOriginsRetry?.addEventListener('click', () => { void renderApprovedOrigins(); });
+
+// ============================================================
+// Snip mode opt-in (ADR-028 clause 4)
+// ============================================================
+//
+// The permission grant (Add-host / optional_host_permissions) only controls
+// *where* the content script is allowed to run. Snip mode is a separate,
+// session-scoped decision about *whether the capture widget is active right
+// now* — granting an origin must not, by itself, turn on capture. This
+// mirrors the popup-toggle-or-hotkey shape the ADR specifies in §7.3.
+
+function renderSnipModeToggle(): void {
+  if (snipModeToggleBtn) {
+    snipModeToggleBtn.textContent = snipModeActive ? 'Snip mode: On' : 'Snip mode: Off';
+    snipModeToggleBtn.setAttribute('aria-pressed', String(snipModeActive));
+    snipModeToggleBtn.classList.toggle('active', snipModeActive);
+  }
+  if (snipModeHint) snipModeHint.style.display = snipModeActive ? 'none' : '';
+  if (snippetWidgetBody) snippetWidgetBody.style.display = snipModeActive ? '' : 'none';
+}
+
+async function setSnipMode(active: boolean): Promise<void> {
+  snipModeActive = active;
+  try {
+    await setSnipModeActive(active);
+  } catch (err) {
+    // storage.session should always be available given the "storage"
+    // permission, but don't let a failure here block the UI toggle.
+    logger.warn('Failed to persist snip-mode state:', (err as Error).message);
+  }
+  if (!active) resetSnippetCard();
+  renderSnipModeToggle();
+}
+
+async function loadSnipModeState(): Promise<void> {
+  snipModeActive = await getSnipModeActive();
+  renderSnipModeToggle();
+}
+
+if (snipModeToggleBtn) {
+  snipModeToggleBtn.addEventListener('click', () => {
+    void setSnipMode(!snipModeActive);
+  });
+}
+
+// Ctrl+Shift+S / Cmd+Shift+S — registered as a chrome.commands entry in
+// manifest.json and relayed here by the service worker, since commands only
+// fire in the background context.
+chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
+  if (message.type === 'TOGGLE_SNIP_MODE') {
+    void setSnipMode(!snipModeActive);
+  }
+});
+
 function resetSnippetCard(): void {
   currentSnippet = null;
+  snippetDraftDestination = null;
+  snippetDraftTarget = null;
   if (snippetCard) snippetCard.style.display = 'none';
   if (snippetErrorEl) snippetErrorEl.style.display = 'none';
   if (snippetStatus) snippetStatus.textContent = 'Select text on the page, then click capture.';
@@ -1394,26 +1655,23 @@ function showPiiBannerForText(text: string): void {
   snippetPiiBanner.style.display = '';
 }
 
-/**
- * WS-3 Phase 6 §10 — render the offline-snippet-queue badge. Shown only when
- * there's at least one queued item; clicking does nothing (replay is driven
- * by the service worker).
- */
-async function refreshSnippetQueueDepth(): Promise<void> {
-  if (!snippetQueueDepthEl) return;
-  try {
-    const depth = await getSnippetQueueDepth();
-    if (depth <= 0) {
-      snippetQueueDepthEl.style.display = 'none';
-      snippetQueueDepthEl.textContent = '';
-      return;
-    }
-    snippetQueueDepthEl.style.display = '';
-    snippetQueueDepthEl.textContent = `${depth} queued`;
-    snippetQueueDepthEl.title = `${depth} snippet${depth === 1 ? '' : 's'} waiting for the server to come back.`;
-  } catch {
-    snippetQueueDepthEl.style.display = 'none';
-  }
+const snippetQueuePanel = snippetQueueDepthEl && snippetQueueSection && snippetQueueList && snippetQueueError && snippetQueueReadRetry
+  ? createSnippetQueuePanel({
+      section: snippetQueueSection,
+      depth: snippetQueueDepthEl,
+      list: snippetQueueList,
+      error: snippetQueueError,
+      readRetry: snippetQueueReadRetry,
+    }, {
+      document,
+      readQueue: getSnippetQueue,
+      change: (action, id) => changeSnippetQueue(action, { id }),
+      restore: restoreQueuedSnippet,
+    })
+  : null;
+
+function refreshSnippetQueueDepth(): Promise<void> {
+  return snippetQueuePanel?.refresh() ?? Promise.resolve();
 }
 
 // Re-render queue depth whenever the queue key changes (the service worker
@@ -1447,6 +1705,62 @@ function activateSnippetTab(kind: 'text' | 'image' | 'link'): void {
   resetSnippetCard();
 }
 
+function restoreQueuedSnippet(raw: unknown, destination?: SnippetDestination): void {
+  if (!snippetEnabled || !snipModeActive) throw new Error('Enable Snip mode to restore this draft.');
+  if (!raw || typeof raw !== 'object') throw new Error('Stored snippet is invalid.');
+  const body = raw as Record<string, unknown>;
+  const [, lockedKind, lockedId] = lastRenderedLock.split(':');
+  if ((lockedKind === 'person' ? 'contact' : lockedKind) !== body.targetKind || lockedId !== body.targetId) {
+    throw new Error('Open the original research target before restoring this draft.');
+  }
+  const kind = body.kind;
+  if (kind !== 'text' && kind !== 'image' && kind !== 'link') throw new Error('Stored snippet type is invalid.');
+  activateSnippetTab(kind);
+  const tags = new Set<string>(Array.isArray(body.tagSlugs) ? body.tagSlugs.filter((value): value is string => typeof value === 'string') : []);
+  const note = typeof body.note === 'string' ? body.note : '';
+  const sourceUrl = typeof body.sourceUrl === 'string' ? body.sourceUrl : 'about:blank';
+  const pageType = typeof body.pageType === 'string' ? body.pageType : null;
+  if (kind === 'text' && typeof body.text === 'string') {
+    const candidates = extractPersonBigrams(body.text);
+    currentSnippet = {
+      kind, selection: { text: body.text, sourceUrl, pageTitle: '', pageType },
+      selectedTags: tags, selectedMentions: new Set<string>(Array.isArray(body.mentionContactIds) ? body.mentionContactIds.filter((value): value is string => typeof value === 'string') : []),
+      mentionCandidates: candidates, note,
+    };
+    if (snippetPreview) { snippetPreview.style.display = ''; snippetPreview.textContent = body.text.slice(0, 400); }
+    if (snippetMentionsField) snippetMentionsField.style.display = '';
+    if (snippetMentionsContainer) renderMentionChips(snippetMentionsContainer, candidates, currentSnippet.selectedMentions);
+    showPiiBannerForText(body.text);
+  } else if (kind === 'image' && typeof body.imageBytes === 'string' && typeof body.mimeType === 'string') {
+    currentSnippet = {
+      kind, imageBytes: body.imageBytes, mimeType: body.mimeType,
+      width: typeof body.width === 'number' ? body.width : null,
+      height: typeof body.height === 'number' ? body.height : null,
+      approximateBytes: Math.ceil(body.imageBytes.length * 3 / 4),
+      sourceUrl, pageUrl: sourceUrl, pageTitle: '', pageType, selectedTags: tags, note,
+    };
+    if (snippetPreview) snippetPreview.style.display = 'none';
+    if (snippetImagePreviewWrap) snippetImagePreviewWrap.style.display = '';
+    if (snippetImagePreview) snippetImagePreview.src = `data:${body.mimeType};base64,${body.imageBytes}`;
+    if (snippetMentionsField) snippetMentionsField.style.display = 'none';
+  } else if (kind === 'link' && typeof body.href === 'string') {
+    const linkText = typeof body.linkText === 'string' ? body.linkText : null;
+    currentSnippet = { kind, href: body.href, linkText, sourceUrl, pageTitle: '', pageType, selectedTags: tags, note };
+    if (snippetPreview) { snippetPreview.style.display = ''; snippetPreview.textContent = linkText ? `${linkText} — ${body.href}` : body.href; }
+    if (snippetMentionsField) snippetMentionsField.style.display = 'none';
+  } else {
+    throw new Error('Stored snippet payload is incomplete.');
+  }
+  if (currentSnippet && typeof body.requestId === 'string') snippetRequestIds.set(currentSnippet, body.requestId);
+  snippetDraftConfigRevision = snippetConfigRevision;
+  snippetDraftDestination = destination ?? { appUrl: '', tokenFingerprint: '' };
+  snippetDraftTarget = { targetKind: body.targetKind as 'contact' | 'company', targetId: body.targetId as string };
+  if (snippetNoteEl) snippetNoteEl.value = note;
+  if (snippetTagsContainer) renderTagChips(snippetTagsContainer, tags);
+  if (snippetCard) snippetCard.style.display = '';
+  if (snippetStatus) snippetStatus.textContent = 'Draft restored. Correct and save it, then discard the failed copy.';
+}
+
 if (snippetTabText) snippetTabText.addEventListener('click', () => activateSnippetTab('text'));
 if (snippetTabImage) snippetTabImage.addEventListener('click', () => activateSnippetTab('image'));
 if (snippetTabLink) snippetTabLink.addEventListener('click', () => activateSnippetTab('link'));
@@ -1454,6 +1768,10 @@ if (snippetTabLink) snippetTabLink.addEventListener('click', () => activateSnipp
 if (snippetCaptureBtn) {
   snippetCaptureBtn.addEventListener('click', async () => {
     if (!snippetEnabled) return;
+    // ADR-028 clause 4 — belt-and-braces guard alongside the hidden widget
+    // body; a stale DOM reference shouldn't be able to fire a capture.
+    if (!snipModeActive) return;
+    const captureTarget = snippetTargetFromLock(lastRenderedLock);
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
     if (!tab?.url || !tab.id) return;
@@ -1484,6 +1802,7 @@ if (snippetCaptureBtn) {
       mentionCandidates: candidates,
       note: '',
     };
+    markFreshSnippet(captureTarget);
     if (snippetPreview) {
       snippetPreview.style.display = '';
       snippetPreview.textContent = selection.text.slice(0, 400);
@@ -1559,7 +1878,7 @@ async function presentImagePayload(payload: {
   sourceUrl: string;
   pageUrl: string;
   pageTitle: string;
-}): Promise<void> {
+}, captureTarget = snippetTargetFromLock(lastRenderedLock)): Promise<void> {
   const imageSuggested = suggestTagSlugsForUrl(
     payload.pageUrl || payload.sourceUrl,
     availableTags.map((t) => t.slug)
@@ -1578,6 +1897,7 @@ async function presentImagePayload(payload: {
     selectedTags: new Set<string>(imageSuggested),
     note: '',
   };
+  markFreshSnippet(captureTarget);
 
   if (snippetPreview) snippetPreview.style.display = 'none';
   if (snippetImagePreviewWrap) snippetImagePreviewWrap.style.display = '';
@@ -1599,6 +1919,11 @@ async function presentImagePayload(payload: {
 }
 
 async function ingestImageFile(file: File): Promise<void> {
+  // ADR-028 clause 4 — the widget body is hidden while snip mode is off, but
+  // paste/drop are global listeners that don't check inline child styles, so
+  // guard explicitly here rather than relying on visibility alone.
+  if (!snipModeActive) return;
+  const captureTarget = snippetTargetFromLock(lastRenderedLock);
   if (!ALLOWED_IMAGE_MIMES.has(file.type)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = `Unsupported type "${file.type || 'unknown'}". Use PNG, JPEG, or WebP.`;
@@ -1625,10 +1950,13 @@ async function ingestImageFile(file: File): Promise<void> {
     sourceUrl: pageUrl,
     pageUrl,
     pageTitle,
-  });
+  }, captureTarget);
 }
 
 async function ingestImageFromUrl(imageUrl: string): Promise<void> {
+  // ADR-028 clause 4 — see ingestImageFile.
+  if (!snipModeActive) return;
+  const captureTarget = snippetTargetFromLock(lastRenderedLock);
   if (!/^https?:\/\//.test(imageUrl)) {
     if (snippetImageStatus)
       snippetImageStatus.textContent = 'URL must start with http:// or https://';
@@ -1681,7 +2009,7 @@ async function ingestImageFromUrl(imageUrl: string): Promise<void> {
     sourceUrl: response.sourceUrl ?? imageUrl,
     pageUrl: response.pageUrl ?? tab.url ?? '',
     pageTitle: response.pageTitle ?? tab.title ?? '',
-  });
+  }, captureTarget);
 }
 
 // Drag-and-drop binding
@@ -1710,6 +2038,10 @@ if (snippetDropzone) {
 // Clipboard paste binding — listen anywhere in the sidepanel when image
 // tab is active; the paste handler filters to the image pane.
 document.addEventListener('paste', async (e) => {
+  // ADR-028 clause 4 — this is a document-wide listener, not gated by the
+  // widget body's visibility check below (which only inspects the tab
+  // pane's own inline style, not its hidden ancestor).
+  if (!snipModeActive) return;
   if (!snippetImagePane || snippetImagePane.style.display === 'none') return;
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -1741,6 +2073,9 @@ if (snippetImageFetchBtn && snippetImageUrlInput) {
 if (snippetLinkPrepBtn) {
   snippetLinkPrepBtn.addEventListener('click', async () => {
     if (!snippetEnabled) return;
+    const captureTarget = snippetTargetFromLock(lastRenderedLock);
+    // ADR-028 clause 4 — see the capture-selection handler above.
+    if (!snipModeActive) return;
     const href = snippetLinkHrefInput?.value.trim() ?? '';
     if (!/^https?:\/\//i.test(href)) {
       if (snippetLinkStatus)
@@ -1762,6 +2097,7 @@ if (snippetLinkPrepBtn) {
       selectedTags: new Set<string>(suggested),
       note: '',
     };
+    markFreshSnippet(captureTarget);
     if (snippetPreview) {
       snippetPreview.style.display = '';
       snippetPreview.textContent = linkText ? `${linkText} — ${href}` : href;
@@ -1782,13 +2118,9 @@ if (snippetSaveBtn) {
     (snippetSaveBtn as HTMLButtonElement).setAttribute('disabled', 'true');
     (snippetSaveBtn as HTMLElement).textContent = 'Saving…';
     try {
-      // Determine the currently-locked target from the Target Panel.
-      if (!lastRenderedLock || lastRenderedLock === 'none') {
-        throw new Error('No active research target. Open a profile or task first.');
-      }
-      const [source, kind, id] = lastRenderedLock.split(':');
-      void source;
-      const targetKind = kind === 'person' ? 'contact' : kind;
+      // Keep the target selected when capture began across later navigation.
+      if (!snippetDraftTarget) throw new Error('No research target at capture. Open a profile or task and capture again.');
+      const { targetKind, targetId: id } = snippetDraftTarget;
 
       // WS-3 Phase 6 §9 — PII scrub for text snippets. The banner shown in
       // `detectPiiAndShowBanner` was advisory; now we actually redact. Image
@@ -1842,45 +2174,70 @@ if (snippetSaveBtn) {
         };
       }
 
-      const appUrl = await getAppUrlBase();
-      const { extensionToken } = await new Promise<{ extensionToken?: string }>((r) =>
-        chrome.storage.local.get('extensionToken', (v) => r(v)),
-      );
+      let requestId = snippetRequestIds.get(currentSnippet);
+      if (!requestId) {
+        requestId = crypto.randomUUID();
+        snippetRequestIds.set(currentSnippet, requestId);
+      }
+      body = { ...body, requestId };
+
+      const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+      const appUrl = (config.appUrl as string) || 'http://localhost:3750';
+      const extensionToken = (config.extensionToken as string) || null;
+      const destination = await draftSnippetDestination(appUrl, extensionToken);
+      if (snippetDraftConfigRevision !== snippetConfigRevision ||
+          (snippetDraftDestination && (snippetDraftDestination.appUrl !== destination.appUrl ||
+            snippetDraftDestination.tokenFingerprint !== destination.tokenFingerprint ||
+            (snippetDraftDestination.tenantId && snippetDraftDestination.tenantId !== destination.tenantId)))) {
+        throw new Error('App or token changed since this draft was captured. Return to its original configuration before saving.');
+      }
+      if (!destination.tenantId) {
+        await queueSnippetAndReset(
+          () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, state: 'pending_verification', error: 'Tenant verification required' }),
+          refreshSnippetQueueDepth,
+          resetSnippetCard,
+        );
+        if (snippetStatus) snippetStatus.textContent = 'Saved locally. Verify the tenant and retry when online.';
+        return;
+      }
       let res: Response;
       try {
-        res = await fetch(`${appUrl}/api/extension/snippet`, {
+        res = await fetch(`${destination.appUrl}/api/extension/snippet`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
+            ...(destination.tenantId ? { 'X-Snippet-Tenant-ID': destination.tenantId } : {}),
           },
           body: JSON.stringify(body),
         });
       } catch (networkErr) {
         // WS-3 Phase 6 §10 — server unreachable → queue for later replay.
-        await enqueueSnippet(body, (networkErr as Error).message ?? 'network');
-        await refreshSnippetQueueDepth();
-        if (snippetStatus)
-          snippetStatus.textContent = 'Offline — saved locally. Will retry.';
-        if (snippetImageStatus)
-          snippetImageStatus.textContent = 'Offline — saved locally. Will retry.';
-        resetSnippetCard();
+        await queueSnippetAndReset(
+          () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: (networkErr as Error).message ?? 'network' }),
+          refreshSnippetQueueDepth,
+          resetSnippetCard,
+        );
+        if (snippetStatus) snippetStatus.textContent = 'Queued locally — will retry.';
         return;
       }
       if (!res.ok) {
-        // 5xx → queue for retry (server failure). 4xx → surface validation.
-        if (res.status >= 500 && res.status < 600) {
-          await enqueueSnippet(body, `HTTP ${res.status}`);
-          await refreshSnippetQueueDepth();
-          if (snippetStatus)
-            snippetStatus.textContent = `Server unavailable (HTTP ${res.status}) — saved locally.`;
-          if (snippetImageStatus)
-            snippetImageStatus.textContent = `Server unavailable (HTTP ${res.status}) — saved locally.`;
-          resetSnippetCard();
+        // Keep transient failures locally; preserve validation errors in the editor.
+        if (res.status === 429 || res.status >= 500) {
+          await queueSnippetAndReset(
+            () => changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: `HTTP ${res.status}` }),
+            refreshSnippetQueueDepth,
+            resetSnippetCard,
+          );
+          if (snippetStatus) snippetStatus.textContent = `Queued locally (HTTP ${res.status}) — will retry.`;
           return;
         }
         const err = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
-        throw new Error((err as { message?: string }).message ?? `HTTP ${res.status}`);
+        const message = (err as { message?: string }).message ?? `HTTP ${res.status}`;
+        await changeSnippetQueue('QUEUE_SNIPPET', { body, destination, error: `HTTP ${res.status}: ${message}`, state: 'failed' });
+        await refreshSnippetQueueDepth();
+        if (snippetStatus) snippetStatus.textContent = `Validation failed (HTTP ${res.status}) — correct this draft and save; a failed copy is retained locally.`;
+        return;
       }
       const okMsg =
         currentSnippet.kind === 'image'
@@ -1888,10 +2245,8 @@ if (snippetSaveBtn) {
           : currentSnippet.kind === 'link'
           ? 'Link snippet saved.'
           : 'Snippet saved.';
-      if (snippetStatus) snippetStatus.textContent = okMsg;
-      if (snippetImageStatus) snippetImageStatus.textContent = okMsg;
-      if (snippetLinkStatus) snippetLinkStatus.textContent = okMsg;
       resetSnippetCard();
+      if (snippetStatus) snippetStatus.textContent = okMsg;
     } catch (err) {
       if (snippetErrorEl) {
         snippetErrorEl.style.display = '';
@@ -1977,11 +2332,12 @@ function emitAnalytics(event: string, properties: Record<string, unknown> = {}):
       const { extensionToken } = await new Promise<{ extensionToken?: string }>(
         (r) => chrome.storage.local.get('extensionToken', (v) => r(v)),
       );
+      if (!extensionToken) return;
       await fetch(`${appUrl}/api/extension/analytics`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+          'X-Extension-Token': extensionToken,
         },
         body: JSON.stringify({ event, properties }),
       });
@@ -1994,14 +2350,14 @@ function emitAnalytics(event: string, properties: Record<string, unknown> = {}):
 async function probeVisibilityFlag(): Promise<boolean> {
   try {
     const appUrl = await getAppUrlBase();
+    const { extensionToken } = await new Promise<{ extensionToken?: string }>(
+      (r) => chrome.storage.local.get('extensionToken', (v) => r(v)),
+    );
+    if (!extensionToken) return false;
     const res = await fetch(`${appUrl}/api/extension/analytics`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'parse_panel_viewed' }),
+      headers: { 'X-Extension-Token': extensionToken },
     });
-    // 404 means the flag is off. 200 / 400 / 401 all mean the endpoint is
-    // live so the flag is on (auth / validation live downstream).
-    return res.status !== 404;
+    return res.ok;
   } catch {
     return false;
   }
@@ -2083,7 +2439,7 @@ async function refreshCaptureDiffPanel(): Promise<void> {
     const res = await fetch(
       `${appUrl}/api/extension/entity-diff?${params.toString()}`,
       {
-        headers: extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {},
+        headers: extensionToken ? { 'X-Extension-Token': extensionToken } : {},
       },
     );
     if (!res.ok) {
@@ -2158,7 +2514,7 @@ async function flagUnmatchedRegion(region: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+        ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
       },
       body: JSON.stringify({
         captureId: visibilityLastCaptureId,
@@ -2243,7 +2599,7 @@ async function runRegressionReport(): Promise<void> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(extensionToken ? { Authorization: `Bearer ${extensionToken}` } : {}),
+        ...(extensionToken ? { 'X-Extension-Token': extensionToken } : {}),
       },
       body: JSON.stringify({
         pageType: visibilityLastPageType,

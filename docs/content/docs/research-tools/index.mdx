@@ -1,0 +1,66 @@
+---
+title: Research Tools
+description: Targets, snippets, sources, lenses, provenance and parser telemetry — the research-tools surface, and what is actually wired up.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The research-tools surface turns Network Navigator from a contact database
+into a research workspace: you designate a **target**, gather **evidence**
+about it from snippets and external sources, view it through a **lens**, and
+trace every claim back through a **provenance** chain.
+
+<Callout type="warn">
+**Every `RESEARCH_*` flag defaults to `false` in every environment.** Nothing
+in this repository ships this surface enabled. Turning it on is a deliberate
+per-deployment act — see [ADR-035](https://github.com/weave-logic-ai/network-navigator/blob/main/docs/adr/ADR-035-research-mode-gating-supersedes-033.md)
+for why gating is per-deployment rather than per-user. The pages below
+describe what the code *does*, including the parts that are built but
+unreachable until a flag is set.
+</Callout>
+
+## Start here
+
+| Page | What it covers |
+| --- | --- |
+| [Architecture](/docs/research-tools/architecture) | How the pieces fit, where the seams are, and what is not built yet |
+| [Targets](/docs/research-tools/targets) | The research-target model, primary vs secondary, breadcrumbs, graph re-centering |
+| [Snippets](/docs/research-tools/snippets) | Capturing text, images and links; storage as evidence nodes |
+| [Sources](/docs/research-tools/sources) | The connectors (Wayback, EDGAR, RSS, news, podcasts) and trust weighting |
+| [Lenses](/docs/research-tools/lenses) | Scoping a target view, deep links, active-lens resolution |
+| [Provenance](/docs/research-tools/provenance) | The causal graph, ExoChain hashing, and how evidence is traced |
+| [Parser telemetry](/docs/research-tools/parser-telemetry) | Per-field yield tracking, the daily roll-up, and the admin dashboard |
+
+If you are new to the surface, read
+[Architecture](/docs/research-tools/architecture) first — it explains why
+targets are the organising entity and how everything else attaches to them.
+
+## Reading these pages
+
+These pages were written against the **code**, not against the sprint
+planning documents, and where the two disagree the code is described. That
+distinction matters here more than usual: an audit found the planning
+documents stale in *both* directions — describing shipped work as pending,
+and unbuilt work as done. Several pages call out a specific contradiction
+where one exists.
+
+Where something is built but not reachable, or specified but not
+implemented, the page says so plainly rather than describing the intent. A
+few examples you will meet:
+
+- Trust weighting is computed for every source type but only actually
+  consumed for a couple of them.
+- `evidence_for` edges attach to a **target**, not to a contact — which is
+  why evidence-aware scoring is still blocked on a design decision.
+- The cron routes that drive source ingestion have **no scheduler
+  registered in this repository**; they are assumed to be triggered
+  externally.
+
+## Related
+
+- [Browser Extension](/docs/browser-extension) — where snippet capture and
+  the target panel actually live for the user
+- [Database schema](/docs/architecture/database-schema) — the tables behind
+  all of the above
+- [Operations](/docs/operations/impulse-handlers-migration) — applying
+  migrations to an existing database

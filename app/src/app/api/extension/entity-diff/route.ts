@@ -24,6 +24,7 @@ import {
 import { buildProjectionDiff } from '@/lib/projections/diff';
 import type { EntityKind } from '@/lib/projections/types';
 import { query } from '@/lib/db/client';
+import { requireVisibilityPrincipal } from '@/lib/auth/extension-visibility-boundary';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -32,6 +33,8 @@ function isEntityKind(s: string | null): s is EntityKind {
 }
 
 export async function GET(request: NextRequest) {
+  const denied = await requireVisibilityPrincipal(request);
+  if (denied) return denied;
   if (!RESEARCH_FLAGS.parserTelemetry) {
     return NextResponse.json(
       { error: 'RESEARCH_PARSER_TELEMETRY is off' },

@@ -1,17 +1,13 @@
-// POST /api/import/legacy-graph
-// Import data from the old .linkedin-prospector/data/graph.json into the v2 DB.
-// Imports: contacts, companies, edges, clusters, cluster_memberships,
-//          graph_metrics, content_profiles, behavioral_observations,
-//          and pre-computed scores.
+// Import legacy graph source data; its pre-computed scores are unverified.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile, stat } from 'fs/promises';
 import { resolve } from 'path';
 import { getPool } from '@/lib/db/client';
-import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
+import { createLegacyImportScoreJob, drainPendingImportScoreJobs } from '@/lib/scoring/import-job';
 import type { PoolClient } from 'pg';
+import { importLegacyContacts } from '@/lib/import/legacy-contacts';
 
-// Allowed paths
 const ALLOWED_PREFIXES = ['/home/aepod/dev/ctox/', '/data/'];
 
 function isPathAllowed(filePath: string): boolean {
@@ -19,8 +15,6 @@ function isPathAllowed(filePath: string): boolean {
   if (filePath.includes('..')) return false;
   return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
 }
-
-// ── Types for the legacy graph.json ─────────────────────────────────────────
 
 interface LegacyContact {
   profileUrl: string;
@@ -44,7 +38,6 @@ interface LegacyContact {
   cachedAt?: string;
   deepScanned?: boolean;
   deepScannedAt?: string;
-  // Scoring
   scores?: {
     icpFit?: number;
     networkHub?: number;
@@ -62,7 +55,6 @@ interface LegacyContact {
   referralTier?: string;
   referralPersona?: string;
   referralSignals?: Record<string, unknown>;
-  // Activity
   activity?: {
     lastScanned?: string;
     posts?: Array<{ date?: string; text?: string; engagement?: number }>;
@@ -72,7 +64,6 @@ interface LegacyContact {
   };
   accountPenetration?: Record<string, unknown>;
   icpCategories?: string[];
-  // Deep scan
   deepScanResults?: number;
   currentInfo?: string;
   pastInfo?: string;
@@ -112,16 +103,6 @@ interface LegacyGraph {
 
 // ── Import logic ────────────────────────────────────────────────────────────
 
-function parseName(raw: string): { firstName: string; lastName: string; fullName: string } {
-  const fullName = raw.trim();
-  const parts = fullName.split(/\s+/);
-  return {
-    firstName: parts[0] || '',
-    lastName: parts.slice(1).join(' ') || '',
-    fullName,
-  };
-}
-
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -146,68 +127,6 @@ async function importCompanies(
   return slugToUuid;
 }
 
-async function importContacts(
-  client: PoolClient,
-  contacts: Record<string, LegacyContact>,
-  companyMap: Map<string, string>
-): Promise<{ urlToUuid: Map<string, string>; importedIds: string[] }> {
-  const urlToUuid = new Map<string, string>();
-  const importedIds: string[] = [];
-
-  for (const [url, contact] of Object.entries(contacts)) {
-    const displayName = contact.enrichedName || contact.name || '';
-    const { firstName, lastName, fullName } = parseName(displayName);
-    const companyUuid = contact.companyId ? companyMap.get(contact.companyId) : null;
-
-    const result = await client.query(
-      `INSERT INTO contacts (
-        linkedin_url, first_name, last_name, full_name,
-        headline, title, current_company, current_company_id,
-        location, about, connections_count, degree,
-        discovered_via, tags, is_archived
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      ON CONFLICT (linkedin_url) DO UPDATE SET
-        full_name = COALESCE(NULLIF(EXCLUDED.full_name,''), contacts.full_name),
-        first_name = COALESCE(NULLIF(EXCLUDED.first_name,''), contacts.first_name),
-        last_name = COALESCE(NULLIF(EXCLUDED.last_name,''), contacts.last_name),
-        headline = COALESCE(NULLIF(EXCLUDED.headline,''), contacts.headline),
-        title = COALESCE(NULLIF(EXCLUDED.title,''), contacts.title),
-        current_company = COALESCE(NULLIF(EXCLUDED.current_company,''), contacts.current_company),
-        current_company_id = COALESCE(EXCLUDED.current_company_id, contacts.current_company_id),
-        location = COALESCE(NULLIF(EXCLUDED.location,''), contacts.location),
-        about = COALESCE(NULLIF(EXCLUDED.about,''), contacts.about),
-        connections_count = COALESCE(EXCLUDED.connections_count, contacts.connections_count),
-        degree = EXCLUDED.degree,
-        discovered_via = EXCLUDED.discovered_via,
-        tags = EXCLUDED.tags
-      RETURNING id`,
-      [
-        url,
-        firstName,
-        lastName,
-        fullName,
-        contact.headline || contact.currentRole || null,
-        contact.title || contact.currentRole || null,
-        contact.currentCompany || null,
-        companyUuid || null,
-        contact.enrichedLocation || contact.location || null,
-        contact.about || null,
-        contact.mutualConnections || null,
-        contact.degree || 1,
-        contact.discoveredVia || [],
-        contact.tags || [],
-        false,
-      ]
-    );
-
-    const contactId = result.rows[0].id;
-    urlToUuid.set(url, contactId);
-    importedIds.push(contactId);
-  }
-
-  return { urlToUuid, importedIds };
-}
-
 async function importEdges(
   client: PoolClient,
   edges: LegacyEdge[],
@@ -215,7 +134,6 @@ async function importEdges(
 ): Promise<number> {
   let imported = 0;
 
-  // Batch insert for performance
   const BATCH_SIZE = 500;
   for (let i = 0; i < edges.length; i += BATCH_SIZE) {
     const batch = edges.slice(i, i + BATCH_SIZE);
@@ -273,7 +191,6 @@ async function importClusters(
     if (clusterResult.rows.length === 0) continue;
     const clusterId = clusterResult.rows[0].id;
 
-    // Add members
     for (const contactUrl of cluster.contacts || []) {
       const contactId = urlToUuid.get(contactUrl);
       if (!contactId) continue;
@@ -287,7 +204,6 @@ async function importClusters(
       memberships++;
     }
 
-    // Update member count
     await client.query(
       `UPDATE clusters SET member_count = (
         SELECT COUNT(*) FROM cluster_memberships WHERE cluster_id = $1
@@ -299,12 +215,12 @@ async function importClusters(
   return memberships;
 }
 
-async function importScoresAndBehavioral(
+async function importSignalsAndBehavioral(
   client: PoolClient,
   contacts: Record<string, LegacyContact>,
   urlToUuid: Map<string, string>
-): Promise<{ scores: number; behavioral: number; graphMetrics: number }> {
-  let scoreCount = 0;
+): Promise<{ legacyScoresIgnored: number; behavioral: number; graphMetrics: number }> {
+  let legacyScoresIgnored = 0;
   let behavioralCount = 0;
   let graphMetricsCount = 0;
 
@@ -312,111 +228,12 @@ async function importScoresAndBehavioral(
     const contactId = urlToUuid.get(url);
     if (!contactId) continue;
 
-    // Import pre-computed scores
+    // Legacy scores have no owner-basis provenance. Only the owner scoring
+    // pipeline may write contact_scores and its dependent dimensions.
     if (contact.scores && contact.scores.goldScore != null) {
-      const s = contact.scores;
-      await client.query(
-        `INSERT INTO contact_scores (
-          contact_id, composite_score, tier, persona, behavioral_persona,
-          scoring_version, scored_at,
-          referral_likelihood, referral_tier, referral_persona,
-          behavioral_signals, referral_signals
-        ) VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8,$9,$10,$11)
-        ON CONFLICT (contact_id) DO UPDATE SET
-          composite_score = EXCLUDED.composite_score,
-          tier = EXCLUDED.tier,
-          persona = EXCLUDED.persona,
-          behavioral_persona = EXCLUDED.behavioral_persona,
-          scoring_version = EXCLUDED.scoring_version,
-          scored_at = NOW(),
-          referral_likelihood = EXCLUDED.referral_likelihood,
-          referral_tier = EXCLUDED.referral_tier,
-          referral_persona = EXCLUDED.referral_persona,
-          behavioral_signals = EXCLUDED.behavioral_signals,
-          referral_signals = EXCLUDED.referral_signals
-        RETURNING id`,
-        [
-          contactId,
-          s.goldScore,
-          s.tier || 'watch',
-          contact.personaType || null,
-          contact.behavioralPersona || null,
-          0, // version 0 = legacy import
-          contact.referralSignals
-            ? (contact.referralSignals as Record<string, unknown>).referralLikelihood ?? null
-            : null,
-          contact.referralTier || null,
-          contact.referralPersona || null,
-          contact.behavioralSignals ? JSON.stringify(contact.behavioralSignals) : null,
-          contact.referralSignals ? JSON.stringify(contact.referralSignals) : null,
-        ]
-      );
-
-      const scoreRow = await client.query(
-        `SELECT id FROM contact_scores WHERE contact_id = $1`,
-        [contactId]
-      );
-      const scoreId = scoreRow.rows[0]?.id;
-
-      // Insert dimension breakdown
-      if (scoreId) {
-        const dims = [
-          { dim: 'icp_fit', val: s.icpFit },
-          { dim: 'network_hub', val: s.networkHub },
-          { dim: 'relationship_strength', val: s.relationshipStrength },
-          { dim: 'signal_boost', val: s.signalBoost },
-          { dim: 'skills_relevance', val: s.skillsRelevance },
-          { dim: 'network_proximity', val: s.networkProximity },
-        ];
-
-        await client.query(
-          `DELETE FROM score_dimensions WHERE contact_score_id = $1`,
-          [scoreId]
-        );
-
-        for (const { dim, val } of dims) {
-          if (val == null) continue;
-          await client.query(
-            `INSERT INTO score_dimensions (contact_score_id, dimension, raw_value, weighted_value, weight)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (contact_score_id, dimension) DO NOTHING`,
-            [scoreId, dim, val, val * 0.15, 0.15] // approximate weights
-          );
-        }
-
-        // Import referral dimensions if present
-        if (contact.referralSignals) {
-          const rs = contact.referralSignals as Record<string, unknown>;
-          const refDims = [
-            { comp: 'referralRole', val: rs.referralRole },
-            { comp: 'clientOverlap', val: rs.clientOverlap },
-            { comp: 'networkReach', val: rs.networkReach },
-            { comp: 'amplificationPower', val: rs.amplificationPower },
-            { comp: 'relationshipWarmth', val: rs.relationshipWarmth },
-            { comp: 'buyerInversion', val: rs.buyerInversion },
-          ];
-
-          await client.query(
-            `DELETE FROM referral_dimensions WHERE contact_score_id = $1`,
-            [scoreId]
-          );
-
-          for (const { comp, val } of refDims) {
-            if (val == null || typeof val !== 'number') continue;
-            await client.query(
-              `INSERT INTO referral_dimensions (contact_score_id, component, raw_value, weighted_value, weight)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (contact_score_id, component) DO NOTHING`,
-              [scoreId, comp, val, val * 0.167, 0.167]
-            );
-          }
-        }
-      }
-
-      scoreCount++;
+      legacyScoresIgnored++;
     }
 
-    // Import content profiles from activity data
     if (contact.activity) {
       const act = contact.activity;
       await client.query(
@@ -435,7 +252,6 @@ async function importScoresAndBehavioral(
         ]
       );
 
-      // Import posts as behavioral observations
       if (act.posts && act.posts.length > 0) {
         for (const post of act.posts.slice(0, 20)) { // cap at 20 per contact
           await client.query(
@@ -453,7 +269,6 @@ async function importScoresAndBehavioral(
       }
     }
 
-    // Import graph metrics (compute approximate values from edge/mutual data)
     if (contact.mutualConnections || contact.scores?.networkHub) {
       await client.query(
         `INSERT INTO graph_metrics (contact_id, degree_centrality, pagerank, betweenness_centrality)
@@ -474,16 +289,22 @@ async function importScoresAndBehavioral(
     }
   }
 
-  return { scores: scoreCount, behavioral: behavioralCount, graphMetrics: graphMetricsCount };
+  return { legacyScoresIgnored, behavioral: behavioralCount, graphMetrics: graphMetricsCount };
 }
-
-// ── Route handler ───────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   let client: PoolClient | null = null;
 
   try {
-    const body = await request.json();
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid import request JSON' }, { status: 400 });
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ error: 'Invalid import request' }, { status: 400 });
+    }
     const {
       graphPath,
       rescore = false,
@@ -491,12 +312,14 @@ export async function POST(request: NextRequest) {
       graphPath?: string;
       rescore?: boolean;
     };
+    if ((graphPath !== undefined && (typeof graphPath !== 'string' || !graphPath.trim())) ||
+        typeof rescore !== 'boolean') {
+      return NextResponse.json({ error: 'Invalid import request' }, { status: 400 });
+    }
 
-    // Default path
     const filePath = graphPath || '.linkedin-prospector/data/graph.json';
     let resolvedPath = filePath;
 
-    // Resolve relative paths
     if (!filePath.startsWith('/')) {
       resolvedPath = resolve('/home/aepod/dev/ctox', filePath);
     }
@@ -508,7 +331,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify file exists
     try {
       await stat(resolvedPath);
     } catch {
@@ -518,16 +340,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Read and parse graph.json
     const raw = await readFile(resolvedPath, 'utf-8');
     const graph: LegacyGraph = JSON.parse(raw);
+    if (!graph || typeof graph !== 'object' || !graph.contacts ||
+        typeof graph.contacts !== 'object' || Array.isArray(graph.contacts)) {
+      return NextResponse.json({ error: 'Invalid legacy graph' }, { status: 400 });
+    }
 
     const contactCount = Object.keys(graph.contacts || {}).length;
     const companyCount = Object.keys(graph.companies || {}).length;
     const edgeCount = (graph.edges || []).length;
     const clusterCount = Object.keys(graph.clusters || {}).length;
 
-    // Run import in a transaction
     const pool = getPool();
     client = await pool.connect();
     await client.query('BEGIN');
@@ -536,7 +360,7 @@ export async function POST(request: NextRequest) {
     const companyMap = await importCompanies(client, graph.companies || {});
 
     // 2. Contacts
-    const { urlToUuid, importedIds } = await importContacts(
+    const { urlToUuid, importedIds } = await importLegacyContacts(
       client,
       graph.contacts || {},
       companyMap
@@ -548,14 +372,15 @@ export async function POST(request: NextRequest) {
     // 4. Clusters + memberships
     const membershipCount = await importClusters(client, graph.clusters || {}, urlToUuid);
 
-    // 5. Scores, behavioral, graph metrics
-    const sbg = await importScoresAndBehavioral(client, graph.contacts || {}, urlToUuid);
+    // 5. Source signals and graph metrics only; never persist legacy scores.
+    const sbg = await importSignalsAndBehavioral(client, graph.contacts || {}, urlToUuid);
 
+    const scoreJobId = rescore ? await createLegacyImportScoreJob(client, importedIds) : null;
     await client.query('COMMIT');
-
-    // 6. Optionally trigger rescore
-    if (rescore && importedIds.length > 0) {
-      triggerBatchAutoScore(importedIds);
+    if (scoreJobId) {
+      void drainPendingImportScoreJobs(1, 25).catch(error => {
+        console.error('[legacy-import] Score job will resume on recovery sweep', { scoreJobId, error });
+      });
     }
 
     return NextResponse.json({
@@ -566,7 +391,8 @@ export async function POST(request: NextRequest) {
         edges: edgesImported,
         clusters: clusterCount,
         clusterMemberships: membershipCount,
-        scores: sbg.scores,
+        scores: 0,
+        legacyScoresIgnored: sbg.legacyScoresIgnored,
         behavioral: sbg.behavioral,
         graphMetrics: sbg.graphMetrics,
       },
@@ -576,7 +402,8 @@ export async function POST(request: NextRequest) {
         edges: edgeCount,
         clusters: clusterCount,
       },
-      rescoreTriggered: rescore,
+      rescoreTriggered: scoreJobId !== null,
+      rescoreJobId: scoreJobId,
     });
   } catch (error) {
     if (client) {

@@ -1,6 +1,24 @@
 # ADR-028: Chrome permission model — curated host_permissions plus optional_host_permissions plus sidebar "Add host" button
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: Two clauses of this ADR are unimplemented in
+> `browser/src`, verified by grep across the whole tree.
+> 1. Decision point 4 ("Snip mode stays opt-in per session via the existing
+>    popup toggle or the `Ctrl+Shift+S` hotkey — permission does not
+>    auto-activate the widget") is not what shipped: no `Ctrl+Shift+S`
+>    command registration and no opt-in toggle gating snip-mode activation
+>    exist anywhere in `browser/src`. This is a permission-scope drift from
+>    clause 4's stated model — snip mode auto-activates rather than being
+>    opt-in — not a cosmetic gap.
+> 2. The Neutral section's "Revoke" UI ("still works — it calls
+>    `chrome.permissions.remove`") does not exist. `chrome.permissions.remove`
+>    appears nowhere in `browser/src`. Only `chrome.permissions.request`,
+>    `.getAll()`, and `.contains()` are called, plus the `onAdded`/`onRemoved`
+>    listeners in `browser/src/service-worker.ts:596,607` and
+>    `browser/src/sidepanel/sidepanel.ts:1289,1326` — those *react* to a
+>    revocation made through Chrome's own extension-settings page; there is
+>    no popup revoke button that calls `.remove()` itself.
 
 ## Context
 
@@ -43,8 +61,11 @@ requests), surfaced via a sidebar affordance:
    Target Panel when (a) the active tab's origin is not in the already-granted
    origin set AND (b) the sidebar has loaded on that origin (so the prompt has
    context).
-4. **Snip mode** stays opt-in per session via the existing popup toggle or the
-   `Ctrl+Shift+S` hotkey — permission does not auto-activate the widget.
+4. ~~**Snip mode** stays opt-in per session via the existing popup toggle or
+   the `Ctrl+Shift+S` hotkey — permission does not auto-activate the
+   widget.~~ **Not implemented (2026-08-19)**: no hotkey and no opt-in
+   toggle exist in `browser/src`; snip mode auto-activates. See the update
+   note at the top of this file.
    (`03-snippet-editor.md` §7.3, lines 235-237)
 5. **Grant persistence**: grants live in Chrome's permissions store (source of
    truth) and are mirrored in a local `approvedOrigins` storage key for
@@ -82,9 +103,12 @@ ships in Phase 0; the sidebar "Add host" button ships in Phase 1.
 
 ### Neutral
 
-- The "Revoke" UI in the popup (`03-snippet-editor.md` §7.4, lines 239-244)
+- ~~The "Revoke" UI in the popup (`03-snippet-editor.md` §7.4, lines 239-244)
   still works — it calls `chrome.permissions.remove` and drops the mirror
-  entry.
+  entry.~~ **Not implemented (2026-08-19)**: `chrome.permissions.remove`
+  does not appear anywhere in `browser/src`. There is no popup revoke
+  button; the extension only reconciles when revocation happens through
+  Chrome's own settings page. See the update note at the top of this file.
 - Impulses / backend writes are unaffected; the app server never sees the
   permission state (`03-snippet-editor.md` §7.4, line 244).
 

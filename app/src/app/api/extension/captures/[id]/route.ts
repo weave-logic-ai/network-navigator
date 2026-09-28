@@ -2,13 +2,16 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   const { id } = await params;
 
   if (!UUID_REGEX.test(id)) {

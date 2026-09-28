@@ -2,6 +2,7 @@ import { ECC_FLAGS } from '../types';
 import type { CrossRefType } from '../types';
 import { createCrossRef } from './service';
 import { query } from '../../db/client';
+import type { EnrichmentResult } from '../../enrichment/types';
 
 const MAX_PER_EVENT = 50;
 
@@ -95,6 +96,55 @@ export async function extractCrossRefsFromEnrichment(
   }
 
   return created;
+}
+
+/**
+ * Map real waterfall enrichment output (`EnrichmentResult[]`, as returned by
+ * `enrichContact`/`enrichContactWithChain`) into the `Record<string, unknown>`
+ * shape `extractCrossRefsFromEnrichment` expects, then run extraction once
+ * per provider result that supplied usable data.
+ *
+ * Wired from `app/src/app/api/enrichment/enrich/route.ts`'s dryRun=false
+ * auto-apply branch — the point where enrichment results are complete and
+ * about to be persisted. Not wired into `waterfall.ts`/`enrichContactWithChain`
+ * directly because those run during dry-run previews too, and a preview must
+ * not have side effects on other tables.
+ *
+ * IMPORTANT — provider coverage: as of this writing, none of the waterfall
+ * providers (`pdl`, `lusha`, `theirstack`, `apollo` — see
+ * `lib/enrichment/waterfall.ts` `createProviderInstance`) ever return a
+ * `workHistory`/experience array; they only ever return a flat
+ * `current_company` field. That means this can only ever produce
+ * `shared_company` cross-refs, never `co_worker` ones, until a provider
+ * starts returning employment history through the waterfall path. The
+ * LinkedIn extension provider *does* map an `employment` field (see
+ * `providers/linkedin.ts` `mapExtensionResponse`), but only via its separate
+ * async scrape-callback path — `LinkedinProvider.enrich()` itself always
+ * returns `fields: []` synchronously — so it never reaches this call either.
+ */
+export async function extractCrossRefsFromEnrichmentResults(
+  contactId: string,
+  results: EnrichmentResult[],
+  tenantId: string
+): Promise<number> {
+  if (!ECC_FLAGS.crossRefs) return 0;
+
+  let total = 0;
+  for (const result of results) {
+    if (!result.success) continue;
+
+    const companyField = result.fields.find((f) => f.field === 'current_company');
+    if (!companyField || typeof companyField.value !== 'string' || !companyField.value) continue;
+
+    total += await extractCrossRefsFromEnrichment(
+      contactId,
+      { currentCompany: companyField.value },
+      result.providerName,
+      tenantId
+    );
+  }
+
+  return total;
 }
 
 async function getOrCreateEdge(

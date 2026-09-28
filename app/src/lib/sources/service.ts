@@ -13,7 +13,8 @@ import crypto from 'crypto';
 import { query } from '../db/client';
 import { acquire, DEFAULT_BUCKETS, type BucketConfig } from './rate-limiter';
 import { isAllowed } from './robots';
-import { checkHostSafe, type PrivateIpReason } from './private-ip';
+import { type PrivateIpReason } from './private-ip';
+import { safeHttpGet, SafeHttpError } from './safe-http';
 import { canonicalizeUrl, hostOf } from './url-normalize';
 
 export interface FetchOptions {
@@ -71,81 +72,49 @@ export async function gatedFetch(
   const host = hostOf(url);
   if (!host) throw new SourceFetchError(`Invalid URL: ${url}`, 'INVALID_URL');
 
-  // SSRF guard: resolve host (or inspect literal IP) and reject
-  // private / loopback / link-local / multicast ranges. Runs BEFORE robots
-  // + rate limit so attackers cannot consume tokens on a target that will
-  // never be fetched. See `private-ip.ts` for the full range table and the
-  // `SOURCES_ALLOW_LOCALHOST` dev-convenience flag.
-  const ipCheck = await checkHostSafe(host, opts.dnsLookup);
-  if (ipCheck.blocked) {
-    throw new SourceFetchError(
-      `Blocked fetch to ${host}${ipCheck.resolvedIp ? ` (${ipCheck.resolvedIp})` : ''}: ${ipCheck.reason}`,
-      'BLOCKED_IP',
-      undefined,
-      ipCheck.reason
-    );
-  }
-
-  if (!opts.skipRobots) {
-    const robots = await isAllowed(url);
-    if (!robots.allowed) {
-      throw new SourceFetchError(
-        `robots.txt disallows ${url}: ${robots.reason}`,
-        'ROBOTS_DISALLOW'
-      );
-    }
-  }
-
-  const bucketCfg =
-    opts.bucketConfig ??
-    DEFAULT_BUCKETS[host] ??
-    ({ capacity: 20, refillPerMin: 20 } as BucketConfig);
-  await acquire(host, { tenantId: opts.tenantId, config: bucketCfg });
-
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(),
-    opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  );
   try {
-    const res = await fetch(url, {
-      method: opts.method ?? 'GET',
+    const res = await safeHttpGet(url, {
+      method: opts.method,
       headers: opts.headers,
-      signal: controller.signal,
-      redirect: 'follow',
+      dnsLookup: opts.dnsLookup,
+      maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      beforeRequest: async (hopUrl) => {
+        const hopHost = hostOf(hopUrl);
+        if (!hopHost) throw new SourceFetchError(`Invalid URL: ${hopUrl}`, 'INVALID_URL');
+        if (!opts.skipRobots) {
+          const robots = await isAllowed(hopUrl);
+          if (!robots.allowed) {
+            throw new SourceFetchError(`robots.txt disallows ${hopUrl}: ${robots.reason}`, 'ROBOTS_DISALLOW');
+          }
+        }
+        const bucketCfg = opts.bucketConfig ?? DEFAULT_BUCKETS[hopHost] ??
+          ({ capacity: 20, refillPerMin: 20 } as BucketConfig);
+        await acquire(hopHost, { tenantId: opts.tenantId, config: bucketCfg });
+      },
     });
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       throw new SourceFetchError(
-        `HTTP ${res.status} ${res.statusText} for ${url}`,
+        `HTTP ${res.status} for ${res.finalUrl}`,
         'HTTP_ERROR',
         res.status
       );
     }
-    const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength > maxBytes) {
-      throw new SourceFetchError(
-        `Response ${buf.byteLength} bytes exceeds max ${maxBytes}`,
-        'TOO_LARGE'
-      );
-    }
     return {
-      bytes: buf,
+      bytes: res.bytes,
       status: res.status,
-      contentType: res.headers.get('content-type') ?? 'application/octet-stream',
-      finalUrl: res.url,
+      contentType: res.contentType,
+      finalUrl: res.finalUrl,
     };
   } catch (err) {
-    if ((err as Error).name === 'AbortError') {
-      throw new SourceFetchError(`Timeout fetching ${url}`, 'TIMEOUT');
-    }
     if (err instanceof SourceFetchError) throw err;
+    if (err instanceof SafeHttpError) {
+      throw new SourceFetchError(err.message, err.code, undefined, err.reason);
+    }
     throw new SourceFetchError(
       `Fetch failed for ${url}: ${(err as Error).message}`,
       'HTTP_ERROR'
     );
-  } finally {
-    clearTimeout(timer);
   }
 }
 

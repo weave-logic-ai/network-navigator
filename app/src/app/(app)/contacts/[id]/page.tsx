@@ -24,9 +24,16 @@ import {
   Check,
   ArrowRight,
   Pencil,
+  Plus,
 } from "lucide-react";
 import { DimensionRadar } from "@/components/contacts/dimension-radar";
 import { SourceConflictBanner } from "@/components/targets/source-conflict-banner";
+import { DCTEGauge } from "@/components/contacts/dcte-gauge";
+import { RSTEGauge } from "@/components/contacts/rste-gauge";
+import { EMOTGauge } from "@/components/contacts/emot-gauge";
+import { SCENGauge } from "@/components/contacts/scen-gauge";
+import { DTSEPanel } from "@/components/contacts/dtse-panel";
+import { NetworkTab } from "@/components/contacts/network-tab";
 
 interface ContactDetail {
   id: string;
@@ -80,6 +87,98 @@ interface IcpBreakdown {
   nicheName: string | null;
   overallFit: number;
   criteria: IcpCriterionResult[];
+}
+
+interface DCTEScore {
+  overall: number;
+  segments: {
+    identity: number;
+    contact: number;
+    context: number;
+    enrichment: number;
+    scoring: number;
+    network: number;
+  };
+  missingFields: string[];
+  suggestion: string;
+}
+
+interface DTSEStatus {
+  activeGoals: Array<{ id: string; title: string; progress: number }>;
+  pendingTasks: Array<{
+    id: string;
+    title: string;
+    taskType: string;
+    priority: number;
+  }>;
+  completedTasks: number;
+  beliefs: {
+    likelyBuyer: boolean;
+    warmLead: boolean;
+    hubConnector: boolean;
+    referralSource: boolean;
+  };
+  nextBestAction: string;
+}
+
+interface RSTEScore {
+  overall: number;
+  status: "strong" | "warm" | "cooling" | "dormant" | "new" | "unknown";
+  trend: "improving" | "stable" | "declining";
+}
+
+interface EMOTScore {
+  temperature: number;
+  label: "hot" | "warm" | "lukewarm" | "cold" | "unknown";
+}
+
+interface SCENScore {
+  confidence: number;
+  grade: "A" | "B" | "C" | "D" | "F";
+  gaps: string[];
+  recommendation: string;
+}
+
+interface AllGauges {
+  dcte: DCTEScore;
+  dtse: DTSEStatus;
+  rste: RSTEScore;
+  emot: EMOTScore;
+  scen: SCENScore;
+}
+
+interface ContactGoal {
+  id: string;
+  title: string;
+  description: string | null;
+  goalType: string;
+  status: string;
+  progress: number;
+  targetValue: number;
+  currentValue: number;
+  createdAt: string;
+}
+
+interface ContactTask {
+  id: string;
+  title: string;
+  description: string | null;
+  taskType: string;
+  status: string;
+  priority: number;
+  goalId: string | null;
+  url: string | null;
+  createdAt: string;
+}
+
+interface GoalsAndTasks {
+  goals: ContactGoal[];
+  tasks: ContactTask[];
+  summary: {
+    activeGoals: number;
+    pendingTasks: number;
+    completedTasks: number;
+  };
 }
 
 const DIMENSION_LABELS: Record<string, string> = {
@@ -149,7 +248,18 @@ export default function ContactDetailPage() {
   const [contact, setContact] = useState<ContactDetail | null>(null);
   const [scores, setScores] = useState<ScoreBreakdown | null>(null);
   const [icpBreakdown, setIcpBreakdown] = useState<IcpBreakdown | null>(null);
+  const [gauges, setGauges] = useState<Partial<AllGauges> | null>(null);
+  const [gaugeErrors, setGaugeErrors] = useState<string[]>([]);
+  const [gaugesLoading, setGaugesLoading] = useState(false);
+  const [goalsAndTasks, setGoalsAndTasks] = useState<GoalsAndTasks | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tagInput, setTagInput] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
+  const [editingLinkedIn, setEditingLinkedIn] = useState(false);
+  const [linkedinDraft, setLinkedinDraft] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
+  const [savingLinkedIn, setSavingLinkedIn] = useState(false);
+  const [linkedinError, setLinkedinError] = useState<string | null>(null);
   const [enriching, setEnriching] = useState<string | null>(null);
   const [enrichResult, setEnrichResult] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -160,13 +270,12 @@ export default function ContactDetailPage() {
     label: string;
     oldValue: string | null;
     newValue: string;
-    editValue: string; // user-editable version of newValue
     confidence: number;
     provider: string;
     selected: boolean;
-    editing: boolean;
   }
   const [enrichReview, setEnrichReview] = useState<{
+    quote: string;
     fields: ReviewField[];
     totalCostCents: number;
     gatedFields: string[]; // fields PDL has but are behind Person tier paywall
@@ -209,15 +318,40 @@ export default function ContactDetailPage() {
       fields: string[];
     }>;
     totalCostCents: number;
+    budgetRemaining: number;
+    withinBudget: boolean;
+    quote: string;
   } | null>(null);
+  const [enrichRecoveryNeeded, setEnrichRecoveryNeeded] = useState(false);
+  const [recoveryQuote, setRecoveryQuote] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRecoveryQuote(sessionStorage.getItem(`contact-enrichment-pending-${contactId}`));
+  }, [contactId]);
+
+  const loadGauges = useCallback(async () => {
+    setGaugesLoading(true);
+    try {
+      const response = await fetch(`/api/contacts/${contactId}/gauges`);
+      const json = await response.json();
+      const hasData = json.data && Object.keys(json.data).length > 0;
+      if (hasData) setGauges(json.data);
+      setGaugeErrors(json.errors?.length ? json.errors : response.ok && hasData ? [] : ["all gauges"]);
+    } catch {
+      setGaugeErrors(["all gauges"]);
+    } finally {
+      setGaugesLoading(false);
+    }
+  }, [contactId]);
 
   const loadContact = useCallback(async () => {
     try {
-      const [contactRes, scoresRes, providersRes, icpRes] = await Promise.all([
+      const [contactRes, scoresRes, providersRes, icpRes, goalsRes] = await Promise.all([
         fetch(`/api/contacts/${contactId}`),
         fetch(`/api/contacts/${contactId}/scores`),
         fetch("/api/enrichment/providers"),
         fetch(`/api/contacts/${contactId}/icp-breakdown`),
+        fetch(`/api/contacts/${contactId}/goals`),
       ]);
 
       if (contactRes.ok) {
@@ -239,6 +373,11 @@ export default function ContactDetailPage() {
         const json = await icpRes.json();
         setIcpBreakdown(json.data);
       }
+
+      if (goalsRes.ok) {
+        const json = await goalsRes.json();
+        setGoalsAndTasks(json.data);
+      }
     } catch {
       // Error state handled by null checks
     } finally {
@@ -250,8 +389,29 @@ export default function ContactDetailPage() {
     loadContact();
   }, [loadContact]);
 
-  function handleEnrich(_field?: string) {
+  useEffect(() => {
+    setGauges(null);
+    setGaugeErrors([]);
+    loadGauges();
+  }, [loadGauges]);
+
+  async function handleEnrich(_field?: string) {
+    if (recoveryQuote) {
+      setEnrichResult('Recover the saved paid result before requesting a new quote.');
+      return;
+    }
     if (!contact) return;
+    try {
+      const response = await fetch('/api/enrichment/estimate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactIds: [contactId] }),
+      });
+      if (!response.ok) throw new Error('Could not estimate enrichment cost');
+      const { data: estimate } = await response.json() as { data: {
+        totalCostCents: number; budgetRemaining: number; withinBudget: boolean;
+        quote: string;
+        perProvider: Array<{ providerId: string; providerName: string; costCents: number }>;
+      } };
 
     // Show ALL enrichable fields with their current values and which provider can fill them
     const fieldBreakdown = ENRICHABLE_FIELDS.map((f) => {
@@ -302,18 +462,28 @@ export default function ContactDetailPage() {
       }
     }
 
-    const totalCost = providerBreakdown.reduce((sum, p) => sum + p.costCents, 0);
-
     setEnrichConfirm({
       fields: fieldBreakdown,
-      providerBreakdown,
-      totalCostCents: totalCost,
+      providerBreakdown: estimate.perProvider.map(p => ({
+        name: p.providerId, displayName: p.providerName, costCents: p.costCents,
+        fields: providerBreakdown.find(local => local.displayName === p.providerName)?.fields || [],
+      })),
+      totalCostCents: estimate.totalCostCents,
+      budgetRemaining: estimate.budgetRemaining,
+      withinBudget: estimate.withinBudget,
+      quote: estimate.quote,
     });
+    } catch (error) {
+      setEnrichResult(error instanceof Error ? error.message : 'Could not estimate enrichment cost');
+    }
   }
 
-  async function doEnrich() {
-    if (!enrichConfirm) return;
-    setEnrichConfirm(null);
+  async function doEnrich(quoteOverride?: string) {
+    const quote = quoteOverride || enrichConfirm?.quote;
+    if (!quote) return;
+    sessionStorage.setItem(`contact-enrichment-pending-${contactId}`, quote);
+    setRecoveryQuote(quote);
+    setEnrichRecoveryNeeded(true);
     setEnriching("all");
     setEnrichResult(null);
     try {
@@ -326,17 +496,40 @@ export default function ContactDetailPage() {
         body: JSON.stringify({
           contactId,
           dryRun: true,
+          quote,
         }),
       });
       if (res.ok) {
         const json = await res.json();
+        if (json.running) {
+          setEnrichRecoveryNeeded(true);
+          setEnrichResult(json.message || 'Paid request is still running. Recover this same quote later.');
+          return;
+        }
+        if (json.noCharge) {
+          sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+          setRecoveryQuote(null);
+          setEnrichRecoveryNeeded(false);
+          setEnrichConfirm(null);
+          setEnrichResult('No provider call was made. You can request a fresh estimate.');
+          return;
+        }
+        setEnrichRecoveryNeeded(false);
+        setEnrichConfirm(null);
         const result = json.data?.[0];
+        if (json.partial) {
+          setEnrichResult(`Enrichment stopped: ${json.stopReason}. Spent $${((json.totalCostCents || 0) / 100).toFixed(2)}; reserved exposure $${((json.reservedBudgetCents || 0) / 100).toFixed(2)}. Review returned fields before requesting another quote.`);
+        }
         const delta: Array<{
           field: string; label: string; oldValue: string | null;
           newValue: string | null; confidence: number; provider: string; selected: boolean;
         }> = result?.delta || [];
         const totalCost = result?.totalCostCents ?? 0;
         const gatedFields: string[] = result?.gatedFields || [];
+        if (!json.partial && delta.length === 0 && gatedFields.length === 0) {
+          sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+          setRecoveryQuote(null);
+        }
 
         // Map raw PDL field names to our enrichment field names for display
         const gatedEnrichFields = new Set<string>();
@@ -350,22 +543,23 @@ export default function ContactDetailPage() {
           if (mapped) gatedEnrichFields.add(mapped);
         }
 
-        if (delta.length === 0 && gatedEnrichFields.size === 0) {
+        if (json.partial && delta.length === 0) {
+          // The partial outcome above is the actionable result.
+        } else if (delta.length === 0 && gatedEnrichFields.size === 0) {
           setEnrichResult("No new data found from enrichment providers");
         } else if (delta.length === 0 && gatedEnrichFields.size > 0) {
           setEnrichResult(
             `PDL has data for ${[...gatedEnrichFields].join(", ")} but it requires the Person tier (upgrade from Starter). No fields to apply.`
           );
         } else {
-          // Open review modal with editable fields
+          // Open review modal for the exact saved provider values.
           setEnrichReview({
+            quote,
             fields: delta
               .filter((d) => d.newValue !== null)
               .map((d) => ({
                 ...d,
                 newValue: d.newValue!,
-                editValue: d.newValue!,
-                editing: false,
               })),
             totalCostCents: totalCost,
             gatedFields: [...gatedEnrichFields],
@@ -399,15 +593,18 @@ export default function ContactDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contactId,
+          quote: enrichReview.quote,
           fields: selected.map((f) => ({
             field: f.field,
-            value: f.editValue,
+            value: f.newValue,
           })),
         }),
       });
       if (res.ok) {
         const json = await res.json();
         const applied = json.data?.fieldsApplied ?? 0;
+        sessionStorage.removeItem(`contact-enrichment-pending-${contactId}`);
+        setRecoveryQuote(null);
         setEnrichResult(`Applied ${applied} field${applied !== 1 ? "s" : ""}`);
         await loadContact();
       } else {
@@ -434,28 +631,71 @@ export default function ContactDetailPage() {
     });
   }
 
-  function setReviewEditing(field: string, editing: boolean) {
-    setEnrichReview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        fields: prev.fields.map((f) =>
-          f.field === field ? { ...f, editing } : f
-        ),
-      };
-    });
+  async function addTag() {
+    const trimmed = tagInput.trim();
+    if (!trimmed || !contact) return;
+    if (contact.tags?.includes(trimmed)) {
+      setTagInput("");
+      return;
+    }
+    const newTags = [...(contact.tags || []), trimmed];
+    setSavingTags(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: newTags }),
+      });
+      if (res.ok) {
+        setContact((prev) => (prev ? { ...prev, tags: newTags } : prev));
+        setTagInput("");
+      }
+    } catch {
+      // Silently ignore — tag list stays unchanged on failure
+    } finally {
+      setSavingTags(false);
+    }
   }
 
-  function setReviewEditValue(field: string, value: string) {
-    setEnrichReview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        fields: prev.fields.map((f) =>
-          f.field === field ? { ...f, editValue: value } : f
-        ),
-      };
-    });
+  async function removeTag(tag: string) {
+    if (!contact) return;
+    const newTags = (contact.tags || []).filter((t) => t !== tag);
+    setSavingTags(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: newTags }),
+      });
+      if (res.ok) {
+        setContact((prev) => (prev ? { ...prev, tags: newTags } : prev));
+      }
+    } catch {
+      // Silently ignore — tag list stays unchanged on failure
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  async function saveLinkedIn() {
+    if (!contact) return;
+    setSavingLinkedIn(true);
+    setLinkedinError(null);
+    try {
+      const response = await fetch(`/api/contacts/${contactId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ full_name: nameDraft.trim(), linkedin_url: linkedinDraft.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save LinkedIn profile");
+      setContact(result.data);
+      setEditingLinkedIn(false);
+    } catch (error) {
+      setLinkedinError(error instanceof Error ? error.message : "Could not save LinkedIn profile");
+    } finally {
+      setSavingLinkedIn(false);
+    }
   }
 
   if (loading) {
@@ -514,7 +754,7 @@ export default function ContactDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => handleEnrich()}
+              onClick={() => recoveryQuote ? doEnrich(recoveryQuote) : handleEnrich()}
               disabled={enriching !== null}
             >
               {enriching === "all" ? (
@@ -522,7 +762,7 @@ export default function ContactDetailPage() {
               ) : (
                 <Sparkles className="h-3.5 w-3.5 mr-1.5" />
               )}
-              Enrich
+              {recoveryQuote ? 'Recover paid result' : 'Enrich'}
             </Button>
           </div>
         }
@@ -564,7 +804,7 @@ export default function ContactDetailPage() {
       {enrichResult && (
         <div
           className={`rounded-md px-3 py-2 text-sm mb-4 ${
-            enrichResult.includes("failed")
+            enrichResult.includes("failed") || enrichResult.includes("stopped")
               ? "bg-destructive/10 text-destructive"
               : "bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-200"
           }`}
@@ -581,7 +821,7 @@ export default function ContactDetailPage() {
                 <DollarSign className="h-4 w-4 text-orange-500" />
                 Confirm Enrichment
               </h3>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setEnrichConfirm(null)}>
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setEnrichConfirm(null)} disabled={enrichRecoveryNeeded}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -640,21 +880,23 @@ export default function ContactDetailPage() {
             </div>
 
             <p className="text-xs text-muted-foreground mb-4">
-              The waterfall calls providers in order until all fields are filled.
-              You&apos;ll review results before anything is saved.
+              Worst-case expected spend: ${(enrichConfirm.totalCostCents / 100).toFixed(2)}.
+              Remaining budget: ${(enrichConfirm.budgetRemaining / 100).toFixed(2)}.
+              Preview may cost money. You&apos;ll review results before anything is saved.
             </p>
+            {enrichRecoveryNeeded && <p role="alert" className="text-xs mb-3">{enrichResult || 'Paid request may still be running. Recover this same quote before another paid preview.'}</p>}
 
             <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEnrichConfirm(null)}>
+              <Button variant="outline" size="sm" onClick={() => setEnrichConfirm(null)} disabled={enrichRecoveryNeeded}>
                 Cancel
               </Button>
               <Button
                 size="sm"
                 onClick={() => doEnrich()}
-                disabled={enrichConfirm.fields.every((f) => !!f.currentValue)}
+                disabled={!!enriching || enrichConfirm.fields.every((f) => !!f.currentValue) || !enrichConfirm.withinBudget}
               >
                 <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                Enrich (${(enrichConfirm.totalCostCents / 100).toFixed(2)})
+                {enrichRecoveryNeeded ? 'Recover paid result' : `Enrich ($${(enrichConfirm.totalCostCents / 100).toFixed(2)})`}
               </Button>
             </div>
           </div>
@@ -679,6 +921,9 @@ export default function ContactDetailPage() {
               Select which fields to apply. You can edit values before saving.
               Cost: ${(enrichReview.totalCostCents / 100).toFixed(2)}
             </p>
+            {enrichResult?.includes("Enrichment stopped") && (
+              <p role="alert" className="mb-3 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{enrichResult}</p>
+            )}
 
             <div className="rounded-md border divide-y text-sm overflow-y-auto flex-1 mb-4">
               {enrichReview.fields.map((f) => (
@@ -703,43 +948,13 @@ export default function ContactDetailPage() {
                     </span>
                   </div>
 
-                  {/* Row 2: old value → new value (editable) */}
+                  {/* Row 2: old value → saved provider value */}
                   <div className="flex items-center gap-2 pl-6 text-xs">
                     <span className={`truncate max-w-[120px] ${f.oldValue ? "text-muted-foreground" : "text-orange-500 italic"}`}>
                       {f.oldValue || "empty"}
                     </span>
                     <ArrowRight className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-                    {f.editing ? (
-                      <input
-                        type="text"
-                        className="flex-1 border rounded px-1.5 py-0.5 text-xs bg-background focus:outline-none focus:ring-1 focus:ring-primary"
-                        value={f.editValue}
-                        onChange={(e) => setReviewEditValue(f.field, e.target.value)}
-                        onBlur={() => setReviewEditing(f.field, false)}
-                        onKeyDown={(e) => { if (e.key === "Enter") setReviewEditing(f.field, false); }}
-                        autoFocus
-                      />
-                    ) : (
-                      <span
-                        className={`flex-1 truncate ${
-                          f.oldValue && f.oldValue !== f.editValue
-                            ? "text-blue-600 font-medium"
-                            : "text-green-600 font-medium"
-                        }`}
-                      >
-                        {f.editValue}
-                      </span>
-                    )}
-                    {!f.editing && (
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground p-0.5"
-                        onClick={() => setReviewEditing(f.field, true)}
-                        title="Edit value"
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                    )}
+                    <span className="flex-1 truncate text-green-600 font-medium">{f.newValue}</span>
                   </div>
 
                   {/* Overwrite warning */}
@@ -832,11 +1047,37 @@ export default function ContactDetailPage() {
                   enriching={enriching}
                   onEnrich={handleEnrich}
                 />
-                <InfoRow
-                  label="LinkedIn"
-                  value={contact.linkedinUrl}
-                  isLink
-                />
+                <div>
+                  {editingLinkedIn ? (
+                    <div className="space-y-2">
+                      <label htmlFor="contact-identity-name" className="text-sm">Contact name</label>
+                      <input id="contact-identity-name" type="text" value={nameDraft}
+                        onChange={(event) => setNameDraft(event.target.value)}
+                        className="w-full rounded border bg-background px-2 py-1 text-sm" />
+                      <label htmlFor="contact-linkedin-url" className="text-sm">LinkedIn profile</label>
+                      <input id="contact-linkedin-url" type="url" value={linkedinDraft}
+                        onChange={(event) => setLinkedinDraft(event.target.value)}
+                        className="w-full rounded border bg-background px-2 py-1 text-sm" />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={saveLinkedIn} disabled={savingLinkedIn}>Save</Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setEditingLinkedIn(false); setLinkedinError(null); }}
+                          disabled={savingLinkedIn}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2">
+                      <InfoRow label="LinkedIn" value={contact.linkedinUrl}
+                        isLink={!contact.linkedinUrl?.startsWith("self:")} />
+                      {!contact.linkedinUrl?.startsWith("self:") && (
+                        <Button size="sm" variant="ghost" aria-label="Edit contact identity"
+                          onClick={() => { setNameDraft(contact.fullName ?? ""); setLinkedinDraft(contact.linkedinUrl ?? ""); setLinkedinError(null); setEditingLinkedIn(true); }}>
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {linkedinError && <p role="alert" className="text-sm text-destructive">{linkedinError}</p>}
+                </div>
                 <InfoRow
                   label="Degree"
                   value={`${contact.degree}${ordinalSuffix(contact.degree)}`}
@@ -887,36 +1128,125 @@ export default function ContactDetailPage() {
                     No bio available
                   </p>
                 )}
-                {contact.tags && contact.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-3">
-                    {contact.tags.map((tag) => (
-                      <Badge key={tag} variant="secondary" className="text-xs">
-                        {tag}
-                      </Badge>
-                    ))}
+                <div className="flex flex-wrap items-center gap-1.5 mt-3">
+                  {contact.tags?.map((tag) => (
+                    <Badge
+                      key={tag}
+                      variant="secondary"
+                      className="text-xs gap-1 pr-1"
+                    >
+                      {tag}
+                      <button
+                        type="button"
+                        className="hover:text-destructive disabled:opacity-50"
+                        onClick={() => removeTag(tag)}
+                        disabled={savingTags}
+                        aria-label={`Remove tag ${tag}`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </Badge>
+                  ))}
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addTag();
+                        }
+                      }}
+                      placeholder="Add tag"
+                      disabled={savingTags}
+                      className="h-6 w-20 rounded border bg-background px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      onClick={addTag}
+                      disabled={savingTags || !tagInput.trim()}
+                    >
+                      <Plus className="h-3 w-3" />
+                    </Button>
                   </div>
-                )}
+                </div>
               </CardContent>
             </Card>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 mt-4">
+            {gauges?.dtse && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Strategy & Tasks</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <DTSEPanel {...gauges.dtse} />
+                </CardContent>
+              </Card>
+            )}
+
+            {goalsAndTasks &&
+              (goalsAndTasks.goals.length > 0 || goalsAndTasks.tasks.length > 0) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm flex items-center justify-between">
+                      <span>Goals & Tasks</span>
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {goalsAndTasks.summary.pendingTasks} pending
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {goalsAndTasks.goals.length > 0 && (
+                      <div className="space-y-2">
+                        {goalsAndTasks.goals.map((g) => (
+                          <div key={g.id} className="text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium truncate">{g.title}</span>
+                              <span className="text-muted-foreground ml-2 flex-shrink-0">
+                                {Math.round(g.progress * 100)}%
+                              </span>
+                            </div>
+                            <Progress value={g.progress * 100} className="h-1 mt-1" />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {goalsAndTasks.tasks.length > 0 && (
+                      <div className="space-y-1.5">
+                        {goalsAndTasks.tasks.map((t) => (
+                          <div
+                            key={t.id}
+                            className="flex items-center justify-between text-xs gap-2"
+                          >
+                            <span className="truncate">{t.title}</span>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                {t.taskType}
+                              </Badge>
+                              <Badge
+                                variant={t.status === "completed" ? "secondary" : "outline"}
+                                className="text-[10px] px-1.5 py-0"
+                              >
+                                {t.status}
+                              </Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
           </div>
         </TabsContent>
 
         <TabsContent value="network" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">Network Position</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                {contact.degree === 1
-                  ? "1st degree connection"
-                  : `${contact.degree}${ordinalSuffix(contact.degree)} degree`}
-                {contact.connectionsCount
-                  ? ` with ${contact.connectionsCount.toLocaleString()} connections`
-                  : ""}
-              </p>
-            </CardContent>
-          </Card>
+          <NetworkTab contactId={contactId} />
         </TabsContent>
 
         <TabsContent value="scores" className="mt-4">
@@ -1055,6 +1385,28 @@ export default function ContactDetailPage() {
               </CardContent>
             </Card>
           )}
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle className="text-sm">ECC Gauges</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {gaugeErrors.length > 0 && (
+                <div role="alert" className="flex items-center justify-between gap-2 text-sm">
+                  <span>Could not load {gaugeErrors.join(", ")}. Available gauges are shown below.</span>
+                  <Button variant="outline" size="sm" onClick={loadGauges} disabled={gaugesLoading}>
+                    {gaugesLoading ? "Retrying…" : "Retry gauges"}
+                  </Button>
+                </div>
+              )}
+              {gaugesLoading && !gauges && <p className="text-sm text-muted-foreground">Loading gauges…</p>}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {gauges?.dcte && <DCTEGauge {...gauges.dcte} />}
+                {gauges?.rste && <RSTEGauge {...gauges.rste} />}
+                {gauges?.emot && <EMOTGauge {...gauges.emot} />}
+                {gauges?.scen && <SCENGauge {...gauges.scen} />}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="enrichment" className="mt-4">

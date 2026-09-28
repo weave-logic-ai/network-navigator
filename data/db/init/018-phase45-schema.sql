@@ -4,7 +4,7 @@
 -- Offerings table
 CREATE TABLE offerings (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  name TEXT NOT NULL,
+  name TEXT NOT NULL UNIQUE,
   description TEXT,
   is_active BOOLEAN DEFAULT TRUE,
   sort_order INTEGER DEFAULT 0,

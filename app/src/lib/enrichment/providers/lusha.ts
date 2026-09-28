@@ -33,6 +33,7 @@ export class LushaProvider implements EnrichmentProvider {
       };
     }
 
+    let requestStarted = false;
     try {
       const body: Record<string, string> = {};
       if (contact.firstName) body.firstName = contact.firstName;
@@ -40,8 +41,10 @@ export class LushaProvider implements EnrichmentProvider {
       if (contact.currentCompany) body.company = contact.currentCompany;
       if (contact.linkedinUrl) body.linkedinUrl = contact.linkedinUrl;
 
+      requestStarted = true;
       const response = await fetch(`${this.baseUrl}/person`, {
         method: 'POST',
+        redirect: 'manual',
         headers: {
           'api_key': this.apiKey,
           'Content-Type': 'application/json',
@@ -55,8 +58,9 @@ export class LushaProvider implements EnrichmentProvider {
           providerName: this.displayName,
           success: false,
           fields: [],
-          costCents: response.status === 404 ? 0 : this.costPerLookupCents,
+          costCents: 0,
           error: `Lusha API error: ${response.status}`,
+          errorCode: response.status === 404 ? undefined : 'provider_unknown_charge',
         };
       }
 
@@ -78,7 +82,9 @@ export class LushaProvider implements EnrichmentProvider {
         success: false,
         fields: [],
         costCents: 0,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: requestStarted ? 'Provider request or response failed; charge requires reconciliation'
+          : error instanceof Error ? error.message : 'Unknown error',
+        errorCode: requestStarted ? 'provider_unknown_charge' : undefined,
       };
     }
   }

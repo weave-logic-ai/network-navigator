@@ -23,12 +23,21 @@ data/config/extension-settings.json
 *.credentials.json
 *-credentials.json
 **/tokens/
+# The operator-only extension token API is source code, not a token store.
+!app/src/app/api/extension/tokens/
+!app/src/app/api/extension/tokens/route.ts
+!app/src/app/api/extension/tokens/[extensionId]/
+!app/src/app/api/extension/tokens/[extensionId]/route.ts
 *-token.json
 .env
 .env.local
 .env.*.local
 **/.env
 **/.env.*
+# `**/.env.*` above also swallows .env.example, which carries no secrets and
+# is meant to be committed as the reference for RESEARCH_* flags. Negate it.
+!.env.example
+!**/.env.example
 
 # === Build artifacts ===
 node_modules/
@@ -98,3 +107,6 @@ graphify-out/
 
 # Local ruvector vector DB (runtime artifact, like .swarm/)
 ruvector.db
+
+# Session handoff notes (local only)
+docs/handoff.md

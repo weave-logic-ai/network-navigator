@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCrossRefsForContact } from '@/lib/ecc/cross-refs/service';
 import type { CrossRefType } from '@/lib/ecc/types';
-
-const DEFAULT_TENANT_ID = 'default';
+import { getDefaultTenantId } from '@/lib/targets/service';
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -10,8 +9,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { searchParams } = new URL(request.url);
     const relationType = searchParams.get('type') as CrossRefType | null;
 
+    // Resolve tenant via the shared resolver (same one used by
+    // ecc/causal-graph/scoring-adapter.ts and ecc/cognitive-tick/claude-adapter.ts)
+    // instead of the hardcoded 'default' literal that was here before.
+    const tenantId = await getDefaultTenantId();
+
     const relationships = await getCrossRefsForContact(
-      DEFAULT_TENANT_ID,
+      tenantId,
       id,
       relationType ?? undefined
     );

@@ -14,6 +14,8 @@ export interface EnrichmentResult {
   costCents: number;
   rawResponse?: Record<string, unknown>;
   error?: string;
+  errorCode?: 'budget_unavailable' | 'ledger_failed' | 'provider_unknown_charge' | 'cost_exceeded';
+  reservedCents?: number;
 }
 
 export interface EnrichmentProvider {

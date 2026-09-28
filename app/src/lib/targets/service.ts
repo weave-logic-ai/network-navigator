@@ -9,7 +9,9 @@
 // Per ADR-027 + `10-decisions.md` Q4: primary is immutable in v1 and always
 // equals the self-target for the requesting user. Secondary is nullable.
 
-import { query } from '../db/client';
+import { query, transaction } from '../db/client';
+import type { PoolClient } from 'pg';
+import { HISTORY_LIMIT, type TargetHistoryEntry } from './history-service';
 import { getDefaultTenantId } from '../db/tenants';
 import type { ResearchTarget, ResearchTargetState, TargetKind } from './types';
 
@@ -39,6 +41,8 @@ function rowToState(row: Record<string, unknown>): ResearchTargetState {
     userId: (row.user_id as string | null) ?? null,
     primaryTargetId: (row.primary_target_id as string | null) ?? null,
     secondaryTargetId: (row.secondary_target_id as string | null) ?? null,
+    revision: String(row.revision ?? 0),
+    activeLensId: (row.last_used_lens_id as string | null) ?? null,
     updatedAt: String(row.updated_at),
   };
 }
@@ -59,16 +63,19 @@ export async function getCurrentOwnerProfileId(): Promise<string | null> {
  * does not exist — callers then fall back to the no-op behavior documented in
  * the "self-target migration" section of ADR-027.
  */
-export async function getOrCreateSelfTarget(ownerId: string): Promise<ResearchTarget | null> {
+export async function getOrCreateSelfTarget(
+  ownerId: string, scopeTenantId?: string
+): Promise<ResearchTarget | null> {
+  const tenantId = scopeTenantId ?? await getDefaultTenantId();
   const existing = await query<Record<string, unknown>>(
-    `SELECT * FROM research_targets WHERE owner_id = $1 AND kind = 'self' LIMIT 1`,
-    [ownerId]
+    `SELECT * FROM research_targets
+     WHERE owner_id = $1 AND tenant_id = $2 AND kind = 'self' LIMIT 1`,
+    [ownerId, tenantId]
   );
   if (existing.rows[0]) {
     return rowToTarget(existing.rows[0]);
   }
 
-  const tenantId = await getDefaultTenantId();
   const labelRes = await query<{ label: string | null }>(
     `SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), 'Self') AS label
      FROM owner_profiles WHERE id = $1`,
@@ -88,8 +95,9 @@ export async function getOrCreateSelfTarget(ownerId: string): Promise<ResearchTa
   }
   // Race: the row was created by a concurrent call. Re-read.
   const reread = await query<Record<string, unknown>>(
-    `SELECT * FROM research_targets WHERE owner_id = $1 AND kind = 'self' LIMIT 1`,
-    [ownerId]
+    `SELECT * FROM research_targets
+     WHERE owner_id = $1 AND tenant_id = $2 AND kind = 'self' LIMIT 1`,
+    [ownerId, tenantId]
   );
   return reread.rows[0] ? rowToTarget(reread.rows[0]) : null;
 }
@@ -107,102 +115,245 @@ export async function getResearchTargetState(
   if (!resolvedOwnerId) return null;
 
   const tenantId = await getDefaultTenantId();
-  const selfTarget = await getOrCreateSelfTarget(resolvedOwnerId);
+  const selfTarget = await getOrCreateSelfTarget(resolvedOwnerId, tenantId);
   if (!selfTarget) return null;
 
-  // Upsert the state row with primary = self-target. We intentionally do not
-  // touch secondary if the row already exists. Primary is derived from the
-  // owner + self-target join so keeping it in sync is safe.
-  const upserted = await query<Record<string, unknown>>(
+  // First read may seed the row. Existing legacy pointers are repaired before
+  // this state can reach a server render or an API response.
+  await query(
     `INSERT INTO research_target_state (tenant_id, user_id, primary_target_id, secondary_target_id)
      VALUES ($1, $2, $3, NULL)
-     ON CONFLICT (tenant_id, user_id)
-       DO UPDATE SET primary_target_id = EXCLUDED.primary_target_id,
-                     updated_at = NOW()
-     RETURNING *`,
+     ON CONFLICT (tenant_id, user_id) DO NOTHING`,
     [tenantId, resolvedOwnerId, selfTarget.id]
   );
-  const state = upserted.rows[0] ? rowToState(upserted.rows[0]) : null;
-  if (!state) return null;
+  return transaction(async client => {
+    const row = await readAuthorizedState(client, tenantId, resolvedOwnerId, selfTarget.id);
+    return row ? rowToState(row) : null;
+  });
+}
 
-  // WS-4 polish (tab-close restore): if the secondary points at a target
-  // whose underlying entity (contact/company) has since been archived or
-  // merged away, silently clear the pointer. The schema uses
-  // `ON DELETE SET NULL` on `research_targets.contact_id` / `company_id`
-  // so the target row survives with all three subject FKs NULL — we treat
-  // that as "the target is gone" for UI purposes. This keeps the restore
-  // flow from re-rendering a stale secondary after a contact delete.
-  if (state.secondaryTargetId) {
-    const cleared = await clearSecondaryIfDangling(
-      state.tenantId,
-      state.userId,
-      state.secondaryTargetId
-    );
-    if (cleared) {
-      state.secondaryTargetId = null;
+/** Repair pre-CAS pointers under the state lock before any caller observes them. */
+async function readAuthorizedState(client: PoolClient, tenantId: string, ownerId: string,
+  selfTargetId: string): Promise<Record<string, unknown> | null> {
+  const locked = await client.query<Record<string, unknown>>(
+    `SELECT * FROM research_target_state
+     WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`,
+    [tenantId, ownerId]
+  );
+  const row = locked.rows[0];
+  if (!row) return null;
+
+  const secondaryId = (row.secondary_target_id as string | null) ?? null;
+  const validSecondary = secondaryId ? await client.query<{ id: string }>(
+    `SELECT id FROM research_targets WHERE id = $1 AND tenant_id = $2
+     AND ((kind = 'contact' AND contact_id IS NOT NULL)
+       OR (kind = 'company' AND company_id IS NOT NULL))`,
+    [secondaryId, tenantId]
+  ) : null;
+  const primaryChanged = row.primary_target_id !== selfTargetId;
+  const secondaryChanged = Boolean(secondaryId && !validSecondary?.rows[0]);
+  if (!primaryChanged && !secondaryChanged) return row;
+
+  const repaired = await client.query<Record<string, unknown>>(
+    `UPDATE research_target_state SET primary_target_id = $3,
+       secondary_target_id = $4, last_used_lens_id = NULL,
+       revision = revision + 1, updated_at = NOW()
+     WHERE tenant_id = $1 AND user_id = $2 RETURNING *`,
+    [tenantId, ownerId, selfTargetId, secondaryChanged ? null : secondaryId]
+  );
+  return repaired.rows[0] ?? null;
+}
+
+/** Legacy direct mutation is closed; callers must use commandTargetState. */
+export async function setSecondaryTarget(): Promise<never> {
+  throw new Error('Use revisioned target state commands');
+}
+
+export type TargetStateAction =
+  | { type: 'focus'; targetId: string | null }
+  | { type: 'back' }
+  | { type: 'activateLens'; targetId: string; lensId: string };
+
+export interface TargetStateSnapshot extends ResearchTargetState {
+  focusTargetId: string | null;
+  primaryLabel: string | null;
+  focusLabel: string | null;
+  activeLensLabel: string | null;
+  history: Array<TargetHistoryEntry & {
+    targetLabel: string | null; lensLabel: string | null; lensUnavailable: boolean;
+  }>;
+  canGoBack: boolean;
+  warning: string | null;
+}
+
+export class TargetStateCommandError extends Error {
+  constructor(public readonly status: 400 | 409, message: string,
+    public readonly current?: TargetStateSnapshot) { super(message); }
+}
+
+function validHistory(value: unknown): TargetHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return value.flatMap((entry): TargetHistoryEntry[] => {
+    if (!entry || typeof entry !== 'object' ||
+        typeof entry.targetId !== 'string' || !uuid.test(entry.targetId) ||
+        typeof entry.openedAt !== 'string' ||
+        (entry.lensId != null && (typeof entry.lensId !== 'string' || !uuid.test(entry.lensId)))) {
+      return [];
     }
-  }
-  return state;
+    return [{ targetId: entry.targetId, lensId: entry.lensId ?? null, openedAt: entry.openedAt }];
+  }).slice(0, HISTORY_LIMIT);
 }
 
-/**
- * Check whether `secondaryTargetId` points at a target whose underlying
- * subject row (contact / company) still exists. If the target row has all
- * three subject FKs NULL (the ON DELETE SET NULL state after a contact or
- * company delete), clear the pointer on `research_target_state` and return
- * true.
- *
- * Self-targets have a non-null owner_id; they can only become dangling if
- * the owner_profiles row was deleted, which is also surfaced as "all three
- * FKs NULL" by the same check.
- */
-async function clearSecondaryIfDangling(
-  tenantId: string,
-  userId: string | null,
-  secondaryTargetId: string
-): Promise<boolean> {
-  const res = await query<{
-    owner_id: string | null;
-    contact_id: string | null;
-    company_id: string | null;
-  }>(
-    `SELECT owner_id, contact_id, company_id
-     FROM research_targets WHERE id = $1 LIMIT 1`,
-    [secondaryTargetId]
-  );
-  const row = res.rows[0];
-  const allNull =
-    !row || (row.owner_id == null && row.contact_id == null && row.company_id == null);
-  if (!allNull) return false;
-
-  await query(
-    `UPDATE research_target_state
-     SET secondary_target_id = NULL, updated_at = NOW()
-     WHERE tenant_id = $1 AND user_id = $2`,
-    [tenantId, userId]
-  );
-  return true;
+async function snapshot(client: PoolClient, row: Record<string, unknown>,
+  warning: string | null = null): Promise<TargetStateSnapshot> {
+  const state = rowToState(row);
+  const tenantId = state.tenantId;
+  const history = validHistory(row.history);
+  const targetIds = [state.primaryTargetId, state.secondaryTargetId, ...history.map(e => e.targetId)]
+    .filter((id): id is string => Boolean(id));
+  const lensIds = [state.activeLensId, ...history.map(e => e.lensId)]
+    .filter((id): id is string => Boolean(id));
+  const targets = await client.query<{ id: string; label: string }>(
+    `SELECT id, label FROM research_targets
+     WHERE tenant_id = $1 AND id = ANY($2::uuid[])
+       AND ((kind = 'self' AND owner_id = $3)
+         OR (kind = 'contact' AND contact_id IS NOT NULL)
+         OR (kind = 'company' AND company_id IS NOT NULL))`,
+    [tenantId, targetIds, state.userId]);
+  const lenses = await client.query<{ id: string; name: string; primary_target_id: string }>(
+    `SELECT id, name, primary_target_id FROM research_lenses
+     WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL
+       AND (user_id IS NULL OR user_id = $3)`,
+    [tenantId, lensIds, state.userId]);
+  const targetLabels = new Map(targets.rows.map(t => [t.id, t.label]));
+  const lensById = new Map(lenses.rows.map(l => [l.id, l]));
+  const lensLabel = (id: string | null, targetId: string | null) => {
+    const lens = id ? lensById.get(id) : null;
+    return targetId && targetLabels.has(targetId) && lens?.primary_target_id === targetId
+      ? lens.name : null;
+  };
+  const visibleHistory = history.filter(e => targetLabels.has(e.targetId)).map(e => ({
+    ...e, targetLabel: targetLabels.get(e.targetId) ?? null,
+    lensLabel: lensLabel(e.lensId, e.targetId),
+    lensUnavailable: Boolean(e.lensId && !lensLabel(e.lensId, e.targetId)),
+  }));
+  const currentTargetId = state.secondaryTargetId ?? state.primaryTargetId;
+  const activeLensLabel = lensLabel(state.activeLensId, currentTargetId);
+  const missingLens = Boolean(state.activeLensId && !activeLensLabel);
+  return {
+    ...state,
+    activeLensId: missingLens ? null : state.activeLensId,
+    focusTargetId: state.secondaryTargetId,
+    primaryLabel: state.primaryTargetId ? targetLabels.get(state.primaryTargetId) ?? null : null,
+    focusLabel: state.secondaryTargetId ? targetLabels.get(state.secondaryTargetId) ?? null : null,
+    activeLensLabel,
+    history: visibleHistory,
+    canGoBack: visibleHistory.length > 0,
+    warning: warning ?? (missingLens ? 'The active lens is unavailable.' : null),
+  };
 }
 
-/**
- * Set (or clear) the secondary target for a given owner.
- */
-export async function setSecondaryTarget(
-  ownerId: string,
-  secondaryTargetId: string | null
-): Promise<ResearchTargetState | null> {
-  // Make sure the state row exists first.
+export async function getTargetStateSnapshot(ownerId: string): Promise<TargetStateSnapshot | null> {
   const state = await getResearchTargetState(ownerId);
   if (!state) return null;
+  return transaction(async client => {
+    const row = await readAuthorizedState(client, state.tenantId, ownerId, state.primaryTargetId!);
+    return row ? snapshot(client, row) : null;
+  });
+}
 
-  const updated = await query<Record<string, unknown>>(
-    `UPDATE research_target_state
-     SET secondary_target_id = $3, updated_at = NOW()
-     WHERE tenant_id = $1 AND user_id = $2
-     RETURNING *`,
-    [state.tenantId, ownerId, secondaryTargetId]
-  );
-  return updated.rows[0] ? rowToState(updated.rows[0]) : null;
+export async function commandTargetState(ownerId: string, expectedRevision: string,
+  action: TargetStateAction): Promise<TargetStateSnapshot> {
+  const seeded = await getResearchTargetState(ownerId);
+  if (!seeded) throw new TargetStateCommandError(400, 'No owner profile configured');
+  return transaction(async client => {
+    const row = await readAuthorizedState(client, seeded.tenantId, ownerId, seeded.primaryTargetId!);
+    if (!row) throw new TargetStateCommandError(400, 'Target state unavailable');
+    if (String(row.revision) !== expectedRevision) {
+      throw new TargetStateCommandError(409, 'Target state changed', await snapshot(client, row));
+    }
+    let focus = (row.secondary_target_id as string | null) ?? null;
+    let lens = (row.last_used_lens_id as string | null) ?? null;
+    let history = validHistory(row.history);
+    let warning: string | null = null;
+    if (action.type === 'back') {
+      let entry: TargetHistoryEntry | undefined;
+      while (history.length > 0) {
+        const candidate = history.shift()!;
+        const target = await client.query<{ id: string }>(
+          `SELECT id FROM research_targets WHERE id = $1 AND tenant_id = $2
+           AND ((kind = 'self' AND owner_id = $3 AND id = $4)
+             OR (kind = 'contact' AND contact_id IS NOT NULL)
+             OR (kind = 'company' AND company_id IS NOT NULL))`,
+          [candidate.targetId, seeded.tenantId, ownerId, row.primary_target_id]
+        );
+        if (target.rows[0]) {
+          entry = candidate;
+          break;
+        }
+        warning = 'A prior target is unavailable; it was skipped.';
+      }
+      if (entry) {
+        focus = entry.targetId === row.primary_target_id ? null : entry.targetId;
+        lens = entry.lensId;
+      } else if (!warning) {
+        throw new TargetStateCommandError(400, 'No prior target context');
+      }
+    } else {
+      if (action.type === 'focus') {
+        if (action.targetId) {
+          const target = await client.query<{ id: string }>(
+            `SELECT id FROM research_targets WHERE id = $1 AND tenant_id = $2
+             AND kind IN ('contact', 'company')
+             AND (contact_id IS NOT NULL OR company_id IS NOT NULL)`,
+            [action.targetId, seeded.tenantId]
+          );
+          if (!target.rows[0]) throw new TargetStateCommandError(400, 'Invalid focus target');
+        }
+        if (focus !== action.targetId) lens = null;
+        focus = action.targetId;
+      } else {
+        if (action.targetId !== (focus ?? row.primary_target_id)) {
+          throw new TargetStateCommandError(400, 'Lens target is not current');
+        }
+        const selected = await client.query<{ id: string }>(
+          `SELECT id FROM research_lenses WHERE id = $1 AND tenant_id = $2
+           AND primary_target_id = $3 AND deleted_at IS NULL
+           AND (user_id IS NULL OR user_id = $4) FOR UPDATE`,
+          [action.lensId, seeded.tenantId, action.targetId, ownerId]
+        );
+        if (!selected.rows[0]) throw new TargetStateCommandError(400, 'Invalid lens');
+        lens = action.lensId;
+      }
+      if (action.type === 'focus' && focus !== row.secondary_target_id) {
+        const priorTargetId = (row.secondary_target_id as string | null) ??
+          (row.primary_target_id as string);
+        history = [{ targetId: priorTargetId,
+          lensId: (row.last_used_lens_id as string | null) ?? null,
+          openedAt: new Date().toISOString() }, ...history].slice(0, HISTORY_LIMIT);
+      }
+    }
+    if (lens) {
+      const available = await client.query<{ id: string }>(
+        `SELECT id FROM research_lenses WHERE id = $1 AND tenant_id = $2
+         AND primary_target_id = $3 AND deleted_at IS NULL
+         AND (user_id IS NULL OR user_id = $4) FOR UPDATE`,
+        [lens, seeded.tenantId, focus ?? row.primary_target_id, ownerId]
+      );
+      if (!available.rows[0]) {
+        lens = null;
+        warning = 'The saved lens was deleted or is unavailable; the target was restored without it.';
+      }
+    }
+    const updated = await client.query<Record<string, unknown>>(
+      `UPDATE research_target_state SET secondary_target_id = $3,
+       last_used_lens_id = $4, history = $5::jsonb, revision = revision + 1,
+       updated_at = NOW() WHERE tenant_id = $1 AND user_id = $2 RETURNING *`,
+      [seeded.tenantId, ownerId, focus, lens, JSON.stringify(history)]
+    );
+    return snapshot(client, updated.rows[0], warning);
+  });
 }
 
 /**

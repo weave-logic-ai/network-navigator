@@ -1,230 +1,67 @@
 "use client";
 
-// Target breadcrumbs — global header trail showing:
-//   Self  >  [Secondary]   [T]
-//
-// WS-4 Phase 1 Track B, extended by Phase 4 Track H:
-//   - Hover state on the secondary crumb reveals the time the target was
-//     set, the lens that was active, and a small back-arrow that swaps to
-//     the prior secondary in history.
-//   - History is persisted in `research_target_state.history` via
-//     `/api/targets/state/history`.
-//   - Gated on RESEARCH_FLAGS.targets at the mount site; when the flag is
-//     off the parent surface passes `interactive={false}` so the crumb
-//     renders as a static label without hover / back-stack affordances.
-//
-// Clicking the secondary crumb's "X" clears the secondary. The `T` shortcut
-// hint opens the target picker (keyboard handled by TargetPickerModal).
-
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { X, ArrowLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { formatBreadcrumbTime } from "@/lib/targets/breadcrumb-format";
+import { contextController, useTargetContext } from "@/lib/targets/context-controller";
 
-interface TargetStateDto {
-  primaryTargetId: string | null;
-  secondaryTargetId: string | null;
-}
-
-interface TargetDto {
-  id: string;
-  label: string;
-  kind: "self" | "contact" | "company";
-}
-
-interface HistoryEntryDto {
-  targetId: string;
-  lensId: string | null;
-  openedAt: string;
-}
-
-interface TargetBreadcrumbsProps {
+interface Props {
   initialPrimaryLabel?: string;
   initialSecondaryLabel?: string | null;
   initialSecondaryTargetId?: string | null;
-  /** When false, the hover card + swap-back are suppressed (flag-off mode). */
   interactive?: boolean;
 }
 
-export function TargetBreadcrumbs({
-  initialPrimaryLabel = "Self",
-  initialSecondaryLabel = null,
-  initialSecondaryTargetId = null,
-  interactive = true,
-}: TargetBreadcrumbsProps) {
-  const [primaryLabel] = useState(initialPrimaryLabel);
-  const [secondaryLabel, setSecondaryLabel] = useState<string | null>(
-    initialSecondaryLabel
-  );
-  const [secondaryId, setSecondaryId] = useState<string | null>(
-    initialSecondaryTargetId
-  );
-  const [history, setHistory] = useState<HistoryEntryDto[]>([]);
+export function TargetBreadcrumbs({ initialPrimaryLabel = "Self", initialSecondaryLabel = null,
+  initialSecondaryTargetId = null, interactive = true }: Props) {
+  const router = useRouter();
+  const { snapshot, ready, stale, error } = useTargetContext();
   const [hovered, setHovered] = useState(false);
-
-  // Keep the component in sync if another tab / page updated the state.
+  const [actionError, setActionError] = useState<string | null>(null);
   useEffect(() => {
-    let cancelled = false;
-    async function refresh() {
-      try {
-        const res = await fetch("/api/targets/state");
-        if (!res.ok) return;
-        const json = (await res.json()) as { data: TargetStateDto | null };
-        if (cancelled || !json.data) return;
-        if (!json.data.secondaryTargetId) {
-          setSecondaryLabel(null);
-          setSecondaryId(null);
-          return;
-        }
-        if (json.data.secondaryTargetId === secondaryId) return;
-        // Resolve the new secondary label.
-        const targetRes = await fetch(
-          `/api/targets?id=${json.data.secondaryTargetId}`
-        );
-        if (!targetRes.ok) return;
-        const targetJson = (await targetRes.json()) as { data: TargetDto | null };
-        if (cancelled || !targetJson.data) return;
-        setSecondaryLabel(targetJson.data.label);
-        setSecondaryId(targetJson.data.id);
-      } catch {
-        // Silent — breadcrumbs tolerate transient fetch failures.
-      }
-    }
-    void refresh();
-    return () => {
-      cancelled = true;
-    };
-  }, [secondaryId]);
+    const refresh = () => router.refresh();
+    window.addEventListener("research-target-changed", refresh);
+    return () => window.removeEventListener("research-target-changed", refresh);
+  }, [router]);
 
-  // Load history when the user hovers — lazy fetch to avoid a per-page-load
-  // request when the hover card would never be shown.
-  useEffect(() => {
-    if (!interactive || !hovered) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch("/api/targets/state/history?limit=5");
-        if (!res.ok) return;
-        const json = (await res.json()) as { data: HistoryEntryDto[] };
-        if (cancelled) return;
-        setHistory(json.data ?? []);
-      } catch {
-        /* silent */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [hovered, interactive]);
-
-  const handleClearSecondary = useCallback(async () => {
-    try {
-      await fetch("/api/targets/state", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secondaryTargetId: null }),
-      });
-      setSecondaryLabel(null);
-      setSecondaryId(null);
-    } catch {
-      // Silent — state hasn't changed, user can retry.
-    }
-  }, []);
-
-  const handleSwapToPrior = useCallback(async () => {
-    // The current secondary is at history[0]; swap to history[1] if present.
-    const prior = history[1];
-    if (!prior) return;
-    try {
-      await fetch("/api/targets/state", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secondaryTargetId: prior.targetId }),
-      });
-      // Best-effort resolve for optimistic UI update.
-      try {
-        const targetRes = await fetch(`/api/targets?id=${prior.targetId}`);
-        if (targetRes.ok) {
-          const targetJson = (await targetRes.json()) as { data: TargetDto | null };
-          if (targetJson.data) {
-            setSecondaryLabel(targetJson.data.label);
-            setSecondaryId(targetJson.data.id);
-          }
-        }
-      } catch {
-        /* silent */
-      }
-    } catch {
-      /* silent */
-    }
-  }, [history]);
-
-  const current = history[0];
-  const prior = history[1];
-
+  const secondaryId = snapshot?.secondaryTargetId ?? (!ready ? initialSecondaryTargetId : null);
+  const secondaryLabel = snapshot?.focusLabel ?? (!ready ? initialSecondaryLabel : null);
+  const displayLabel = secondaryLabel ?? (secondaryId ? `Target ${secondaryId.slice(0, 8)}` : null);
+  const prior = snapshot?.history[0];
+  const act = async (action: () => Promise<unknown>) => {
+    try { setActionError(null); await action(); }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : "Context update failed"); }
+  };
   return (
-    <nav
-      aria-label="Research target breadcrumbs"
-      className="flex items-center gap-2 border-b border-border/40 bg-muted/20 px-4 py-1.5 text-xs text-muted-foreground"
-    >
-      <span className="font-medium text-foreground">{primaryLabel}</span>
-      {secondaryLabel ? (
-        <>
-          <span aria-hidden="true">&rsaquo;</span>
-          <span
-            className="relative flex items-center gap-1 font-medium text-foreground"
-            onMouseEnter={() => interactive && setHovered(true)}
-            onMouseLeave={() => setHovered(false)}
-          >
-            {interactive && prior ? (
-              <button
-                type="button"
-                onClick={handleSwapToPrior}
-                className="rounded p-0.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                aria-label="Swap back to prior secondary target"
-                title="Back to prior target"
-              >
-                <ArrowLeft className="size-3" />
-              </button>
-            ) : null}
-            {secondaryLabel}
-            <button
-              type="button"
-              onClick={handleClearSecondary}
-              className="rounded p-0.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-              aria-label={`Clear secondary target ${secondaryLabel}`}
-            >
-              <X className="size-3" />
-            </button>
-            {interactive && hovered && current ? (
-              <span
-                role="tooltip"
-                className="absolute left-0 top-full z-20 mt-1 min-w-[12rem] rounded border border-border/60 bg-background p-2 text-[11px] shadow-md"
-              >
-                <span className="block font-medium text-foreground">
-                  {secondaryLabel}
-                </span>
-                <span className="block text-muted-foreground">
-                  Set {formatBreadcrumbTime(current.openedAt)}
-                </span>
-                {current.lensId ? (
-                  <span className="block text-muted-foreground">
-                    Lens: <code className="font-mono">{current.lensId.slice(0, 8)}</code>
-                  </span>
-                ) : (
-                  <span className="block text-muted-foreground">
-                    Lens: default
-                  </span>
-                )}
-                {prior ? (
-                  <span className="mt-1 block border-t border-border/40 pt-1 text-muted-foreground">
-                    Prior: <code className="font-mono">{prior.targetId.slice(0, 8)}</code>
-                  </span>
-                ) : null}
-              </span>
-            ) : null}
-          </span>
-        </>
-      ) : null}
+    <nav aria-label="Research target breadcrumbs"
+      className="flex items-center gap-2 border-b border-border/40 bg-muted/20 px-4 py-1.5 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">
+        {ready ? snapshot?.primaryLabel ?? "Self" : initialPrimaryLabel}
+      </span>
+      {interactive && snapshot?.canGoBack && <button type="button"
+        onClick={() => void act(() => contextController.back())}
+        aria-label="Back to prior target" title="Back to prior target"
+        className="rounded p-0.5 hover:bg-muted"><ArrowLeft className="size-3" /></button>}
+      {displayLabel && <>
+        <span aria-hidden="true">&rsaquo;</span>
+        <span className="relative flex items-center gap-1 font-medium text-foreground"
+          onMouseEnter={() => interactive && setHovered(true)} onMouseLeave={() => setHovered(false)}>
+          {displayLabel}
+          <button type="button" onClick={() => void act(() => contextController.focus(null))}
+            aria-label={`Clear secondary target ${displayLabel}`}
+            className="rounded p-0.5 hover:bg-muted"><X className="size-3" /></button>
+          {interactive && hovered && prior && <span role="tooltip"
+            className="absolute left-0 top-full z-20 mt-1 min-w-[12rem] rounded border border-border/60 bg-background p-2 text-[11px] shadow-md">
+            <span className="block">Prior: {prior.targetLabel ?? prior.targetId.slice(0, 8)}</span>
+            <span className="block">Set {formatBreadcrumbTime(prior.openedAt)}</span>
+            {prior.lensId && <span className="block">Lens: {prior.lensLabel ?? "Unavailable"}</span>}
+          </span>}
+        </span>
+      </>}
+      {(stale || actionError || error || snapshot?.warning) && <span role="status" className="text-amber-700">
+        {actionError ?? error ?? snapshot?.warning ?? "Context may be stale"}
+      </span>}
       <span className="ml-auto rounded border border-border/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
         Press <kbd className="font-mono">T</kbd> to switch
       </span>

@@ -131,9 +131,12 @@ export async function recordParseResult(
 
 /**
  * Yield-report read path: aggregate rows for the admin /admin/parsers view.
- * Reads from the daily aggregate first (the retention cron lands in Phase 2;
- * until then the aggregate is empty and this falls back to the raw table for
- * a best-effort snapshot).
+ * Reads from the daily aggregate first (populated by the nightly roll-up at
+ * `/api/sources/cron/parser-rollup`, see `rollup.ts`) and only falls back to
+ * scanning the raw table when the aggregate has no rows for the window —
+ * e.g. telemetry just turned on and the roll-up hasn't run yet, or the
+ * roll-up cron missed a day. This keeps the common case cheap, which is the
+ * whole point of the two-table design in ADR-031.
  *
  * Returns `null` when the telemetry flag is off — the admin surface is
  * expected to render an "enable RESEARCH_PARSER_TELEMETRY" banner in that

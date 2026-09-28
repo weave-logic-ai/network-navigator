@@ -85,23 +85,36 @@ export async function getEdgesForContact(contactId: string): Promise<GraphEdge[]
   return result.rows.map(mapEdge);
 }
 
-export async function getAllEdges(): Promise<GraphEdge[]> {
+export async function getAllEdges(options: { realEdgesOnly?: boolean; publishedGraphOnly?: boolean } = {}): Promise<GraphEdge[]> {
+  if (options.publishedGraphOnly) {
+    const snapshot = await query<{ published_edges: Array<{
+      id: string; source_contact_id: string; target_contact_id: string | null;
+      target_company_id: string | null; edge_type: string; weight: number;
+      properties: Record<string, unknown>;
+    }> }>("SELECT published_edges FROM graph_compute_state WHERE id = TRUE AND active_graph_name IS NOT NULL");
+    return (snapshot.rows[0]?.published_edges ?? []).map(mapEdge);
+  }
   const result = await query<{
     id: string; source_contact_id: string; target_contact_id: string | null;
     target_company_id: string | null; edge_type: string; weight: number;
     properties: Record<string, unknown>;
   }>(
-    'SELECT * FROM edges WHERE target_contact_id IS NOT NULL'
+    `SELECT * FROM edges WHERE target_contact_id IS NOT NULL${
+      options.realEdgesOnly ? " AND edge_type NOT IN ('mutual-proximity', 'same-cluster')" : ''
+    }`
   );
   return result.rows.map(mapEdge);
 }
 
-export async function getDegreeCounts(): Promise<Map<string, number>> {
+export async function getDegreeCounts(options: { realEdgesOnly?: boolean } = {}): Promise<Map<string, number>> {
+  const realEdgeFilter = options.realEdgesOnly
+    ? " AND edge_type NOT IN ('mutual-proximity', 'same-cluster')"
+    : '';
   const result = await query<{ contact_id: string; deg: string }>(
     `SELECT contact_id, COUNT(*)::text AS deg FROM (
-       SELECT source_contact_id AS contact_id FROM edges WHERE target_contact_id IS NOT NULL
+       SELECT source_contact_id AS contact_id FROM edges WHERE target_contact_id IS NOT NULL${realEdgeFilter}
        UNION ALL
-       SELECT target_contact_id AS contact_id FROM edges WHERE target_contact_id IS NOT NULL
+       SELECT target_contact_id AS contact_id FROM edges WHERE target_contact_id IS NOT NULL${realEdgeFilter}
      ) sub
      GROUP BY contact_id`
   );

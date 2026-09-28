@@ -12,6 +12,13 @@ const config: Config = {
     // directly into app/node_modules. Deliberately NOT moduleDirectories: that
     // perturbs nested resolution and breaks htmlparser2's own 'entities' copy.
     '^zod$': '<rootDir>/node_modules/zod',
+    '^react$': '<rootDir>/node_modules/react',
+    '^react-dom/server$': '<rootDir>/node_modules/react-dom/server',
+    '^react/jsx-runtime$': '<rootDir>/node_modules/react/jsx-runtime',
+    '^next/navigation$': '<rootDir>/node_modules/next/navigation',
+    '^next/server$': '<rootDir>/node_modules/next/server',
+    '^lucide-react$': '<rootDir>/node_modules/lucide-react',
+    '^pg$': '<rootDir>/node_modules/pg',
     // @noble/hashes ships ESM-only so Jest (CommonJS) cannot load it.
     // Redirect to a local shim that wraps Node's built-in crypto for the
     // test environment only. Hash tests are algorithm-agnostic.
@@ -19,7 +26,7 @@ const config: Config = {
   },
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
-      tsconfig: 'tsconfig.json',
+      tsconfig: { jsx: 'react-jsx' },
     }],
   },
   testMatch: ['**/*.test.ts'],

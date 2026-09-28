@@ -79,7 +79,7 @@ Alongside the five ECC rollups, the card also surfaces:
 
 ## Implementation notes
 
-- The rollups are computed on every page load by [`/api/profile/network-health`](/docs/api-reference/profile) via a single `Promise.all` of eleven SQL aggregations. On a 5,000-contact database, total response time is consistently under 150ms.
+- The rollups are computed on every page load by [`/api/profile/network-health`](/docs/api-reference/profile#get-network-health) via a single `Promise.all` of thirteen SQL aggregations. On a 5,000-contact database, total response time is consistently under 150ms.
 - No caching. If you want a refresh, reload the profile page.
 - All queries respect `NOT is_archived` — archived contacts don't skew the numbers.
 - The per-contact ECC gauges themselves (`DCTE`, `DTSE`, `RSTE`, `EMOT`, `SCEN`) live in `app/src/lib/ecc/gauges.ts` and are computed on-demand when you open a single contact's profile page.

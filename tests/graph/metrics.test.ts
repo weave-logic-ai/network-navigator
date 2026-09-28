@@ -1,4 +1,41 @@
-// Tests for graph metrics computation
+// Legacy metrics callers must use the G6 atomic publication path.
+jest.mock('@/lib/db/queries/graph', () => ({
+  getAllEdges: jest.fn(),
+  listGraphMetrics: jest.fn(),
+}));
+jest.mock('@/lib/graph/compute-snapshot', () => ({ computeGraphSnapshot: jest.fn() }));
+
+import * as graphQueries from '@/lib/db/queries/graph';
+import { computeGraphSnapshot } from '@/lib/graph/compute-snapshot';
+import { computeAllMetrics } from '@/lib/graph/metrics';
+
+const mockCompute = computeGraphSnapshot as jest.MockedFunction<typeof computeGraphSnapshot>;
+const mockList = graphQueries.listGraphMetrics as jest.MockedFunction<typeof graphQueries.listGraphMetrics>;
+
+beforeEach(() => jest.clearAllMocks());
+
+describe('computeAllMetrics legacy API', () => {
+  it('publishes through G6 before returning metrics', async () => {
+    const metric = {
+      contactId: 'c1', pagerank: 0.5, betweennessCentrality: 0.1,
+      closenessCentrality: null, degreeCentrality: 2,
+      eigenvectorCentrality: null, clusteringCoefficient: null,
+      computedAt: new Date().toISOString(),
+    };
+    mockCompute.mockResolvedValueOnce({ metricsComputed: 1, communitiesDetected: 0, communityMethod: 'linked-company-fallback', metricsMethod: 'node-atomic' });
+    mockList.mockResolvedValueOnce({ data: [metric], total: 1 });
+    await expect(computeAllMetrics()).resolves.toEqual([metric]);
+    expect(mockCompute).toHaveBeenCalledTimes(1);
+    expect(mockList).toHaveBeenCalledWith(1, 10000);
+  });
+
+  it('propagates publication failure without writing fallback metrics', async () => {
+    mockCompute.mockRejectedValueOnce(new Error('publication failed'));
+    await expect(computeAllMetrics()).rejects.toThrow('publication failed');
+    expect(mockList).not.toHaveBeenCalled();
+    expect(graphQueries.getAllEdges).not.toHaveBeenCalled();
+  });
+});
 
 describe('Graph Metrics', () => {
   describe('PageRank computation', () => {

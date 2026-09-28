@@ -21,6 +21,31 @@ docker compose ps
 curl http://localhost:3750/api/health
 ```
 
+## Local operator unlock
+
+This Compose setup is a local-only demo: the app on port 3750 and database on
+port 5432 bind to `127.0.0.1`. Before starting, set `POSTGRES_PASSWORD` and
+`LOCAL_OPERATOR_SECRET` in your ignored local `.env`. Generate a fresh operator
+secret with `openssl rand -hex 32` (64 hex characters), keep it out of source
+and `NEXT_PUBLIC_*` variables, and do not commit `.env`.
+
+Run `docker compose up -d`, then open
+`http://localhost:3750/operator/unlock` and enter that operator secret. The
+server issues an eight-hour HttpOnly, SameSite=Strict session cookie. Without
+`LOCAL_OPERATOR_SECRET`, Compose refuses to start; a directly run app instead
+leaves protected pages locked and returns 503 from the unlock API. The health
+probe remains available.
+
+For the Chrome extension, also set `EXTENSION_ALLOWED_ORIGINS` to the exact
+installed origin, such as `chrome-extension://<32-character-extension-id>`.
+Separate multiple origins with commas. An empty value denies extension-origin
+requests. Extension tokens are separate from the operator session; enter the
+full extension token during registration for visibility endpoints.
+After unlocking, mint that token on the app's Extension page and copy it into
+the extension popup. The full value is shown once; listed prefixes cannot
+reconnect. Tokens expire one year after creation, so mint a replacement before
+then and revoke the old token from the same page.
+
 ## Docker Compose Configuration
 
 The `docker-compose.yml` defines two services:
@@ -33,13 +58,13 @@ services:
     image: ruvnet/ruvector-postgres:latest
     container_name: ctox-db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ctox}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-ctox}
     volumes:
-      - ./db/init:/docker-entrypoint-initdb.d
+      - ./data/db/init:/docker-entrypoint-initdb.d
       - ./data/drives/db:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ctox} -d ${POSTGRES_DB:-ctox}"]
@@ -52,7 +77,7 @@ services:
 
 Key points:
 - Uses `ruvector-postgres` which includes the RUVECTOR extension for vector similarity search
-- Schema scripts in `db/init/` run automatically on first start (alphabetical order)
+- Schema scripts in `data/db/init/` run automatically on first start (alphabetical order)
 - Data persists in `./data/drives/db/` on the host
 - Health check uses `pg_isready` with 30-second start period for initial schema setup
 - `POSTGRES_PASSWORD` is required; compose will fail without it
@@ -67,7 +92,7 @@ Key points:
       target: runner
     container_name: ctox-app
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3750:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ctox}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ctox}
       NODE_ENV: production
@@ -76,6 +101,8 @@ Key points:
       LUSHA_API_KEY: ${LUSHA_API_KEY:-}
       THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOCAL_OPERATOR_SECRET: ${LOCAL_OPERATOR_SECRET:?LOCAL_OPERATOR_SECRET is required}
+      EXTENSION_ALLOWED_ORIGINS: ${EXTENSION_ALLOWED_ORIGINS}
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +130,7 @@ Key points:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `POSTGRES_PASSWORD` | PostgreSQL password | `your-strong-password-here` |
+| `LOCAL_OPERATOR_SECRET` | Local operator unlock secret, at least 32 characters | Generate locally with `openssl rand -hex 32` |
 
 ### Optional (with defaults)
 
@@ -111,6 +139,7 @@ Key points:
 | `POSTGRES_USER` | `ctox` | PostgreSQL username |
 | `POSTGRES_DB` | `ctox` | PostgreSQL database name |
 | `NODE_ENV` | `production` | Node.js environment |
+| `EXTENSION_ALLOWED_ORIGINS` | empty | Comma-separated, exact Chrome extension origins; empty denies extension requests |
 
 ### Optional (API keys)
 
@@ -131,6 +160,13 @@ Key points:
 POSTGRES_PASSWORD=change-me-to-something-strong
 POSTGRES_USER=ctox
 POSTGRES_DB=ctox
+
+# Required: generate locally with `openssl rand -hex 32`, then fill this in.
+# Compose refuses to start while it is empty.
+LOCAL_OPERATOR_SECRET=
+
+# Set to the exact installed Chrome extension origin when using the extension.
+EXTENSION_ALLOWED_ORIGINS=
 
 # Enrichment providers (set the ones you have)
 PDL_API_KEY=
@@ -343,12 +379,12 @@ docker compose restart app
 
 ## Upgrading Schema
 
-New SQL migration scripts are added to `db/init/` with incrementing numeric prefixes. These only run on first database initialization.
+New SQL migration scripts are added to `data/db/init/` with incrementing numeric prefixes. These only run on first database initialization. A copied or existing volume can be missing older migrations even when newer tables exist; check required tables and columns rather than assuming the highest filename was applied.
 
 For existing deployments, apply migrations manually:
 
 ```bash
-docker exec -i ctox-db psql -U ctox -d ctox < db/init/019-referral-scoring-schema.sql
+docker compose exec -T db psql -U "${POSTGRES_USER:-ctox}" -d "${POSTGRES_DB:-ctox}" -v ON_ERROR_STOP=1 -1 < data/db/init/019-referral-scoring-schema.sql
 ```
 
 Or connect directly:
@@ -356,3 +392,101 @@ Or connect directly:
 ```bash
 docker exec -it ctox-db psql -U ctox -d ctox
 ```
+
+### Existing-volume context CAS rollout (056 → 057)
+
+Use an integrated checkout that contains both migrations and the S1 local-operator boundary. Confirm the existing volume has all earlier schema changes through 055, including `research_target_state.last_used_lens_id` and the lens foreign keys; init scripts do not replay on a populated volume. Migration 056 repairs and indexes automatic identity tasks and must run before 057. Check its SHA-256 against the proof below before deployment, and rerun the disposable proof if it differs. Build and test the integrated app before this maintenance window. Run these commands from the repository root on the intended Compose project, never on the separate demo project by accident:
+
+```bash
+docker compose build app
+docker compose stop app
+backup="data/drives/pre-context-cas-$(date +%Y%m%d-%H%M%S).dump"
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup"
+docker compose exec -T db pg_restore --list < "$backup" > /dev/null
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS state_rows_before FROM research_target_state;
+SELECT count(*) AS lens_fks_before FROM pg_constraint
+WHERE conrelid = 'research_target_state'::regclass
+  AND confrelid = 'research_lenses'::regclass AND contype = 'f';
+SQL
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < data/db/init/056-pending-identity-repair-unique.sql
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < data/db/init/057-target-state-revision.sql
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS state_rows_after, min(revision), max(revision) FROM research_target_state;
+SELECT count(*) AS revision_triggers FROM pg_trigger
+WHERE tgrelid = 'research_target_state'::regclass
+  AND tgname = 'trg_target_state_revision_context' AND NOT tgisinternal;
+SELECT indexname FROM pg_indexes WHERE indexname IN
+  ('uq_tasks_pending_identity_repair_contact', 'uq_tasks_pending_auto_recommendation');
+SQL
+docker compose up -d --no-deps app
+```
+
+Before starting the CAS app, compare state-row counts, require one lens FK before migration, one revision trigger afterward, and both 056 indexes. The `-1` on 057 rolls its DDL back if any statement fails; 056 contains its own transaction. Keep the old app stopped until verification passes. A pre-CAS app can be restarted against the upgraded schema if application rollback is needed. Do not reverse the 057 foreign-key changes piecemeal.
+
+For a **data/schema rollback**, keep writers stopped and first prove the backup restores into a separate, empty database with the same PostgreSQL major version. The following non-destructive probe leaves the live database untouched; use a unique probe name and keep the backup until cutover or recovery is complete:
+
+```bash
+docker compose exec -T db sh -c 'createdb -U "$POSTGRES_USER" context_cas_restore_probe'
+docker compose exec -T db sh -c 'pg_restore --exit-on-error -U "$POSTGRES_USER" -d context_cas_restore_probe' < "$backup"
+docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d context_cas_restore_probe -c "SELECT count(*) FROM research_target_state"'
+```
+
+Verify restored state and lens rows against the pre-migration count, then use the verified restored database or volume for recovery. A full restore rewinds every table to backup time, including the task changes made by 056; do not overwrite a live volume while other writers are active. The disposable full-schema proof fixture and assertions live in `tests/targets/context-cas-full-upgrade.sql`.
+
+**Disposable proof, 2026-09-27, integrated at `777ef5c`:** PostgreSQL 17 received every repository init script from 001 through 054, then 055 via `psql -f` (its `\ir` includes need a file path), then the merged 056. The 056 SQL tested had SHA-256 `3ed69a3b3f374730b54fce82e08b82c3268fd7f44ef4ee9afa1e75db08106b1c`; rerun if the deployment checkout differs. The fixture was seeded with `psql -v CAS_SEED_ONLY=1 -f tests/targets/context-cas-full-upgrade.sql`, backed up using server-version `pg_dump -Fc`, then upgraded and asserted with `psql -1 -v CAS_VERIFY_ONLY=1 -f tests/targets/context-cas-full-upgrade.sql`. The script applies 057 twice and checks existing context, lens FKs, lens/contact deletion cleanup, and revision advances. `pg_restore --exit-on-error` restored the pre-057 backup into an empty database; its original state, contact and lens rows reappeared, and 057 reapplied cleanly there. Observed output:
+
+```text
+full existing-schema CAS fixture seeded before 057
+full existing-schema CAS upgrade passed
+pre057=true, state=1, focus=a0000000-0000-4000-8000-000000000006, lens=a0000000-0000-4000-8000-000000000007
+contact=1
+lens=1
+lens_fk=1
+reupgraded_revision=0, focus=a0000000-0000-4000-8000-000000000006, lens=a0000000-0000-4000-8000-000000000007
+```
+
+The opt-in browser scenarios use a separate database named `*_test` or `*_validation` and an isolated loopback app. Set the app's `LOCAL_OPERATOR_SECRET` to a synthetic test secret of at least 32 characters, and pass the same value as `E2E_OPERATOR_SECRET` with `E2E_BASE_URL` and `E2E_DATABASE_URL` to Playwright. The scenario helper unlocks over HTTP and shares the issued cookie with the browser. For the US4 snippet scenario, enable `RESEARCH_SNIPPETS` and set matching synthetic `EXTENSION_ALLOWED_ORIGINS` (app) and `E2E_EXTENSION_ORIGIN` (Playwright); its token request uses the extension principal rather than the operator session.
+### Graph grouping upgrade
+
+Migrations 059 and 060 run automatically only when PostgreSQL initializes a **new** volume. On an existing volume, stop graph Compute requests and back up that database from the repository root:
+
+```bash
+mkdir -p data/drives/backups
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "data/drives/backups/graph-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
+```
+
+Confirm that every applicable earlier migration has been applied to this specific database, including 057 and 058. A copied volume can have gaps, so check its schema rather than relying on the latest filename. In particular, `cluster_memberships` must exist before 059. Apply 059 then 060 together from the repository root, using the Compose project for the intended deployment (do not substitute a different project's database):
+
+```bash
+cat data/db/init/059-cluster-membership-count-index.sql data/db/init/060-graph-compute-publication.sql | \
+  docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -1'
+```
+
+The `-1` flag wraps both scripts in one transaction and `ON_ERROR_STOP` exits on failure. Do not enable Compute until this verification returns one index, one state table, and exactly one state row. Its graph pointer remains empty until the first successful Compute; the legacy `contacts` graph may contain extra relationship types and is not a publication:
+
+```bash
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -c "SELECT to_regclass('\''public.idx_cluster_memberships_cluster_id'\'') AS membership_index, to_regclass('\''public.graph_compute_state'\'') AS publication_table, (SELECT count(*) FROM graph_compute_state WHERE id = TRUE) AS pointer_rows"'
+```
+
+If either object is absent, the graph data and Compute APIs return HTTP 503 with this upgrade path. If the pointer row is missing, repair the interrupted 060 migration before retrying. Once verified, restart the app. A failed migration rolls back both scripts; fix the reported prerequisite and rerun the same idempotent scripts. Keep the backup until graph data loads and Compute succeeds.
+
+### Isolated local demo
+
+The repo's demo override keeps database and app-data volumes separate from the default stack and binds the app to localhost on port 3751:
+
+```bash
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo build app
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo up -d
+curl http://127.0.0.1:3751/api/health
+```
+
+The two stacks share the built image name, but their containers and volumes are distinct. To stop the demo while retaining its data, use the same Compose arguments with `stop`. Avoid `down -v` unless you intend to discard the demo volumes.
+
+For an **existing** demo volume, init scripts do not rerun. Review the pending SQL against that volume before applying it. For example, after checking `research_target_icps` and backing up the database, apply migration 053 transactionally from the repo root:
+
+```bash
+docker compose -f docker-compose.yml -f data/config/docker-compose.demo.yml -p network-navigator-demo exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -1' < data/db/init/053-lens-icp-canonical.sql
+```
+
+The local demo copy used for research-tool validation also lacked parts of migrations 018 and 019. Those were reconciled additively before scoring and dashboard checks; this is a reason to audit any copied volume before treating it as release evidence.

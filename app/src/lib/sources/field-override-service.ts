@@ -4,8 +4,17 @@
 // automatic source-reconciliation. Invoked from
 // `/api/targets/[id]/field-overrides` and — later — from the banner's
 // [Change] modal in the UI.
+//
+// ADR-032 audit trail: every set and clear also writes a `causal_nodes`
+// row (`operation='user_override'` / `'user_override_cleared'`, keyed on
+// the target's entity so `getCausalGraph(tenantId, entityKind, entityId)`
+// surfaces the full override history). This mirrors the ADR's "clearing
+// an override is itself audited" claim — before this, neither set nor
+// clear wrote any causal node at all, so the claim was aspirational, not
+// implemented.
 
 import { query } from '../db/client';
+import { createCausalNode } from '../ecc/causal-graph/service';
 
 export interface FieldOverrideRow {
   id: string;
@@ -86,7 +95,23 @@ export async function setFieldOverride(
       input.note ?? null,
     ]
   );
-  return rowToOverride(res.rows[0]);
+  const row = rowToOverride(res.rows[0]);
+
+  await createCausalNode(
+    input.tenantId,
+    input.entityKind,
+    input.entityId,
+    'user_override',
+    { fieldName: input.fieldName },
+    {
+      overrideId: row.id,
+      value: row.value,
+      note: row.note,
+      setByUserId: row.setByUserId,
+    }
+  );
+
+  return row;
 }
 
 /**
@@ -112,7 +137,19 @@ export async function clearFieldOverride(
       RETURNING *`,
     [tenantId, entityKind, entityId, fieldName, clearedByUserId]
   );
-  return res.rows[0] ? rowToOverride(res.rows[0]) : null;
+  if (!res.rows[0]) return null;
+  const row = rowToOverride(res.rows[0]);
+
+  await createCausalNode(
+    tenantId,
+    entityKind,
+    entityId,
+    'user_override_cleared',
+    { fieldName, overrideId: row.id, clearedValue: row.value },
+    { clearedByUserId, originallySetByUserId: row.setByUserId }
+  );
+
+  return row;
 }
 
 /**

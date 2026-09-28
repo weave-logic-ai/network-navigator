@@ -1,232 +1,168 @@
 ---
 title: Analysis Modes
-description: All 12 analysis modes with descriptions, example commands, and output formats.
+description: All eight analysis modes with descriptions, example commands, and the API endpoint each one calls.
 ---
 
 # Analysis Modes
 
-The agent's analyzer supports 12 analysis modes, each providing a different lens into your network. All modes operate on the scored knowledge graph (`graph.json`).
+`analyze.mjs` supports eight read-only analysis modes, each mapping to a single `GET` request against the app's API. All of them operate on live data in PostgreSQL -- there is no local `graph.json` or cached snapshot.
+
+<Callout type="warn">
+The retired v1 analyzer supported twelve modes, including `behavioral`, `visibility`, `employers`, and `similar`. Those four have no v2 equivalent in `analyze.mjs` -- see the note at the bottom of this page.
+</Callout>
 
 ## 1. summary
 
 High-level overview of your entire network.
 
-**Returns:** Total contacts, tier counts, enrichment ratio, persona distribution, cluster count, company count, edge count, top 3 gold prospects, top 3 hubs, referral tier counts, last-scored timestamp.
+**Calls:** `GET /api/dashboard`
+
+**Returns:** Whatever the dashboard endpoint exposes at the top level -- contact counts, tier breakdown, enrichment status, budget usage, and recent activity. The script prints every key in the response, so its output tracks the dashboard endpoint's shape directly.
 
 ```
 /network-intel give me an overview
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode summary
+node scripts/analyze.mjs --mode summary
 ```
 
 ## 2. hubs
 
 Identifies your most connected and influential contacts.
 
-**Returns:** Contacts ranked by `networkHub` score with gold score, tier, role/company, mutual count, cluster membership, and a "why hub" explanation.
+**Calls:** `GET /api/graph/data`
+
+**Returns:** Graph nodes with a score, sorted descending, printed as name/company/score/connections.
 
 ```
 /network-intel who are my best hubs?
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode hubs --top 15
-node scripts/analyzer.mjs --mode hubs --top 10 --cluster ecommerce
+node scripts/analyze.mjs --mode hubs --top 15
 ```
 
 ## 3. prospects
 
-Identifies best potential buyers based on ICP fit.
+Identifies best potential buyers based on composite score.
 
-**Returns:** Contacts ranked by `icpFit` score with gold score, tier, ICP profile matches, and signal matches.
+**Calls:** `GET /api/contacts?sort=compositeScore&order=desc&limit=<top>`
 
-```
-/network-intel find me prospects
-/network-intel show cybersecurity prospects
-```
-
-```bash
-node scripts/analyzer.mjs --mode prospects --top 10
-node scripts/analyzer.mjs --mode prospects --icp security-budget-holder --top 20
-node scripts/analyzer.mjs --mode prospects --tier gold
-```
-
-## 4. recommend
-
-Strategic action recommendations across multiple dimensions.
-
-**Returns five sections:**
-
-1. **Immediate Pursuit** -- Top gold-tier buyers to contact now
-2. **Hub Activation** -- Top hubs to ask for introductions, with reachable gold buyer counts
-3. **Cluster Opportunities** -- Gap analysis per cluster showing where you need more gold contacts
-4. **Quick Wins** -- Silver-tier contacts close to gold threshold
-5. **Referral Partnerships** -- Top referral partners with suggested actions per persona
-6. **Enrich Next** -- Prioritized unenriched contacts by mutual count
+**Returns:** Contacts ranked by composite score, printed as name/company/title/score/tier.
 
 ```
-/network-intel what should I focus on next?
+/network-intel find my top prospects
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode recommend
+node scripts/analyze.mjs --mode prospects --top 20
+```
+
+## 4. referrals
+
+Identifies your best referral partners -- people who can send you business.
+
+**Calls:** `GET /api/contacts?sort=referralLikelihood&order=desc&limit=<top>`, falling back to fetching the top 100 by composite score and filtering/sorting client-side by `referralLikelihood`/`referralScore` if the primary sort isn't supported.
+
+**Returns:** Contacts with referral score and persona, printed as name/company/title/referral-score/persona.
+
+```
+/network-intel who are my best referral partners?
+```
+
+```bash
+node scripts/analyze.mjs --mode referrals --top 20
 ```
 
 ## 5. clusters
 
-Maps your network by industry/niche clusters.
+Maps your network by graph community.
 
-**Returns:** Each cluster with contact count, tier distribution, top hub, top prospect, and top companies.
+**Calls:** `GET /api/graph/communities`
+
+**Returns:** Each cluster with a name/label and up to 5 sample members (plus a count of any remaining).
 
 ```
 /network-intel show me clusters
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode clusters
+node scripts/analyze.mjs --mode clusters
 ```
 
-## 6. company
+If this returns nothing, run `pipeline.mjs --compute-graph` first -- clusters are computed, not stored automatically as contacts are added.
+
+## 6. search
+
+Combined keyword and vector search across contacts.
+
+**Calls:** `GET /api/contacts/hybrid-search?q=<query>`
+
+**Returns:** Up to 20 matching contacts, printed as name/company/title/score/tier.
+
+```
+/network-intel search for "AI startup"
+```
+
+```bash
+node scripts/analyze.mjs --mode search --query "cloud infrastructure"
+```
+
+`--query` is required for this mode.
+
+## 7. recommend
+
+Surfaces the single highest-value next action.
+
+**Calls:** `GET /api/actions/next`
+
+**Returns:** Whatever the endpoint identifies as the next-best action -- a pending task, an outreach step, or an enrichment/import suggestion, along with the associated contact if any.
+
+```
+/network-intel what should I focus on next?
+```
+
+```bash
+node scripts/analyze.mjs --mode recommend
+```
+
+## 8. company
 
 Deep-dive into a specific company's contacts in your network.
 
-**Returns:** All contacts at the company ranked by gold score with tier, ICP fit, and persona information.
+**Calls:** `GET /api/contacts?company=<name>`
+
+**Returns:** All matching contacts, printed as name/company/title/score/tier, with a total count.
 
 ```
 /network-intel show me contacts at Acme Corp
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode company --name "Acme Corp"
+node scripts/analyze.mjs --mode company --name "Acme Corp"
 ```
 
-## 7. behavioral
+`--name` is required for this mode.
 
-Ranks contacts by behavioral score -- how active, connected, and engaged they are.
-
-**Returns:** Contacts ranked by behavioral score with persona label, connection count, trait count, about/headline/super-connector signals, amplification score, and recency.
-
-```
-/network-intel who are the most active networkers?
-/network-intel show me super-connectors
-```
-
-```bash
-node scripts/analyzer.mjs --mode behavioral --top 20
-node scripts/analyzer.mjs --mode behavioral --persona super-connector
-node scripts/analyzer.mjs --mode behavioral --persona content-creator --top 10
-```
-
-## 8. visibility
-
-Content strategy recommendations based on network position and behavioral analysis.
-
-**Returns six sections:**
-
-1. **Engage Their Content** -- Super-connectors whose posts you should comment on
-2. **Post Topics Targeting Clusters** -- Cluster-by-cluster amplifier counts and suggested topics
-3. **Company Beachheads** -- Companies with 3+ contacts (internal amplification potential)
-4. **Bridge Connectors** -- Contacts spanning 3+ clusters who amplify across communities
-5. **Rising Stars** -- Recently connected contacts with high behavioral potential
-6. **Silent Influencers** -- 500+ connections, low engagement (dormant amplifiers)
-
-```
-/network-intel content visibility strategy
-```
-
-```bash
-node scripts/analyzer.mjs --mode visibility
-```
-
-## 9. employers
-
-Ranks companies by their "Employer Network Value" (ENV) -- a composite of contact count, behavioral scores, mutual connections, gold percentage, and cluster breadth.
-
-**Returns:** Companies ranked by ENV with contact count, gold count/percentage, average behavioral score, average mutuals, cluster coverage, and top contact.
-
-```
-/network-intel which companies have the best network value?
-```
-
-```bash
-node scripts/analyzer.mjs --mode employers --top 15
-```
-
-## 10. referrals
-
-Identifies your best referral partners -- people who can send you business.
-
-**Returns:** Contacts ranked by referral likelihood with referral tier, persona, gold score, all 6 component scores, and a "why referral" explanation.
-
-```
-/network-intel who are my best referral partners?
-/network-intel show me white-label partners
-/network-intel find warm introducers
-```
-
-```bash
-node scripts/analyzer.mjs --mode referrals --top 20
-node scripts/analyzer.mjs --mode referrals --persona white-label-partner
-node scripts/analyzer.mjs --mode referrals --persona warm-introducer
-node scripts/analyzer.mjs --mode referrals --tier gold-referral
-```
-
-## 11. similar
-
-Finds contacts whose profiles are most similar to a specific person using k-NN vector search. Requires ruvector and a built vector store.
-
-**Returns:** Contacts ranked by cosine similarity to the target contact's profile vector, with tier and headline.
-
-```
-/network-intel find contacts similar to https://linkedin.com/in/someone
-/network-intel who's like Jane Doe?
-```
-
-```bash
-node scripts/analyzer.mjs --mode similar --url "https://linkedin.com/in/someone" --top 20
-```
-
-**How it works:**
-1. Looks up the target contact's pre-computed vector in the store
-2. Runs k-NN search to find the closest vectors
-3. Returns contacts ranked by cosine similarity
-
-If the target hasn't been vectorized yet, it falls back to embedding their profile text on the fly.
-
-## 12. semantic
-
-Searches for contacts by natural language description. Embeds your query and finds the most relevant profiles by meaning, not exact keywords.
-
-**Returns:** Contacts ranked by relevance (cosine similarity) to the query text.
-
-```
-/network-intel who talks about AI transformation?
-/network-intel search for people in cloud infrastructure
-```
-
-```bash
-node scripts/analyzer.mjs --mode semantic --query "AI transformation leaders" --top 20
-node scripts/analyzer.mjs --mode semantic --query "cloud infrastructure scaling" --top 15
-```
-
-**How it works:**
-1. Initializes the ONNX embedder
-2. Converts your query text into a 384-dim vector
-3. Runs k-NN search against all stored contact vectors
-4. Returns contacts ranked by relevance
-
-## Analyzer Options Reference
+## Options Reference
 
 | Option | Used By | Description |
-|--------|---------|-------------|
+|--------|---------|--------------|
 | `--mode <mode>` | All | Analysis mode (required) |
-| `--top <N>` | hubs, prospects, behavioral, employers, referrals, similar, semantic | Number of results (default 10-20) |
-| `--icp <profile>` | prospects | Filter by ICP profile slug |
-| `--persona <type>` | behavioral, referrals | Filter by persona |
-| `--tier <tier>` | prospects, referrals | Filter by tier |
-| `--cluster <id>` | hubs, visibility | Filter by cluster ID |
-| `--name "<company>"` | company | Company name to search |
-| `--url <profile-url>` | similar | Target contact for similarity search |
-| `--query "text"` | semantic | Free-text search query |
+| `--top <N>` | hubs, prospects, referrals | Number of results (default 10) |
+| `--query "text"` | search | Free-text search query (required) |
+| `--name "<company>"` | company | Company name to search (required) |
+
+## Modes With No V2 Equivalent
+
+The retired v1 analyzer (`agent/network-navigator/.v1-archive/`) supported four additional modes that were not carried forward into `analyze.mjs`:
+
+| Mode | What It Did in v1 | Status in v2 |
+|------|---------------------|----------------|
+| `behavioral` | Ranked contacts by behavioral score and persona (super-connector, content-creator, etc.) | The behavioral dimension still feeds the composite score, but there is no CLI mode or endpoint that ranks/filters contacts by behavioral persona alone. |
+| `visibility` | Content-strategy recommendations (who to engage, bridge connectors, silent influencers) | No v2 equivalent -- this was computed entirely from the local `graph.json` in v1 and was not ported to the app. |
+| `employers` | Ranked companies by an "Employer Network Value" composite score | No v2 equivalent -- there is no company-ranking endpoint. |
+| `similar` | k-NN similarity search from a specific contact's stored vector | No v2 equivalent script or endpoint exists for this specific case; `search` (hybrid keyword+vector) is the closest available capability, but it takes a free-text query rather than a target contact. |
+
+If you need any of these, they would have to be rebuilt against the app's API and data model -- the v1 implementations operated on local JSON files that no longer exist.

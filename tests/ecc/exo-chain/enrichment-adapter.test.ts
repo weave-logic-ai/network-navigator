@@ -111,4 +111,81 @@ describe('ExoChain enrichment-adapter', () => {
     expect(result._chainId).toBeDefined();
     expect(result.results).toEqual([]);
   });
+
+  it('resolves tenant via getDefaultTenantId when no tenantId override is passed', async () => {
+    process.env.ECC_EXO_CHAIN = 'true';
+
+    const waterfallModule = await import('@/lib/enrichment/waterfall');
+    (waterfallModule.enrichContact as jest.Mock).mockResolvedValue([]);
+
+    const budgetModule = await import('@/lib/db/queries/enrichment');
+    (budgetModule.getActiveBudget as jest.Mock).mockResolvedValue(null);
+
+    const dbModule = await import('@/lib/db/client');
+    const mockQuery = dbModule.query as jest.MockedFunction<typeof dbModule.query>;
+    mockQuery.mockImplementation((sql: unknown) => {
+      const text = String(sql);
+      if (text.includes('FROM tenants')) {
+        return Promise.resolve({ rows: [{ id: 'real-tenant-uuid' }], command: '', rowCount: 1, oid: 0, fields: [] }) as unknown as ReturnType<typeof dbModule.query>;
+      }
+      // exo_chain_entries insert
+      return Promise.resolve({
+        rows: [{
+          id: 'e', tenant_id: 'real-tenant-uuid', chain_id: 'x', sequence: 0,
+          prev_hash: null, entry_hash: Buffer.from('cd'.repeat(16), 'hex'),
+          operation: 'budget_check', data: {}, actor: 'system', created_at: 'x',
+        }],
+        command: '', rowCount: 1, oid: 0, fields: [],
+      }) as unknown as ReturnType<typeof dbModule.query>;
+    });
+
+    const { enrichContactWithChain } = await import('@/lib/ecc/exo-chain/enrichment-adapter');
+    await enrichContactWithChain(baseContact());
+
+    // Every exo_chain_entries insert must carry the resolved UUID, never the
+    // literal 'default' string (exo_chain_entries.tenant_id is a UUID column).
+    const inserts = mockQuery.mock.calls.filter(c => String(c[0]).includes('exo_chain_entries'));
+    expect(inserts.length).toBeGreaterThan(0);
+    for (const call of inserts) {
+      const params = call[1] as unknown[];
+      expect(params[0]).toBe('real-tenant-uuid');
+    }
+  });
+
+  it('uses a caller-supplied tenantId override without querying the tenants table', async () => {
+    process.env.ECC_EXO_CHAIN = 'true';
+
+    const waterfallModule = await import('@/lib/enrichment/waterfall');
+    (waterfallModule.enrichContact as jest.Mock).mockResolvedValue([]);
+
+    const budgetModule = await import('@/lib/db/queries/enrichment');
+    (budgetModule.getActiveBudget as jest.Mock).mockResolvedValue(null);
+
+    const dbModule = await import('@/lib/db/client');
+    const mockQuery = dbModule.query as jest.MockedFunction<typeof dbModule.query>;
+    mockQuery.mockImplementation((sql: unknown) => {
+      const text = String(sql);
+      if (text.includes('FROM tenants')) {
+        throw new Error('should not resolve default tenant when override is provided');
+      }
+      return Promise.resolve({
+        rows: [{
+          id: 'e', tenant_id: 'override-tenant', chain_id: 'x', sequence: 0,
+          prev_hash: null, entry_hash: Buffer.from('ef'.repeat(16), 'hex'),
+          operation: 'budget_check', data: {}, actor: 'system', created_at: 'x',
+        }],
+        command: '', rowCount: 1, oid: 0, fields: [],
+      }) as unknown as ReturnType<typeof dbModule.query>;
+    });
+
+    const { enrichContactWithChain } = await import('@/lib/ecc/exo-chain/enrichment-adapter');
+    await enrichContactWithChain(baseContact(), {}, 'override-tenant');
+
+    const inserts = mockQuery.mock.calls.filter(c => String(c[0]).includes('exo_chain_entries'));
+    expect(inserts.length).toBeGreaterThan(0);
+    for (const call of inserts) {
+      const params = call[1] as unknown[];
+      expect(params[0]).toBe('override-tenant');
+    }
+  });
 });

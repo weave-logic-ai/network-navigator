@@ -4,6 +4,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { NextRequest } from '../../app/node_modules/next/server';
+import { createOperatorSession, OPERATOR_COOKIE } from '@/lib/auth/operator-session';
 
 jest.mock('@/lib/db/client', () => ({
   query: jest.fn(),
@@ -41,15 +43,32 @@ describe('migration 039 — parser_selector_flags', () => {
 });
 
 describe('POST /api/parser/flag-unmatched — validation', () => {
+  const priorSecret = process.env.LOCAL_OPERATOR_SECRET;
+  let cookie: string;
+
+  beforeAll(async () => {
+    process.env.LOCAL_OPERATOR_SECRET = 'synthetic-operator-secret-for-parser-route-tests';
+    const session = await createOperatorSession();
+    if (!session) throw new Error('Synthetic operator session was not created');
+    cookie = `${OPERATOR_COOKIE}=${session}`;
+  });
+  afterAll(() => {
+    if (priorSecret === undefined) delete process.env.LOCAL_OPERATOR_SECRET;
+    else process.env.LOCAL_OPERATOR_SECRET = priorSecret;
+  });
   beforeEach(() => {
     jest.resetModules();
   });
 
-  function buildRequest(body: unknown): import('next/server').NextRequest {
-    // Minimal NextRequest stand-in: we only call .json().
-    return {
-      json: async () => body,
-    } as unknown as import('next/server').NextRequest;
+  function buildRequest(body: unknown): NextRequest {
+    return new NextRequest('http://localhost:3750/api/parser/flag-unmatched', {
+      method: 'POST',
+      headers: {
+        host: 'localhost:3750', origin: 'http://localhost:3750',
+        'sec-fetch-site': 'same-origin', 'content-type': 'application/json', cookie,
+      },
+      body: JSON.stringify(body),
+    });
   }
 
   it('rejects non-UUID captureId with 400', async () => {

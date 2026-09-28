@@ -1,21 +1,28 @@
 ---
 title: Semantic Search
-description: ruvector-powered semantic vector search with 384-dim ONNX embeddings, HNSW indexing, and cosine similarity.
+description: Server-side hybrid keyword + vector search backed by the ruvector PostgreSQL extension, 384-dim all-MiniLM-L6-v2 embeddings, and HNSW indexing.
 ---
 
 # Semantic Search
 
-The agent integrates [ruvector](https://github.com/ruvnet/ruvector) as a core dependency to provide semantic vector search across your contact network. Instead of matching exact keywords, semantic search understands the meaning of profiles and queries, finding relevant contacts even when they use different terminology.
+The app integrates [ruvector](https://github.com/ruvnet/ruvector) as a PostgreSQL extension to provide vector search across your contact network. Embedding, storage, indexing, and querying all happen server-side in the database -- the agent has no embedding code of its own and does not need any extra dependency installed.
 
-<Callout type="warn">
-ruvector is a required dependency. Semantic search, similarity analysis, and vector-enhanced database queries all depend on it. Install it during initial setup.
+<Callout type="info">
+This is a change from the retired v1 architecture, where the agent installed `ruvector` as an npm package, ran a local ONNX embedder, and stored vectors in a `.rvf` file on disk. In v2, ruvector runs inside PostgreSQL, and the agent just calls `GET /api/contacts/hybrid-search`.
 </Callout>
 
 ## How It Works
 
-Each contact's profile text (headline, role, company, about section, location) is converted into a 384-dimensional vector using the **all-MiniLM-L6-v2** ONNX model. These vectors capture semantic meaning -- contacts with similar professional backgrounds produce similar vectors, even when they use different words.
+Each contact's profile text (headline, title + current company, and the first 500 characters of their about section) is embedded using the **all-MiniLM-L6-v2** model (loaded server-side via `@huggingface/transformers`) and stored as a 384-dimensional vector in the `profile_embeddings` table. Separate `content_embeddings` and `company_embeddings` tables hold vectors for other content types using the same model.
 
-The vectors are stored in a local `.rvf` file (RuVector Format) using HNSW indexing for fast approximate nearest-neighbor lookup. When you search, your query is embedded into the same vector space and the k most similar contacts are returned, ranked by cosine similarity.
+When you search, `GET /api/contacts/hybrid-search?q=<query>` runs a single SQL query that:
+
+1. Finds keyword matches using PostgreSQL trigram similarity (`pg_trgm`) against name, headline, title, and company
+2. Finds vector matches by embedding the query with `ruvector_embed('all-MiniLM-L6-v2', $query)` and ranking the nearest 50 profile embeddings by cosine distance
+3. Fuses the two into a single score: **`fusion_score = 0.4 * keyword_score + 0.6 * vector_score`**
+4. Returns the top results ordered by fusion score
+
+If the `ruvector_embed` function or the vector extension is unavailable, the endpoint automatically falls back to keyword-only search (trigram similarity alone).
 
 ## What Semantic Search Finds That Keywords Miss
 
@@ -26,192 +33,50 @@ The vectors are stored in a local `.rvf` file (RuVector Format) using HNSW index
 | "VP Engineering" | "Head of Platform", "Director of Software Development" |
 | "growth marketing" | "demand generation", "customer acquisition", "performance marketing" |
 
-## Installation
+## Using It
 
-```bash
-cd .claude/linkedin-prospector/skills/linkedin-prospector
-npm install ruvector
-```
-
-On first run, the ONNX model (~30MB) is downloaded and cached in `.cache/`. Subsequent runs use the cached model.
-
-### System Requirements
-
-| Resource | Requirement |
-|----------|-------------|
-| Node.js | 18+ |
-| RAM (during vectorization) | ~100MB for the ONNX model |
-| Disk (ONNX model cache) | ~30MB (one-time download) |
-| Store size | ~1KB per contact (~250KB for 230 contacts) |
-
-## Building the Vector Store
-
-After installing ruvector, build the store from your scored contacts:
-
-```bash
-# Recommended: from graph.json (includes all scoring metadata)
-node scripts/vectorize.mjs --from-graph
-
-# Alternative: from contacts.json (raw data, no scores)
-node scripts/vectorize.mjs
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--from-graph` | off | Load from `graph.json` (recommended, includes scoring metadata) |
-| `--batch-size N` | 50 | Contacts per embedding batch. Lower if you hit memory limits. |
-| `--verbose` | off | Show per-batch progress and timing |
-
-### When to Rebuild
-
-Rebuild the vector store when:
-- You add new contacts (search, enrich, deep-scan)
-- You want updated scoring metadata in search results
-- The store file is missing or corrupt
-
-The `--rebuild` and `--full` pipeline modes include a vectorize step automatically.
-
-## Search Modes
-
-### Similar (k-NN from stored vector)
-
-Find contacts whose profiles are most similar to a specific person. Uses the stored vector directly -- no embedder initialization needed.
+### From the agent
 
 ```
-/network-intel find contacts similar to https://linkedin.com/in/someone
-```
-
-```bash
-node scripts/analyzer.mjs --mode similar --url "https://linkedin.com/in/someone" --top 20
-```
-
-**Performance:** Near-instant (under 50ms) when using stored vectors.
-
-### Semantic (free-text query)
-
-Search by natural language description. Embeds your query and finds the most relevant profiles.
-
-```
+/network-intel search for "cloud infrastructure"
 /network-intel who talks about AI transformation?
-/network-intel search for people in cloud infrastructure
 ```
 
 ```bash
-node scripts/analyzer.mjs --mode semantic --query "AI transformation leaders" --top 20
+node agent/network-navigator/skills/linkedin-prospector/scripts/analyze.mjs --mode search --query "AI transformation leaders" --top 20
 ```
 
-**Performance:** ~500ms (includes embedding the query text + HNSW lookup).
+`analyze.mjs --mode search` calls `GET /api/contacts/hybrid-search?q=<query>` and prints the top 20 results.
 
-### DB Search (automatic vector enhancement)
-
-The `db.mjs search` command automatically uses semantic search first when the vector store is available, then falls back to substring matching.
-
-```bash
-node scripts/db.mjs search --keywords "cloud infrastructure"
-```
-
-## Architecture
+### Directly via the API
 
 ```
-                                    +-------------------+
-                                    |    ruvector        |
-                                    |    (core dep)      |
-                                    +--------+----------+
-                                             |
-                                             v
-+-------------------+   vectorize.mjs   +----+----+
-|  graph.json       |----------------->| network  |
-|  (scored contacts)|   embed + store  |  .rvf    |
-+-------------------+                  +-+--+--+--+
-                                         |  |  |
-                    +--------------------+  |  +--------------------+
-                    |                       |                       |
-                    v                       v                       v
-            analyzer.mjs            analyzer.mjs             db.mjs
-            --mode similar          --mode semantic           search
-            (stored vector)         (query embedding)        (auto fallback)
+GET /api/contacts/hybrid-search?q=cloud+infrastructure
 ```
 
-### Storage Format
+## Embedding Details
 
-The `.rvf` file stores per contact:
+| Property | Value |
+|----------|-------|
+| Model | `Xenova/all-MiniLM-L6-v2` (via `@huggingface/transformers`, dtype `fp32`) |
+| Dimensions | 384 |
+| Distance metric | Cosine (`ruvector_cosine_ops`) |
+| Index | HNSW, `m = 16`, `ef_construction = 200` |
+| Tables | `profile_embeddings`, `content_embeddings`, `company_embeddings` |
+| Source text (profiles) | `headline` \| `title at current_company` \| first 500 chars of `about` |
 
-| Category | Fields |
-|----------|--------|
-| **Vector** | 384-dim float array (cosine distance, HNSW indexed) |
-| **Identity** | profileUrl, name, headline, title, location, currentRole, currentCompany, about, connections |
-| **Layer 1** | icpFit, networkHub, relationshipStrength, signalBoost, goldScore, tier, persona |
-| **Layer 2** | behavioralScore, behavioralPersona |
-| **Layer 3** | referralLikelihood, referralTier, referralPersona |
-| **Graph** | cluster, clusterLabel |
-| **Timestamps** | createdAt, updatedAt, embeddedAt |
+## Keeping Embeddings Current
 
-### HNSW Configuration
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Dimensions | 384 | all-MiniLM-L6-v2 output |
-| Distance metric | cosine | Higher = more similar |
-| M | 16 | Max connections per HNSW layer |
-| efConstruction | 200 | Construction-time search breadth |
-
-## Pipeline Integration
-
-### Automatic Vectorization
-
-When ruvector is installed, `--rebuild` and `--full` pipeline modes automatically include a vectorize step:
-
-```
---rebuild: graph-builder -> scorer -> behavioral -> referral -> vectorize -> analyzer -> snapshot
---full:    search -> enrich -> graph-builder -> scorer -> behavioral -> referral -> vectorize -> analyzer -> snapshot
-```
-
-The vectorize step runs after all scorers complete so metadata includes all scores. It warns on failure but does not block downstream steps.
-
-### Score Metadata Sync
-
-Each scorer automatically upserts its scores into the RVF store after scoring:
-
-| Scorer | Fields Upserted |
-|--------|----------------|
-| `scorer.mjs` | icpFit, networkHub, relationshipStrength, signalBoost, goldScore, tier, persona |
-| `behavioral-scorer.mjs` | behavioralScore, behavioralPersona |
-| `referral-scorer.mjs` | referralLikelihood, referralTier, referralPersona |
-
-This keeps the vector store current without requiring full re-vectorization. Re-vectorization is only needed for new contacts.
-
-## The rvf-store.mjs API
-
-Central abstraction layer over ruvector. All ruvector interaction goes through this module.
-
-| Function | Description |
-|----------|-------------|
-| `isRvfAvailable()` | Synchronous check if ruvector is installed |
-| `openStore()` | Open or create the VectorDB at `data/network.rvf` |
-| `closeStore()` | Release the store reference |
-| `queryStore(vector, k, filter?)` | k-NN search. Returns `[{ id, score, metadata }]` |
-| `ingestContacts(entries)` | Batch insert `[{ id, vector, metadata }]` |
-| `getContact(id)` | Get a single entry by profile URL |
-| `deleteContact(id)` | Remove an entry |
-| `storeLength()` | Number of entries |
-| `upsertMetadata(id, partial)` | Merge metadata for existing entry (preserves vector) |
-| `buildProfileText(contact)` | Build consistent text for embedding |
-| `buildMetadata(contact, url)` | Build full metadata object |
+Embeddings are generated when contacts are imported or captured, and can be backfilled for any contacts missing one via the app's reindex path (`POST /api/admin/reindex`). There is no agent-side vectorize step to run -- embedding generation is not exposed through `pipeline.mjs` or `analyze.mjs`.
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| "ruvector not available" | `cd .claude/linkedin-prospector/skills/linkedin-prospector && npm i ruvector` |
-| "RVF store not available or empty" | `node scripts/vectorize.mjs --from-graph` |
-| "RVF store is locked" | Close other processes or delete `data/network.rvf.lock` |
-| ONNX model download slow | Wait (~30MB first run). Subsequent runs use cache. |
-| "ONNX embedder failed" | Delete `.cache/` and re-run |
-| Semantic results seem off | Rebuild from graph: `node scripts/vectorize.mjs --from-graph` |
+| Search returns keyword-only results, no semantic matches | The `ruvector_embed` function or the ruvector-postgres extension isn't available; check `docker compose logs db` |
+| No results at all | The contact may not have an embedding yet; trigger a reindex via `POST /api/admin/reindex` |
+| Slow first query | The embedding model is loaded lazily on first use in the app process; subsequent queries are fast |
 
-### Rebuilding from Scratch
+## What's No Longer Here
 
-```bash
-rm -f .claude/linkedin-prospector/skills/linkedin-prospector/data/network.rvf
-node scripts/vectorize.mjs --from-graph --verbose
-```
+The retired v1 architecture had a dedicated `similar` analysis mode -- k-NN search from a specific contact's stored vector, distinct from free-text semantic search. That mode has no v2 equivalent; `hybrid-search` only accepts a free-text query, not a target contact ID. See [Analysis Modes](/docs/claude-agent/analysis-modes#modes-with-no-v2-equivalent) for details.

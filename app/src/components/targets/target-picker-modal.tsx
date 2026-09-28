@@ -8,6 +8,8 @@
 // the shortcut does not clobber normal typing.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { contextController } from "@/lib/targets/context-controller";
 
 interface ContactResult {
   id: string;
@@ -42,33 +44,38 @@ export function TargetPickerModal() {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<PickerResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+
+  const openPicker = useCallback(() => {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+  }, []);
+
+  const closePicker = useCallback(() => {
+    setOpen(false);
+    setQ("");
+    setResults([]);
+  }, []);
 
   // Global `T` shortcut.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && open) {
-        setOpen(false);
-        return;
-      }
       if (e.key.toLowerCase() !== "t") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (shouldIgnoreKey(e)) return;
       e.preventDefault();
-      setOpen(true);
+      openPicker();
     }
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
-
-  // Focus input when opened.
-  useEffect(() => {
-    if (open) {
-      const id = setTimeout(() => inputRef.current?.focus(), 30);
-      return () => clearTimeout(id);
-    }
-  }, [open]);
+    window.addEventListener("open-target-picker", openPicker);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("open-target-picker", openPicker);
+    };
+  }, [openPicker]);
 
   // Search as you type.
   useEffect(() => {
@@ -120,50 +127,42 @@ export function TargetPickerModal() {
 
   const handleSelect = useCallback(async (result: PickerResult) => {
     try {
-      // Upsert the target row
-      const createRes = await fetch("/api/targets", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: result.kind, id: result.id }),
-      });
-      if (!createRes.ok) return;
-      const createJson = (await createRes.json()) as { data: { id: string } };
-      // Set as secondary
-      await fetch("/api/targets/state", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secondaryTargetId: createJson.data.id }),
-      });
-      setOpen(false);
-      setQ("");
-      // Trigger re-render of breadcrumbs via a full reload — simplest for v1.
-      window.location.reload();
-    } catch {
-      // Silent — leave modal open so user can retry.
+      setSelectionError(null);
+      await contextController.createAndFocus(result.kind, result.id);
+      closePicker();
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : "Could not select target");
     }
-  }, []);
-
-  if (!open) return null;
+  }, [closePicker]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-24"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Target picker"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) setOpen(false);
-      }}
-    >
-      <div className="w-full max-w-xl rounded-lg border border-border bg-background shadow-lg">
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => next ? openPicker() : closePicker()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/40" />
+        <DialogPrimitive.Content
+          aria-modal="true"
+          aria-describedby={undefined}
+          className="fixed left-1/2 top-24 z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-lg border border-border bg-background shadow-lg outline-none"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            inputRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (openerRef.current?.isConnected) openerRef.current.focus();
+          }}
+        >
+        <DialogPrimitive.Title className="sr-only">Target picker</DialogPrimitive.Title>
         <input
           ref={inputRef}
+          aria-label="Search contacts and companies"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search contacts and companies..."
           className="w-full rounded-t-lg bg-transparent px-4 py-3 outline-none"
         />
         <div className="max-h-80 overflow-auto border-t border-border/60">
+          {selectionError && <div role="alert" className="px-4 py-2 text-xs text-destructive">{selectionError}</div>}
           {loading && (
             <div className="px-4 py-3 text-xs text-muted-foreground">
               Searching...
@@ -195,7 +194,8 @@ export function TargetPickerModal() {
             </button>
           ))}
         </div>
-      </div>
-    </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }

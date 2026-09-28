@@ -18,9 +18,9 @@
     <!-- Registration Section (shown when not registered) -->
     <section id="register-section" class="popup-section">
       <h2>Connect to App</h2>
-      <p class="help-text">Enter the display token from the app settings page:</p>
+      <p class="help-text">Enter the full extension token from the app settings page:</p>
       <div class="input-group">
-        <input type="text" id="token-input" placeholder="ext_xxxxxxxx" />
+        <input type="password" id="token-input" placeholder="ext_…" autocomplete="off" spellcheck="false" />
         <button id="register-btn" class="btn btn-primary">Connect</button>
       </div>
       <p id="register-error" class="error-text" style="display: none;"></p>
@@ -81,9 +81,10 @@
         </div>
         <p id="template-status" class="template-status" style="display: none;"></p>
       </div>
+    </section>
 
-      <!-- Settings Section (Phase 6) -->
-      <div class="popup-section">
+    <!-- Keep Settings outside main-section so App URL is editable before registration. -->
+    <div class="popup-section">
         <div class="settings-toggle" id="settings-toggle">
           <h2>Settings</h2>
           <span class="settings-chevron" id="settings-chevron">&#9660;</span>
@@ -122,8 +123,7 @@
             </select>
           </div>
         </div>
-      </div>
-    </section>
+    </div>
 
     <footer class="popup-footer">
       <span class="version-text">v0.1.0</span>

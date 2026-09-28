@@ -1,9 +1,13 @@
 // WS-3 Phase 6 §10 — offline snippet queue tests.
 //
-// Exercises enqueue → flush ordering, retry cap, and 4xx-non-retryable.
+// Exercises enqueue → flush ordering and preservation of failed work.
 // Uses a local in-memory stand-in for chrome.storage.local.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { createHash, webcrypto } from 'node:crypto';
+
+const destination = { appUrl: 'https://app.test', tokenFingerprint: createHash('sha256').update('tok').digest('hex'), tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
 
 interface StoredMap {
   [key: string]: unknown;
@@ -35,7 +39,7 @@ function installChromeShim(): void {
       },
     },
   };
-  (globalThis as any).crypto ??= { randomUUID: () => String(Math.random()) };
+  Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 }
 
 describe('snippet-queue', () => {
@@ -47,8 +51,8 @@ describe('snippet-queue', () => {
   it('enqueueSnippet + getSnippetQueueDepth round-trip', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
     expect(await mod.getSnippetQueueDepth()).toBe(0);
-    await mod.enqueueSnippet({ targetId: 'a' }, 'network down');
-    await mod.enqueueSnippet({ targetId: 'b' });
+    await mod.enqueueSnippet({ targetId: 'a' }, destination, 'network down');
+    await mod.enqueueSnippet({ targetId: 'b' }, destination);
     expect(await mod.getSnippetQueueDepth()).toBe(2);
     const list = await mod.getSnippetQueue();
     expect(list.map((q) => (q.body as any).targetId)).toEqual(['a', 'b']);
@@ -56,9 +60,11 @@ describe('snippet-queue', () => {
 
   it('flushSnippetQueue preserves FIFO order on success', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
-    await mod.enqueueSnippet({ idx: 1 });
-    await mod.enqueueSnippet({ idx: 2 });
-    await mod.enqueueSnippet({ idx: 3 });
+    const queued = [
+      await mod.enqueueSnippet({ idx: 1 }, destination),
+      await mod.enqueueSnippet({ idx: 2 }, destination),
+      await mod.enqueueSnippet({ idx: 3 }, destination),
+    ];
 
     const bodies: unknown[] = [];
     const fetchImpl = jest.fn(async (_url: unknown, init: RequestInit) => {
@@ -73,12 +79,12 @@ describe('snippet-queue', () => {
     });
     expect(r.processed).toBe(3);
     expect(r.remaining).toBe(0);
-    expect(bodies).toEqual([{ idx: 1 }, { idx: 2 }, { idx: 3 }]);
+    expect(bodies).toEqual(queued.map((item, index) => ({ idx: index + 1, requestId: item.id })));
   });
 
-  it('drops items that hit a 4xx (non-retryable)', async () => {
+  it('retains items that hit a 4xx for explicit retry or discard', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
-    await mod.enqueueSnippet({ idx: 1 });
+    await mod.enqueueSnippet({ idx: 1 }, destination);
 
     const fetchImpl = jest.fn(async () => ({
       ok: false,
@@ -87,17 +93,20 @@ describe('snippet-queue', () => {
 
     const r = await mod.flushSnippetQueue({
       appUrl: 'https://app.test',
-      extensionToken: null,
+      extensionToken: 'tok',
       fetchImpl,
     });
     expect(r.processed).toBe(0);
-    expect(r.remaining).toBe(0);
+    expect(r.remaining).toBe(1);
+    expect((await mod.getSnippetQueue())[0]).toMatchObject({
+      state: 'failed', lastError: 'HTTP 422',
+    });
   });
 
   it('stops after a 5xx + bumps retry count', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
-    await mod.enqueueSnippet({ idx: 1 });
-    await mod.enqueueSnippet({ idx: 2 });
+    await mod.enqueueSnippet({ idx: 1 }, destination);
+    await mod.enqueueSnippet({ idx: 2 }, destination);
 
     const fetchImpl = jest.fn(async () => ({
       ok: false,
@@ -106,7 +115,7 @@ describe('snippet-queue', () => {
 
     const r = await mod.flushSnippetQueue({
       appUrl: 'https://app.test',
-      extensionToken: null,
+      extensionToken: 'tok',
       fetchImpl,
     });
     expect(r.processed).toBe(0);
@@ -119,7 +128,7 @@ describe('snippet-queue', () => {
     expect(list[1].retryCount).toBe(0);
   });
 
-  it('discards items once retryCount exceeds the cap', async () => {
+  it('retains exhausted items without automatic replay', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
     // Manually seed a queue item at max retries by dropping it in storage.
     await (globalThis as any).chrome.storage.local.set({
@@ -136,18 +145,19 @@ describe('snippet-queue', () => {
     const fetchImpl = jest.fn() as unknown as typeof fetch;
     const r = await mod.flushSnippetQueue({
       appUrl: 'https://app.test',
-      extensionToken: null,
+      extensionToken: 'tok',
       fetchImpl,
     });
     expect(r.processed).toBe(0);
-    expect(r.remaining).toBe(0);
+    expect(r.remaining).toBe(1);
+    expect((await mod.getSnippetQueue())[0].id).toBe('old');
     expect((fetchImpl as unknown as jest.Mock).mock.calls.length).toBe(0);
   });
 
   it('treats network errors as retryable and stops the pass', async () => {
     const mod = await import('../../browser/src/shared/snippet-queue');
-    await mod.enqueueSnippet({ idx: 1 });
-    await mod.enqueueSnippet({ idx: 2 });
+    await mod.enqueueSnippet({ idx: 1 }, destination);
+    await mod.enqueueSnippet({ idx: 2 }, destination);
 
     const fetchImpl = jest.fn(async () => {
       throw new Error('Failed to fetch');
@@ -155,7 +165,7 @@ describe('snippet-queue', () => {
 
     const r = await mod.flushSnippetQueue({
       appUrl: 'https://app.test',
-      extensionToken: null,
+      extensionToken: 'tok',
       fetchImpl,
     });
     expect(r.processed).toBe(0);

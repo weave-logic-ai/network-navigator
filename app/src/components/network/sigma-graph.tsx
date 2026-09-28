@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
 import { isShiftClick, setSecondaryTargetViaShiftClick } from "./shift-click";
+import { contextController, useTargetContext } from "@/lib/targets/context-controller";
+import type { ClusterData } from "./cluster-sidebar";
 
 interface SigmaNode {
   key: string;
@@ -21,6 +24,8 @@ interface SigmaNode {
     pagerank: number;
     score: number;
     degree: number;
+    groupIds: string[];
+    kind?: "contact" | "company";
   };
 }
 
@@ -37,12 +42,61 @@ interface SigmaEdge {
 interface GraphData {
   nodes: SigmaNode[];
   edges: SigmaEdge[];
+  groups: ClusterData[];
+  focusNodeId: string | null;
   stats: {
     totalNodes: number;
     loadedNodes: number;
+    availableNodes: number;
+    truncatedNodes: number;
     totalEdges: number;
+    availableEdges: number;
+    truncatedEdges: number;
     communities: number;
   };
+}
+
+export function matchesGraphGroup(groupIds: readonly string[] | undefined, selectedGroup: string | null): boolean {
+  return !selectedGroup || Boolean(groupIds?.includes(selectedGroup));
+}
+
+export function isGraphNodeEmphasized(
+  groupIds: readonly string[] | undefined,
+  selectedGroup: string | null,
+  matchesSearch: boolean,
+  isFlashed = false,
+): boolean {
+  return isFlashed || (matchesSearch && matchesGraphGroup(groupIds, selectedGroup));
+}
+
+export function countVisibleGraphGroups(
+  groups: ClusterData[],
+  nodes: SigmaNode[],
+  searchQuery: string,
+  selectedGroup: string | null,
+  flashedNodes: ReadonlySet<string> = new Set(),
+): ClusterData[] {
+  const counts = new Map(groups.map((group) => [group.id, 0]));
+  const hasSearch = Boolean(searchQuery.trim());
+  const queryText = searchQuery.toLowerCase();
+  for (const node of nodes) {
+    const matchesSearch = !hasSearch || node.attributes.label.toLowerCase().includes(queryText);
+    if (!isGraphNodeEmphasized(node.attributes.groupIds, selectedGroup, matchesSearch, flashedNodes.has(node.key))) continue;
+    for (const id of node.attributes.groupIds) {
+      if (counts.has(id)) counts.set(id, counts.get(id)! + 1);
+    }
+  }
+  return groups.map((group) => ({ ...group, visibleCount: counts.get(group.id) ?? 0 }));
+}
+
+export function formatGraphCounts(stats: GraphData["stats"]): string {
+  const truncated = [
+    stats.truncatedNodes > 0 ? `${stats.truncatedNodes} ${stats.truncatedNodes === 1 ? "node" : "nodes"}` : null,
+    stats.truncatedEdges > 0 ? `${stats.truncatedEdges} ${stats.truncatedEdges === 1 ? "edge" : "edges"}` : null,
+  ].filter(Boolean);
+  return `${stats.loadedNodes}/${stats.availableNodes} nodes, ` +
+    `${stats.totalEdges}/${stats.availableEdges} edges` +
+    (truncated.length ? ` (${truncated.join(", ")} truncated)` : "");
 }
 
 interface SigmaGraphProps {
@@ -58,6 +112,26 @@ interface SigmaGraphProps {
    */
   showProvenanceEdges?: boolean;
   onShowProvenanceEdgesChange?: (next: boolean) => void;
+  /**
+   * ClusterSidebar's "click a cluster to highlight its nodes" feature
+   * (Communities button on the Graph tab). When set to a `clusters.id`,
+   * nodes whose `groupIds` don't contain the ID are dimmed the same way a search
+   * query dims non-matches — see the node-reducer effect below.
+   */
+  highlightedCluster?: string | null;
+  selectedGroupKey?: string;
+  onGroupsStateChange?: (groups: ClusterData[] | null, error: string | null, reloaded?: boolean, requestedGroupId?: string | null) => void;
+  /**
+   * ADR-027 graph re-rooting. A contact or company `research_targets.id`
+   * to center the graph on, in place of the default top-by-PageRank
+   * listing. Per the ADR, this is normally the current *secondary* target
+   * — passed straight through to `/api/graph/sigma-data?primaryTargetId=`,
+   * which keeps that wire name for consistency with the (unwired)
+   * `/api/graph/data` implementation it was ported from. Mirrors the
+   * `showProvenanceEdges`/`onShowProvenanceEdgesChange` controlled-prop
+   * pattern above: the parent supplies the confirmed server focus.
+   */
+  rootTargetId?: string | null;
 }
 
 const EDGE_TYPE_OPTIONS = [
@@ -67,7 +141,23 @@ const EDGE_TYPE_OPTIONS = [
   { value: "INVITED_BY", label: "Invited" },
   { value: "ENDORSED", label: "Endorsed" },
   { value: "RECOMMENDED", label: "Recommended" },
+  { value: "company-context", label: "Company links" },
 ];
+
+/** One action from a selected graph node writes only the secondary target. */
+export async function focusGraphNode(
+  node: Pick<SigmaNode, "key" | "attributes">,
+): Promise<{ ok: boolean; secondaryTargetId?: string }> {
+  if (node.attributes.kind !== "company") {
+    return setSecondaryTargetViaShiftClick(node.key);
+  }
+  try {
+    const snapshot = await contextController.createAndFocus("company", node.key);
+    return { ok: true, secondaryTargetId: snapshot.secondaryTargetId ?? undefined };
+  } catch {
+    return { ok: false };
+  }
+}
 
 export function SigmaGraph({
   nicheId,
@@ -76,22 +166,45 @@ export function SigmaGraph({
   onNodeClick,
   showProvenanceEdges = false,
   onShowProvenanceEdgesChange,
+  highlightedCluster = null,
+  selectedGroupKey,
+  onGroupsStateChange,
+  rootTargetId = null,
 }: SigmaGraphProps) {
   // Local copy of the toggle: mirrors the parent's value when controlled,
   // otherwise acts as uncontrolled state. Either way, flipping it triggers
   // a refetch (see loadData dep array below) with cache-bust via
   // includeProvenanceEdges=true — matching the Phase 4 §6 behavior.
   const [provenanceOn, setProvenanceOn] = useState<boolean>(showProvenanceEdges);
+  const { pending: contextPending } = useTargetContext();
+  // The parent supplies the confirmed server root; failed writes leave it intact.
+  const activeRootTargetId = rootTargetId;
   const containerRef = useRef<HTMLDivElement>(null);
+  const selectedNodeCardRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sigmaRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
+  const initializingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const latestDataRef = useRef<GraphData | null>(null);
+  const requestSeqRef = useRef(0);
+  const requestInFlightRef = useRef(false);
+  const groupsCallbackRef = useRef(onGroupsStateChange);
+  groupsCallbackRef.current = onGroupsStateChange;
+  const selectedGroupRef = useRef({ id: highlightedCluster, key: selectedGroupKey });
+  selectedGroupRef.current = { id: highlightedCluster, key: selectedGroupKey };
+  const lastSelectionRef = useRef({ id: highlightedCluster, key: selectedGroupKey });
   const [data, setData] = useState<GraphData | null>(null);
+  const [graphRevision, setGraphRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNode, setSelectedNode] = useState<SigmaNode | null>(null);
+  useEffect(() => {
+    if (selectedNode) selectedNodeCardRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedNode]);
+  const [focusError, setFocusError] = useState<string | null>(null);
   const [edgeTypes, setEdgeTypes] = useState<string[]>(
     initialEdgeTypes || EDGE_TYPE_OPTIONS.map((o) => o.value)
   );
@@ -103,26 +216,69 @@ export function SigmaGraph({
     () => new Set()
   );
 
+  const focusSelectedNode = useCallback(async (node: SigmaNode) => {
+    setFocusError(null);
+    const result = await focusGraphNode(node);
+    if (!mountedRef.current) return;
+    if (!result.ok || !result.secondaryTargetId) {
+      setFocusError("Could not focus this node. Please try again.");
+      return;
+    }
+    setSecondarySetFlash((prev) => new Set(prev).add(node.key));
+    window.setTimeout(() => {
+      if (!mountedRef.current) return;
+      setSecondarySetFlash((prev) => {
+        const next = new Set(prev);
+        next.delete(node.key);
+        return next;
+      });
+    }, 600);
+  }, []);
+  const focusNodeRef = useRef(focusSelectedNode);
+  focusNodeRef.current = focusSelectedNode;
+
   const loadData = useCallback(async () => {
-    setLoading(true);
+    const requestSeq = ++requestSeqRef.current;
+    requestInFlightRef.current = true;
     setError(null);
+    setLoading(true);
+    groupsCallbackRef.current?.(null, null);
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
       if (nicheId) params.set("nicheId", nicheId);
-      if (edgeTypes.length > 0) params.set("edgeTypes", edgeTypes.join(","));
+      params.set("edgeTypes", edgeTypes.join(","));
       if (provenanceOn) params.set("includeProvenanceEdges", "true");
+      if (activeRootTargetId) params.set("primaryTargetId", activeRootTargetId);
+      const requestedGroup = selectedGroupRef.current;
+      if (requestedGroup.id) params.set("selectedGroupId", requestedGroup.id);
+      if (requestedGroup.key) params.set("selectedGroupKey", requestedGroup.key);
 
       const res = await fetch(`/api/graph/sigma-data?${params}`);
       if (!res.ok) throw new Error("Failed to load graph data");
       const json = await res.json();
-      setData(json.data);
+      if (requestSeq === requestSeqRef.current) {
+        setData(json.data);
+        groupsCallbackRef.current?.(json.data.groups, null, true, requestedGroup.id);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      if (requestSeq === requestSeqRef.current) {
+        const message = err instanceof Error ? err.message : "Failed to load graph data";
+        setError(message);
+        groupsCallbackRef.current?.(null, message);
+      }
     } finally {
-      setLoading(false);
+      if (requestSeq === requestSeqRef.current) {
+        requestInFlightRef.current = false;
+        setLoading(false);
+      }
     }
-  }, [limit, nicheId, edgeTypes, provenanceOn]);
+  }, [limit, nicheId, edgeTypes, provenanceOn, activeRootTargetId]);
+
+  useEffect(() => {
+    if (!data || loading || error) return;
+    groupsCallbackRef.current?.(countVisibleGraphGroups(data.groups, data.nodes, searchQuery, highlightedCluster, secondarySetFlash), null);
+  }, [data, loading, error, searchQuery, highlightedCluster, secondarySetFlash]);
 
   const handleProvenanceToggle = useCallback(() => {
     setProvenanceOn((prev) => {
@@ -137,16 +293,117 @@ export function SigmaGraph({
     setProvenanceOn(showProvenanceEdges);
   }, [showProvenanceEdges]);
 
+  // Clear local selection when the confirmed root changes.
+  useEffect(() => {
+    setSearchQuery("");
+    setSelectedNode(null);
+  }, [rootTargetId]);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
 
+  // A selection made while an older request is in flight needs a response
+  // pinned to that identity; otherwise the capped catalog may omit it.
+  useEffect(() => {
+    const last = lastSelectionRef.current;
+    if (last.id === highlightedCluster && last.key === selectedGroupKey) return;
+    lastSelectionRef.current = { id: highlightedCluster, key: selectedGroupKey };
+    if (!highlightedCluster) return;
+    if (requestInFlightRef.current || !latestDataRef.current?.groups.some((group) => group.id === highlightedCluster)) {
+      void loadData();
+    }
+  }, [highlightedCluster, selectedGroupKey, loadData]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestSeqRef.current += 1;
+      sigmaRef.current?.kill();
+      sigmaRef.current = null;
+      graphRef.current = null;
+    };
+  }, []);
+
+  // Preserve positions and the WebGL renderer when a target changes. The
+  // initial ForceAtlas2 pass is expensive at 1,000+ nodes; running it again
+  // for the same graph made an ordinary target switch exceed the 200 ms
+  // client-observed re-center budget.
+  const applyDataToGraph = useCallback((
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph: any,
+    nextData: GraphData,
+  ) => {
+    const nodeKeys = new Set(nextData.nodes.map((node) => node.key));
+    const removedNodes: string[] = [];
+    graph.forEachNode((key: string) => {
+      if (!nodeKeys.has(key)) removedNodes.push(key);
+    });
+    for (const key of removedNodes) graph.dropNode(key);
+
+    for (const node of nextData.nodes) {
+      if (graph.hasNode(node.key)) {
+        const { x, y } = graph.getNodeAttributes(node.key);
+        graph.mergeNodeAttributes(node.key, { ...node.attributes, x, y });
+      } else {
+        graph.addNode(node.key, node.attributes);
+      }
+    }
+
+    const edgeKeys = new Set(nextData.edges.map((edge) => edge.key));
+    const removedEdges: string[] = [];
+    graph.forEachEdge((key: string) => {
+      if (!edgeKeys.has(key)) removedEdges.push(key);
+    });
+    for (const key of removedEdges) graph.dropEdge(key);
+
+    for (const edge of nextData.edges) {
+      if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
+      const attributes = {
+        ...edge.attributes,
+        relationshipType: edge.attributes.type,
+        type: "line",
+        size: Math.max(0.5, edge.attributes.weight),
+        color: "#e2e8f0",
+      };
+      if (graph.hasEdge(edge.key)) {
+        graph.mergeEdgeAttributes(edge.key, attributes);
+      } else {
+        graph.addEdgeWithKey(edge.key, edge.source, edge.target, attributes);
+      }
+    }
+  }, []);
+
+  const centerOnFocus = useCallback((
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sigma: any,
+    nextData: GraphData,
+  ) => {
+    const display = nextData.focusNodeId
+      ? sigma.getNodeDisplayData(nextData.focusNodeId)
+      : null;
+    const camera = sigma.getCamera();
+    if (display) {
+      camera.setState({ x: display.x, y: display.y, ratio: 0.5 });
+    } else if (!nextData.focusNodeId) {
+      camera.setState({ x: 0.5, y: 0.5, ratio: 1 });
+    }
+  }, []);
+
   // Initialize Sigma when data arrives — all imports are dynamic
   useEffect(() => {
     if (!data || !containerRef.current) return;
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let sigmaInstance: any = null;
+    latestDataRef.current = data;
+    if (sigmaRef.current && graphRef.current) {
+      applyDataToGraph(graphRef.current, data);
+      sigmaRef.current.refresh();
+      centerOnFocus(sigmaRef.current, data);
+      setGraphRevision((revision) => revision + 1);
+      return;
+    }
+    if (initializingRef.current) return;
+    initializingRef.current = true;
 
     const init = async () => {
       try {
@@ -159,35 +416,9 @@ export function SigmaGraph({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const graph = new (Graph as any)({ multi: true, type: "directed" });
 
-        // Add nodes
-        for (const node of data.nodes) {
-          if (!graph.hasNode(node.key)) {
-            graph.addNode(node.key, {
-              ...node.attributes,
-              label: node.attributes.label,
-            });
-          }
-        }
-
-        // Add edges
-        for (const edge of data.edges) {
-          if (
-            graph.hasNode(edge.source) &&
-            graph.hasNode(edge.target)
-          ) {
-            try {
-              graph.addEdgeWithKey(edge.key, edge.source, edge.target, {
-                ...edge.attributes,
-                size: Math.max(0.5, edge.attributes.weight),
-                color: "#e2e8f0",
-              });
-            } catch {
-              // Skip duplicate edges
-            }
-          }
-        }
-
-        graphRef.current = graph;
+        const initialData = latestDataRef.current;
+        if (!initialData || !mountedRef.current) return;
+        applyDataToGraph(graph, initialData);
 
         // Run ForceAtlas2 layout
         try {
@@ -198,7 +429,7 @@ export function SigmaGraph({
             settings: {
               gravity: 1,
               scalingRatio: 10,
-              barnesHutOptimize: graph.order > 1000,
+              barnesHutOptimize: graph.order >= 1000,
               strongGravityMode: false,
               outboundAttractionDistribution: true,
               adjustSizes: true,
@@ -209,23 +440,40 @@ export function SigmaGraph({
         }
 
         // Create Sigma renderer
-        sigmaInstance = new Sigma(graph, containerRef.current!, {
+        if (!mountedRef.current || !containerRef.current) return;
+        const sigmaInstance = new Sigma(graph, containerRef.current, {
           renderLabels: true,
           labelRenderedSizeThreshold: 8,
           labelSize: 12,
           labelWeight: "bold",
+          defaultDrawNodeLabel: (context, node, settings) => {
+            if (!node.label) return;
+            const canvasWidth = context.canvas.clientWidth;
+            const padding = 4;
+            context.font = `${settings.labelWeight} ${settings.labelSize}px ${settings.labelFont}`;
+            context.fillStyle = settings.labelColor.attribute
+              ? String(node[settings.labelColor.attribute] ?? settings.labelColor.color ?? "#000")
+              : settings.labelColor.color ?? "#000";
+            let label = node.label;
+            while (label.length > 1 && context.measureText(label).width > canvasWidth - padding * 2) {
+              label = `${label.slice(0, -2)}…`;
+            }
+            const labelWidth = context.measureText(label).width;
+            const right = node.x + node.size + 3;
+            const left = node.x - node.size - 3 - labelWidth;
+            const x = right + labelWidth <= canvasWidth - padding
+              ? right
+              : left >= padding ? left : Math.max(padding, canvasWidth - padding - labelWidth);
+            context.fillText(label, x, node.y + settings.labelSize / 3);
+          },
           defaultEdgeColor: "#e2e8f0",
           defaultNodeColor: "#94a3b8",
           minCameraRatio: 0.1,
           maxCameraRatio: 10,
         });
 
-        // Click handler. Plain click selects/re-roots (existing behavior);
-        // shift-click sets the clicked node as the SECONDARY research target
-        // (WS-4 §3.2). The picker modal handles regular "pick a target" flows,
-        // so shift-click is the graph-native shortcut — no modal appears.
-        // We briefly flash the node amber to signal "secondary set"
-        // (Phase 4 Track I: 600 ms fade, via a setTimeout + node reducer).
+        // Plain click selects a node, exposing a single Focus action.
+        // Shift-click remains the graph shortcut for the same action.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         sigmaInstance.on("clickNode", (payload: any) => {
           const { node, event } = payload as {
@@ -236,29 +484,7 @@ export function SigmaGraph({
           const attrs = graph.getNodeAttributes(node);
 
           if (isShift) {
-            // Fire-and-forget; POST creates (or fetches) the contact target
-            // row, then PUT writes it as `secondary_target_id`. Silent on
-            // failure — we still flash the node so the user sees the
-            // interaction landed client-side, and the breadcrumb will
-            // refresh on next state poll.
-            void setSecondaryTargetViaShiftClick(node);
-
-            // Amber highlight pulse — the node reducer reads this Set to
-            // override the node's color for a short window.
-            setSecondarySetFlash((prev) => {
-              const next = new Set(prev);
-              next.add(node);
-              return next;
-            });
-            window.setTimeout(() => {
-              setSecondarySetFlash((prev) => {
-                if (!prev.has(node)) return prev;
-                const next = new Set(prev);
-                next.delete(node);
-                return next;
-              });
-            }, 600);
-            sigmaInstance.refresh();
+            void focusNodeRef.current({ key: node, attributes: attrs as SigmaNode["attributes"] });
             return;
           }
 
@@ -274,30 +500,30 @@ export function SigmaGraph({
         });
 
         sigmaRef.current = sigmaInstance;
+        graphRef.current = graph;
+        if (latestDataRef.current && latestDataRef.current !== initialData) {
+          applyDataToGraph(graph, latestDataRef.current);
+          sigmaInstance.refresh();
+        }
+        centerOnFocus(sigmaInstance, latestDataRef.current ?? initialData);
+        setGraphRevision((revision) => revision + 1);
       } catch (err) {
         console.error("[sigma-graph] Failed to initialize:", err);
-        setError("Failed to initialize graph renderer");
+        if (mountedRef.current) setError("Failed to initialize graph renderer");
+      } finally {
+        initializingRef.current = false;
       }
     };
 
-    init();
+    void init();
+  }, [data, onNodeClick, applyDataToGraph, centerOnFocus]);
 
-    return () => {
-      if (sigmaInstance) {
-        try {
-          sigmaInstance.kill();
-        } catch {
-          // Ignore cleanup errors
-        }
-        sigmaInstance = null;
-      }
-      sigmaRef.current = null;
-      graphRef.current = null;
-    };
-  }, [data, onNodeClick]);
-
-  // Search + shift-click flash: the single node reducer combines both
-  // signals so the amber flash survives even when a search is active.
+  // Search + shift-click flash + cluster highlight: the single node reducer
+  // combines all three signals so the amber flash survives even when a
+  // search or cluster filter is active. Search and cluster-highlight are
+  // ANDed — a node must satisfy every active filter to stay fully visible;
+  // failing any one dims it the same way (matches ClusterSidebar's "click a
+  // cluster to highlight its nodes" description).
   useEffect(() => {
     const sigma = sigmaRef.current;
     const graph = graphRef.current;
@@ -306,8 +532,9 @@ export function SigmaGraph({
 
     const hasSearch = Boolean(searchQuery.trim());
     const hasFlash = secondarySetFlash.size > 0;
+    const hasClusterFilter = Boolean(highlightedCluster);
 
-    if (!hasSearch && !hasFlash) {
+    if (!hasSearch && !hasFlash && !hasClusterFilter) {
       sigma.setSetting("nodeReducer", null);
       sigma.setSetting("edgeReducer", null);
       sigma.refresh();
@@ -330,20 +557,24 @@ export function SigmaGraph({
       "nodeReducer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (node: string, data: any) => {
-        // Shift-click amber flash wins over search dimming — the user
-        // needs immediate visual confirmation that the secondary was set.
+        // Shift-click amber flash wins over search/cluster dimming — the
+        // user needs immediate visual confirmation that the secondary was
+        // set.
         if (secondarySetFlash.has(node)) {
           return { ...data, color: "#F59E0B", highlighted: true };
         }
-        if (!hasSearch) return data;
-        if (matchingNodes.has(node)) {
+        const matchesSearch = !hasSearch || matchingNodes.has(node);
+        if (!isGraphNodeEmphasized(data.groupIds as string[] | undefined, highlightedCluster, matchesSearch)) {
+          return { ...data, color: "#e2e8f0", label: "" };
+        }
+        if (hasSearch || hasClusterFilter) {
           return { ...data, highlighted: true };
         }
-        return { ...data, color: "#e2e8f0", label: "" };
+        return data;
       }
     );
     sigma.refresh();
-  }, [searchQuery, secondarySetFlash]);
+  }, [searchQuery, secondarySetFlash, highlightedCluster, graphRevision]);
 
   const toggleEdgeType = (type: string) => {
     setEdgeTypes((prev) =>
@@ -363,30 +594,20 @@ export function SigmaGraph({
     sigmaRef.current?.getCamera().animatedReset();
   };
 
-  if (loading) {
-    return (
-      <div className="h-[600px] flex items-center justify-center text-muted-foreground">
-        <Loader2 className="h-5 w-5 animate-spin mr-2" />
-        Loading graph data...
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="h-[600px] flex items-center justify-center text-destructive">
-        {error}
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-2 p-2">
+    <div className="space-y-2 p-2" data-graph-revision={graphRevision}>
+      {(loading || error) && (
+        <div className="flex items-center gap-2 text-sm" role={error ? "alert" : "status"}>
+          {loading && <><Loader2 className="h-4 w-4 animate-spin" />Loading graph data...</>}
+          {error && <><span className="text-destructive">{error}</span><Button variant="outline" size="sm" onClick={() => void loadData()}>Retry graph load</Button></>}
+        </div>
+      )}
       {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
+        <div className="relative min-w-0 basis-full sm:basis-auto sm:min-w-[200px] sm:max-w-sm sm:flex-1">
           <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
           <Input
+            aria-label="Search graph contacts"
             placeholder="Search contacts..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -394,19 +615,19 @@ export function SigmaGraph({
           />
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleZoomIn}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Zoom graph in" onClick={handleZoomIn}>
             <ZoomIn className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleZoomOut}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Zoom graph out" onClick={handleZoomOut}>
             <ZoomOut className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={handleReset}>
+          <Button variant="outline" size="sm" className="h-8 w-8 p-0" aria-label="Reset graph view" onClick={handleReset}>
             <Maximize2 className="h-3.5 w-3.5" />
           </Button>
         </div>
         {data?.stats && (
           <span className="text-xs text-muted-foreground ml-auto">
-            {data.stats.loadedNodes}/{data.stats.totalNodes} nodes, {data.stats.totalEdges} edges
+            {formatGraphCounts(data.stats)}
           </span>
         )}
       </div>
@@ -422,6 +643,7 @@ export function SigmaGraph({
                 ? "bg-primary/10 border-primary/30 text-primary"
                 : "bg-muted/30 border-border text-muted-foreground"
             }`}
+            aria-pressed={edgeTypes.includes(opt.value)}
             onClick={() => toggleEdgeType(opt.value)}
           >
             {opt.label}
@@ -447,14 +669,14 @@ export function SigmaGraph({
       </div>
 
       {/* Graph container */}
-      <div className="relative border rounded-lg overflow-hidden bg-background">
+      <div className="relative min-w-0 border rounded-lg overflow-hidden bg-background">
         <div ref={containerRef} className="w-full h-[550px]" />
 
         {/* Selected node tooltip */}
         {selectedNode && (
-          <div className="absolute top-4 right-4 bg-background border rounded-lg shadow-lg p-3 w-60 z-10">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="font-medium text-sm truncate">
+          <div ref={selectedNodeCardRef} role="region" aria-label="Selected graph node" className="absolute inset-x-2 top-2 z-10 max-h-[calc(100%-1rem)] overflow-y-auto rounded-lg border bg-background p-3 shadow-lg sm:inset-x-auto sm:right-4 sm:top-4 sm:w-60">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 mb-1">
+              <span className="min-w-0 break-words font-medium text-sm">
                 {selectedNode.attributes.label}
               </span>
               <Badge variant="secondary" className="text-[10px]">
@@ -462,36 +684,69 @@ export function SigmaGraph({
               </Badge>
             </div>
             {selectedNode.attributes.title && (
-              <p className="text-xs text-muted-foreground truncate">
+              <p className="break-words text-xs text-muted-foreground">
                 {selectedNode.attributes.title}
               </p>
             )}
             {selectedNode.attributes.company && (
-              <p className="text-xs text-muted-foreground truncate">
+              <p className="break-words text-xs text-muted-foreground">
                 {selectedNode.attributes.company}
               </p>
             )}
-            <div className="grid grid-cols-2 gap-1 mt-2 text-[10px]">
-              <span className="text-muted-foreground">PageRank</span>
-              <span>{selectedNode.attributes.pagerank.toFixed(6)}</span>
-              <span className="text-muted-foreground">Score</span>
-              <span>{(selectedNode.attributes.score * 100).toFixed(0)}%</span>
-              <span className="text-muted-foreground">Degree</span>
-              <span>{selectedNode.attributes.degree}</span>
-            </div>
+            {selectedNode.attributes.kind !== "company" && (
+              <div className="grid grid-cols-2 gap-1 mt-2 text-[10px]">
+                <span className="text-muted-foreground">PageRank</span>
+                <span>{selectedNode.attributes.pagerank.toFixed(6)}</span>
+                <span className="text-muted-foreground">Score</span>
+                <span>{(selectedNode.attributes.score * 100).toFixed(0)}%</span>
+                <span className="text-muted-foreground">Degree</span>
+                <span>{selectedNode.attributes.degree}</span>
+              </div>
+            )}
             <Button
-              variant="outline"
               size="sm"
               className="w-full mt-2 h-7 text-xs"
-              onClick={() => {
-                window.location.href = `/contacts/${selectedNode.key}`;
-              }}
+              disabled={contextPending > 0}
+              onClick={() => void focusSelectedNode(selectedNode)}
             >
-              View Profile
+              {contextPending > 0 ? "Focusing..." : "Focus"}
             </Button>
+            {focusError && <p role="alert" className="mt-1 text-xs text-destructive">{focusError}</p>}
+            {selectedNode.attributes.kind !== "company" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full mt-2 h-7 text-xs"
+                onClick={() => {
+                  window.location.href = `/contacts/${selectedNode.key}`;
+                }}
+              >
+                View Profile
+              </Button>
+            )}
           </div>
         )}
       </div>
+      <details className="rounded-lg border p-3 text-sm">
+        <summary className="cursor-pointer font-medium">Graph contacts and companies ({data?.nodes.length ?? 0})</summary>
+        <p className="mt-2 text-xs text-muted-foreground">Showing up to 50 matching nodes. Use the graph search to narrow this list.</p>
+        <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+          {data?.nodes
+            .filter((node) => node.attributes.label.toLowerCase().includes(searchQuery.toLowerCase()))
+            .slice(0, 50)
+            .map((node) => (
+              <li key={node.key}>
+                <button type="button" className="mr-2 rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => setSelectedNode(node)} aria-label={`Select ${node.attributes.label} in graph`}>Select</button>
+                {node.attributes.kind === "company" ? node.attributes.label : (
+                  <Link href={`/contacts/${encodeURIComponent(node.key)}`} className="rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                    {node.attributes.label}
+                  </Link>
+                )}
+                {node.attributes.company && <span className="text-muted-foreground"> — {node.attributes.company}</span>}
+              </li>
+            ))}
+        </ul>
+      </details>
     </div>
   );
 }

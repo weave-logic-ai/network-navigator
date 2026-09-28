@@ -1,9 +1,10 @@
 # Release v0.5.0 — Development Notes
 
-**Tag**: `v0.5.0` (proposed — first tagged release on this repo; `app/package.json` and `service-manifest.json` both realigned from `2.0.0` → `0.5.0` to signal pre-1.0 cadence)
+**Tag**: `v0.5.0` (exists locally; first tagged release on this repo)
 **Branch at prep time**: `feat/ecc-hardening-b6-port`
 **Target merge base**: `main` (`6a72d17`)
 **Date drafted**: 2026-04-17
+**Status checked**: 2026-09-25 — tag is an ancestor of cached `origin/main`; this note records the v0.5.0 scope, not the later research-tools sprint
 
 ---
 
@@ -56,54 +57,19 @@ Totals: 43 files changed, ~4200 insertions, ~60 deletions (mostly test code + do
 - `docs/package.json` stays at `1.0.0`. Fumadocs site, separate deployment.
 
 
-## Release procedure (on final green-light)
+## Release record and later work
 
-```bash
-cd /home/aepod/dev/network-navigator
+The local `v0.5.0` tag points to the ECC hardening/B6/extension-target-panel
+release and is an ancestor of cached `origin/main` (merge PR #6). The tag and
+merge history are verifiable locally; GitHub release publication and production
+runtime state were not rechecked because the GitHub API was unavailable.
+The gates above record the checks made during release preparation, not checks
+rerun for this documentation update.
 
-# 1. Verify branch is clean and green
-git status
-cd app && npm run build && npm test && cd ..
-cd browser && npm run build && cd ..
-
-# 2. Open a PR from feat/ecc-hardening-b6-port → main, review, merge
-gh pr create \
-  --base main \
-  --head feat/ecc-hardening-b6-port \
-  --title "Release v0.5.0 — ECC hardening, B6 gauges, extension target panel" \
-  --body-file docs/development_notes/release-v0.5.0.md
-
-# 3. Once merged, tag on main
-git checkout main
-git pull
-git tag -a v0.5.0 -m "$(cat <<'TAGMSG'
-Release v0.5.0 — ECC Phase 2 hardening + B6 gauges + extension target panel
-
-See CHANGELOG.md and docs/development_notes/release-v0.5.0.md for details.
-
-Highlights:
-- ExoChain BLAKE3 swap, impulse stubs finished, 128 new ECC tests
-- B6: EMOT + SCEN network-health gauges on owner profile
-- Sidebar Target Panel (task- and page-aware locking)
-- Opt-in auto-paginate for LinkedIn search captures
-- App container port moved to 3750
-TAGMSG
-)"
-git push origin v0.5.0
-
-# 4. Create the GitHub Release from the tag
-gh release create v0.5.0 \
-  --title "v0.5.0 — ECC hardening, B6 gauges, extension target panel" \
-  --notes-file docs/development_notes/release-v0.5.0.md \
-  --target main
-```
-
-## Post-release follow-ups (not blocking this tag)
-
-These were intentionally deferred from this release; they belong in a future sprint:
-
-1. **Live ECC flag-on validation** — run the `runtime-verification.md` runbook against a dev Docker stack, confirm rows appear in `causal_nodes`, `exo_chain_entries`, `impulses`, `cross_refs`. Document findings.
-2. **Snippet editor / capture diff / parsing feedback** — `docs/plans/browser-snippet-expansion.md` holds the detail.
-3. **Parser audit + graph re-centering + primary/secondary target architecture** — future joint sprint.
-4. **P0 from `stub-inventory.md`**: `DEFAULT_TENANT_ID='default'` in `causal-graph/scoring-adapter.ts:7` must be addressed before multi-tenant mode ships.
-5. **Webhook impulse branch** in `dispatcher.ts:88` is a silent no-op; needs proper handler.
+The snippet editor, parser feedback, research target model and graph work named
+as future work in this historical release were subsequently developed under
+the research-tools sprint. ADR-027 now fixes primary to the operator's self
+and uses secondary for research focus; the earlier phrase "primary/secondary
+target architecture" does not authorize swapping primary. Current delivery
+status, remaining story outcomes and release gates are maintained in
+`.planning/research-tools-sprint/08-phased-delivery.md`.

@@ -2,12 +2,15 @@
   "name": "ctox",
   "version": "0.5.0",
   "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 127.0.0.1",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -H 127.0.0.1",
     "lint": "next lint",
-    "test": "jest --passWithNoTests"
+    "test": "jest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -44,7 +47,7 @@
     "graphology-layout": "^0.6.1",
     "graphology-layout-forceatlas2": "^0.10.1",
     "lucide-react": "^0.577.0",
-    "next": "^15.1.0",
+    "next": "15.5.24",
     "next-themes": "^0.4.6",
     "pg": "^8.20.0",
     "react": "^19.0.0",
@@ -77,5 +80,8 @@
     "ts-jest": "^29.2.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "postcss": "$postcss"
   }
 }

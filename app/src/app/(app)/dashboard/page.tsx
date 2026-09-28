@@ -1,10 +1,8 @@
 import dynamic from "next/dynamic";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  DashboardLayout,
-  type DashboardTargetContext,
-} from "@/components/dashboard/dashboard-layout";
+import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
+import { TargetComparison } from "@/components/dashboard/target-comparison";
 
 const ScoreScatterWidget = dynamic(
   () =>
@@ -110,13 +108,9 @@ function ChartSkeleton({ title }: { title: string }) {
   );
 }
 
-// Per-target slot. Cards here are rendered once in single-column mode and
-// twice (primary-dimmed, secondary-emphasized) when a secondary target is
-// set. Today these components do not consume the `ctx` parameter because
-// they still read owner-scoped data; future sprints will thread `targetId`
-// through so each column actually reflects its target (see
-// `.planning/research-tools-sprint/04-targets-and-graph.md` §3).
-function PerTargetCards(_ctx: DashboardTargetContext) {
+// These widgets aggregate the owner's whole network and appear once, even
+// while a contact is focused for comparison.
+function OwnerWideCards() {
   return (
     <>
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -128,17 +122,6 @@ function PerTargetCards(_ctx: DashboardTargetContext) {
         <IcpRadarChart />
         <ScoreScatterWidget />
       </div>
-    </>
-  );
-}
-
-// Full-width slot. Cards here are network-wide or cross-target and do not
-// make sense duplicated per-target ("Today's activity", the task queue,
-// the discovery feed of items from anywhere). These render full-width in
-// both single- and two-column modes.
-function FullWidthCards() {
-  return (
-    <>
       <div className="grid gap-4 md:grid-cols-2">
         <TaskQueueWidget />
       </div>
@@ -162,8 +145,10 @@ export default function DashboardPage() {
       </div>
       <GoalFocusBanner />
       <DashboardLayout
-        perTargetSlot={PerTargetCards}
-        fullWidthSlot={<FullWidthCards />}
+        comparisonSlot={(self, focused) => (
+          <TargetComparison self={self} focused={focused} />
+        )}
+        ownerWideSlot={<OwnerWideCards />}
       />
     </div>
   );

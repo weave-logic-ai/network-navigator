@@ -1,6 +1,22 @@
 # ADR-031: Parser telemetry retention — 90-day raw plus daily aggregate
 
-**Status**: Accepted (date: 2026-04-17)
+**Status**: Accepted (date: 2026-04-17) — **Updated: 2026-08-19**
+
+> **Update 2026-08-19**: The daily roll-up job that populates
+> `parse_field_outcomes_daily` (Decision point 2) was never written — no
+> cron, script, or route anywhere in the repo inserts into that table. The
+> table exists (migration `033-parse-telemetry.sql`) but is permanently
+> empty. `readYieldReport()` (`app/src/lib/parser/telemetry.ts:151-176`)
+> queries the aggregate first, gets zero rows every time, and falls
+> through to re-aggregating raw `parse_field_outcomes` on every call — so
+> the admin `/admin/parsers` page pays the full raw-scan cost on every
+> request, the exact cost the "Cheap long-term trends" Positive
+> consequence below says the aggregate avoids. This is a real gap, not a
+> documented phase deferral: Decision point 4 explicitly defers only the
+> drop-after-90-days **prune** cron to Phase 2 ("Phase 0 only needs the
+> tables to exist" refers to retention enforcement); the aggregate
+> *population* job carries no such deferral in the source planning docs
+> and was expected to exist from Phase 0.
 
 ## Context
 
@@ -64,14 +80,32 @@ the trend query output.
 
 - **Bounded raw table**. Steady-state size is ~1.8M rows at the estimated
   volume, deterministically capped by the 90-day retention.
-- **Cheap long-term trends**. The aggregate table is ~60x smaller than raw
+- ~~**Cheap long-term trends**. The aggregate table is ~60x smaller than raw
   per field, so 2-year trend queries stay fast with an index on
-  `(page_type, field_name, day)`.
+  `(page_type, field_name, day)`.~~ **Not realized (2026-08-19)**: the
+  aggregate was never populated (no roll-up job existed until 2026-08-20,
+  see the Decision note above), so every trend
+  query falls through to a full raw-table scan. See the update note at the
+  top of this file.
 - **Debuggability preserved**. 90 days of raw rows let engineers inspect
   individual parse outcomes when a field starts regressing. Debug questions
   rarely reach further back.
-- **Simple migration story**. Aggregate is a nightly roll-up; if the cron
-  fails, the next run backfills from raw (within the 90-day window).
+- ~~**Simple migration story**. Aggregate is a nightly roll-up; if the cron
+  fails, the next run backfills from raw (within the 90-day window).~~
+  ~~**Not built (2026-08-19)**: there is no nightly roll-up cron at all yet.~~
+  **BUILT 2026-08-20.** `app/src/lib/parser/rollup.ts` (`runParserRollup`)
+  aggregates raw outcomes into `parse_field_outcomes_daily`, exposed as
+  `POST /api/sources/cron/parser-rollup` following the existing cron-route
+  convention (flag-gated on `RESEARCH_FLAGS.parserTelemetry`, cron-authorized,
+  optional `?day=YYYY-MM-DD` for backfill). Idempotent by construction: each
+  run recomputes the day's full aggregate from raw and upserts via
+  `ON CONFLICT ... DO UPDATE SET` against `uq_pfod_bucket` — absolute
+  overwrite, never `+=`, so a re-run is a no-op rather than a double-count.
+  No migration was needed; migration 033 already shipped the exact unique
+  constraint an upsert requires. NOTE: no scheduler is registered in-repo for
+  this or any sibling cron route — they are assumed to be triggered
+  externally. The Phase 2 *prune* cron remains deliberately unbuilt.
+  See the update note at the top of this file.
 
 ### Negative
 

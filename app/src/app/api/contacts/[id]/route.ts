@@ -4,6 +4,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getContactById, updateContact, deleteContact } from '@/lib/db/queries/contacts';
+import { hasLinkedIdentity } from '@/lib/contacts/identity';
 
 function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -63,7 +64,7 @@ export async function PATCH(
     const allowedFields = [
       'first_name', 'last_name', 'full_name', 'headline', 'title',
       'current_company', 'current_company_id', 'location', 'about',
-      'email', 'phone', 'tags', 'notes', 'is_archived',
+      'email', 'phone', 'tags', 'notes', 'is_archived', 'linkedin_url',
     ];
 
     const sanitized: Record<string, unknown> = {};
@@ -71,6 +72,12 @@ export async function PATCH(
       if (allowedFields.includes(key)) {
         sanitized[key] = value;
       }
+    }
+
+    if ('linkedin_url' in sanitized &&
+      (typeof sanitized.linkedin_url !== 'string' ||
+        !hasLinkedIdentity({ fullName: 'Verified Contact', linkedinUrl: sanitized.linkedin_url }))) {
+      return NextResponse.json({ error: 'Enter a valid LinkedIn profile URL' }, { status: 400 });
     }
 
     const contact = await updateContact(id, sanitized);
@@ -81,6 +88,9 @@ export async function PATCH(
 
     return NextResponse.json({ data: snakeToCamel(contact as unknown as Record<string, unknown>) });
   } catch (error) {
+    if ((error as { code?: string })?.code === '23505') {
+      return NextResponse.json({ error: 'LinkedIn profile URL already belongs to another contact' }, { status: 409 });
+    }
     return NextResponse.json(
       { error: 'Failed to update contact', details: error instanceof Error ? error.message : undefined },
       { status: 500 }

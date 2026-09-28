@@ -1,0 +1,20 @@
+{
+  "_comment": "Read by `harness mcp <ls|invoke>` (metaharness/dist/mcp-cmd.js). This mirrors the REAL servers registered in the repo-root .mcp.json — do not add/remove servers here without updating .mcp.json too, and vice versa. Governance posture for these servers lives in .harness/mcp-policy.json, which is what `harness mcp-scan` actually reads.",
+  "mcpServers": [
+    {
+      "name": "claude-flow",
+      "command": ["npx", "-y", "@claude-flow/cli@latest", "mcp", "start"],
+      "description": "Primary MCP server for this repo (see root .mcp.json). autoStart:false; env enables MCP_GROUP_SECURITY, MCP_GROUP_BROWSER, MCP_GROUP_NEURAL, MCP_GROUP_AGENTIC_FLOW, hierarchical-mesh topology, CLAUDE_FLOW_MAX_AGENTS=15, CLAUDE_FLOW_MEMORY_BACKEND=hybrid. Exposes 300+ tools (agent orchestration, memory/AgentDB, hooks, swarm coordination, browser automation, terminal execution, MetaHarness scans, GitHub, and more) — see the deferred-tool listing surfaced to agents in this session for the current set."
+    },
+    {
+      "name": "ruv-swarm",
+      "command": ["npx", "-y", "ruv-swarm", "mcp", "start"],
+      "description": "Optional swarm-coordination MCP server (root .mcp.json marks it optional:true). Exposes agent spawn/list/metrics, DAA (decentralized autonomous agent) tools, neural pattern training, and task orchestration."
+    },
+    {
+      "name": "flow-nexus",
+      "command": ["npx", "-y", "flow-nexus@latest", "mcp", "start"],
+      "description": "Optional cloud platform MCP server (root .mcp.json marks it optional:true, requiresAuth:true). Exposes E2B sandbox execution, cloud swarm/neural-training orchestration, storage, and payment/credit tools — the broadest network + shell + file-write surface of the three registered servers."
+    }
+  ]
+}

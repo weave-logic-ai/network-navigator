@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
+import { PipelineSnapshotLoader } from "@/lib/outreach/pipeline-snapshot";
 import { PageHeader } from "@/components/layout/page-header";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -36,7 +36,6 @@ import { TemplateCard } from "@/components/outreach/template-card";
 import { CampaignRow } from "@/components/outreach/campaign-row";
 import { Plus, Search } from "lucide-react";
 import { OutreachFunnel } from "@/components/charts/outreach-funnel";
-import { OutreachSequenceTree } from "@/components/charts/outreach-sequence-tree";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,6 +52,9 @@ interface PipelineContact {
   state: string;
   last_action_at: string | null;
   outreach_state_id: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  event_version: number;
 }
 
 interface Template {
@@ -83,7 +85,7 @@ interface PerfStat {
   total_sent: number;
   total_opened: number;
   total_replied: number;
-  total_accepted: number;
+  total_meetings: number;
 }
 
 const PIPELINE_STAGES = [
@@ -113,6 +115,9 @@ export default function OutreachPage() {
   const [pipelineSearch, setPipelineSearch] = useState("");
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [filterCampaign, setFilterCampaign] = useState("");
+  const [activeTab, setActiveTab] = useState("pipeline");
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+  const [pipelineLoading, setPipelineLoading] = useState(true);
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
@@ -125,7 +130,12 @@ export default function OutreachPage() {
   });
 
   const [campaignDialogOpen, setCampaignDialogOpen] = useState(false);
+  const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [campaignForm, setCampaignForm] = useState({ name: "", description: "" });
+  const [audienceCampaign, setAudienceCampaign] = useState<Campaign | null>(null);
+  const [audienceTier, setAudienceTier] = useState("all");
+  const [audiencePreview, setAudiencePreview] = useState<Array<{ id: string; full_name: string | null; tier: string; basis_kind?: string }> | null>(null);
+  const [campaignError, setCampaignError] = useState<string | null>(null);
 
   const [perfStats, setPerfStats] = useState<PerfStat[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,16 +144,16 @@ export default function OutreachPage() {
   // Data fetching
   // ---------------------------------------------------------------------------
 
-  const fetchPipeline = useCallback(async () => {
-    try {
-      const qs = filterCampaign ? `?campaign_id=${filterCampaign}` : "";
-      const res = await fetch(`/api/outreach/pipeline${qs}`);
-      const json = await res.json();
-      setStages(json.stages ?? {});
-    } catch {
-      /* ignore */
-    }
-  }, [filterCampaign]);
+  const pipeline = useMemo(() => new PipelineSnapshotLoader<PipelineContact>(
+    () => { setStages({}); setPipelineLoading(true); setPipelineError(null); },
+    ({ stages }) => { setStages(stages); setPipelineLoading(false); setPipelineError(null); },
+    () => { setPipelineLoading(false); setPipelineError("Could not load the pipeline. Try again."); },
+  ), []);
+
+  const selectCampaign = (campaignId: string) => {
+    pipeline.select(campaignId);
+    setFilterCampaign(campaignId);
+  };
 
   const fetchTemplates = useCallback(async () => {
     try {
@@ -166,53 +176,45 @@ export default function OutreachPage() {
   }, []);
 
   useEffect(() => {
-    Promise.all([fetchPipeline(), fetchTemplates(), fetchCampaigns()]).then(
+    pipeline.select("");
+    Promise.all([fetchTemplates(), fetchCampaigns()]).then(
       () => setLoading(false)
     );
-  }, [fetchPipeline, fetchTemplates, fetchCampaigns]);
+    return () => pipeline.dispose();
+  }, [pipeline, fetchTemplates, fetchCampaigns]);
 
-  useEffect(() => {
-    setPerfStats(
-      templates.map((t) => ({
-        template_id: t.id,
-        template_name: t.name,
-        total_sent: 0,
-        total_opened: 0,
-        total_replied: 0,
-        total_accepted: 0,
-      }))
-    );
-  }, [templates]);
+  const fetchPerformance = useCallback(async () => {
+    const res = await fetch("/api/outreach/performance");
+    if (res.ok) setPerfStats((await res.json()).data ?? []);
+  }, []);
+  useEffect(() => { fetchPerformance(); }, [fetchPerformance]);
 
   // ---------------------------------------------------------------------------
   // Handlers
   // ---------------------------------------------------------------------------
 
   const handleMoveContact = async (
-    contactId: string,
-    _outreachStateId: string,
-    newStage: string
+    _contactId: string,
+    outreachStateId: string,
+    cardCampaignId: string | null,
+    newStage: string,
+    eventVersion: number
   ) => {
-    const stageToEvent: Record<string, string> = {
-      contacted: "sent",
-      replied: "replied",
-      meeting_booked: "meeting_booked",
-      won: "accepted",
-      lost: "declined",
-    };
-    const eventType = stageToEvent[newStage];
-    if (!eventType) return;
-
-    await fetch("/api/outreach/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contact_id: contactId,
-        event_type: eventType,
-        campaign_id: filterCampaign || undefined,
-      }),
-    });
-    fetchPipeline();
+    const campaignAtMove = filterCampaign;
+    try {
+      const res = await fetch(`/api/outreach/pipeline/${outreachStateId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage: newStage, campaign_id: campaignAtMove || cardCampaignId, event_version: eventVersion }),
+      });
+      if (!res.ok) throw new Error("Could not move contact.");
+      pipeline.refresh(campaignAtMove);
+    } catch {
+      if (pipeline.isSelected(campaignAtMove)) {
+        setPipelineError("Pipeline changed. Review the latest stage and try again.");
+        pipeline.refresh(campaignAtMove);
+      }
+    }
   };
 
   const openNewTemplate = () => {
@@ -258,14 +260,51 @@ export default function OutreachPage() {
 
   const saveCampaign = async () => {
     if (!campaignForm.name) return;
-    await fetch("/api/outreach/campaigns", {
-      method: "POST",
+    const res = await fetch(editingCampaign ? `/api/outreach/campaigns/${editingCampaign.id}` : "/api/outreach/campaigns", {
+      method: editingCampaign ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(campaignForm),
     });
+    if (!res.ok) { setCampaignError("Could not save campaign."); return; }
     setCampaignDialogOpen(false);
+    setEditingCampaign(null);
     setCampaignForm({ name: "", description: "" });
     fetchCampaigns();
+  };
+
+  const changeCampaignStatus = async (campaign: Campaign, status: string) => {
+    if (status === campaign.status) return;
+    setCampaignError(null);
+    const res = await fetch(`/api/outreach/campaigns/${campaign.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) { setCampaignError("Could not change campaign status."); return; }
+    fetchCampaigns();
+  };
+
+  const previewAudience = async (campaign: Campaign, tier = audienceTier) => {
+    setCampaignError(null);
+    const suffix = tier === "all" ? "" : `&tier=${tier}`;
+    const res = await fetch(`/api/outreach/campaigns/${campaign.id}/populate?limit=100${suffix}`);
+    if (!res.ok) { setCampaignError("Could not preview audience."); return; }
+    setAudiencePreview((await res.json()).data ?? []);
+  };
+
+  const enrollAudience = async () => {
+    if (!audienceCampaign || !audiencePreview?.length) return;
+    const suffix = audienceTier === "all" ? "" : `&tier=${audienceTier}`;
+    const res = await fetch(`/api/outreach/campaigns/${audienceCampaign.id}/populate?limit=100${suffix}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contact_ids: audiencePreview.map(contact => contact.id) }),
+    });
+    if (!res.ok) {
+      setCampaignError("Audience changed or could not be enrolled. Preview again before trying.");
+      setAudiencePreview(null);
+      return;
+    }
+    await Promise.all([fetchCampaigns(), previewAudience(audienceCampaign), Promise.resolve(pipeline.refresh(filterCampaign))]);
   };
 
   const filterContacts = (contacts: PipelineContact[]) => {
@@ -296,7 +335,7 @@ export default function OutreachPage() {
     <div>
       <PageHeader title="Outreach" description="Pipeline, templates, and campaigns" />
 
-      <Tabs defaultValue="pipeline">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
@@ -307,6 +346,25 @@ export default function OutreachPage() {
 
         {/* Pipeline */}
         <TabsContent value="pipeline">
+          {pipelineError && <p role="alert" className="mb-4 text-sm text-destructive">{pipelineError}</p>}
+          {!pipelineLoading && PIPELINE_STAGES.every((stage) => (stages[stage] ?? []).length === 0) && !pipelineError && (
+            <Card className="mb-4">
+              <CardContent className="flex flex-col items-start gap-3 p-6">
+                <p className="text-sm text-muted-foreground">
+                  {filterCampaign ? "No contacts are in this campaign yet." : "Your outreach pipeline is empty. Create a campaign to organize future outreach."}
+                </p>
+                {filterCampaign ? (
+                  <Button size="sm" variant="outline" onClick={() => selectCampaign("")}>
+                    View all campaigns
+                  </Button>
+                ) : (
+                  <Button size="sm" onClick={() => { setActiveTab("campaigns"); setEditingCampaign(null); setCampaignForm({ name: "", description: "" }); setCampaignDialogOpen(true); }}>
+                    Create campaign
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
           <Card className="mb-4">
             <CardHeader>
               <CardTitle className="text-base">Pipeline Funnel</CardTitle>
@@ -332,7 +390,7 @@ export default function OutreachPage() {
             </div>
             <Select
               value={filterCampaign || "all"}
-              onValueChange={(v) => setFilterCampaign(v === "all" ? "" : v)}
+              onValueChange={(v) => selectCampaign(v === "all" ? "" : v)}
             >
               <SelectTrigger className="w-[200px]">
                 <SelectValue placeholder="All campaigns" />
@@ -345,12 +403,14 @@ export default function OutreachPage() {
               </SelectContent>
             </Select>
           </div>
+          {pipelineLoading && <p role="status" className="mb-3 text-sm text-muted-foreground">Loading pipeline...</p>}
           <div className="flex gap-3 overflow-x-auto pb-4">
             {PIPELINE_STAGES.map((stage) => (
               <KanbanColumn
                 key={stage}
                 stage={stage}
-                contacts={filterContacts(stages[stage] ?? [])}
+                contacts={pipelineLoading ? [] : filterContacts(stages[stage] ?? [])}
+                showCampaign={!filterCampaign}
                 onMoveContact={handleMoveContact}
               />
             ))}
@@ -432,7 +492,7 @@ export default function OutreachPage() {
         {/* Campaigns */}
         <TabsContent value="campaigns">
           <div className="mb-4 flex justify-end">
-            <Button size="sm" onClick={() => setCampaignDialogOpen(true)}>
+            <Button size="sm" onClick={() => { setEditingCampaign(null); setCampaignForm({ name: "", description: "" }); setCampaignDialogOpen(true); }}>
               <Plus className="mr-1 h-4 w-4" />
               New Campaign
             </Button>
@@ -444,19 +504,25 @@ export default function OutreachPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Target</TableHead>
-                  <TableHead className="text-right">Sent</TableHead>
-                  <TableHead className="text-right">Responses</TableHead>
-                  <TableHead className="text-right">Rate</TableHead>
+                  <TableHead className="text-right">Contacts sent</TableHead>
+                  <TableHead className="text-right">Contacts replied</TableHead>
                   <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {campaigns.map((c) => (
-                  <CampaignRow key={c.id} campaign={c} onEdit={() => {}} />
+                  <CampaignRow key={c.id} campaign={c} onEdit={(campaign) => {
+                    setEditingCampaign(campaign);
+                    setCampaignForm({ name: campaign.name, description: campaign.description ?? "" });
+                    setCampaignDialogOpen(true);
+                  }} onStatusChange={changeCampaignStatus} onAudience={(campaign) => {
+                    setAudienceCampaign(campaign); setAudienceTier("all"); setAudiencePreview(null);
+                    previewAudience(campaign, "all");
+                  }} />
                 ))}
                 {campaigns.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    <TableCell colSpan={6} className="text-center text-muted-foreground">
                       No campaigns yet.
                     </TableCell>
                   </TableRow>
@@ -467,7 +533,7 @@ export default function OutreachPage() {
           <Dialog open={campaignDialogOpen} onOpenChange={setCampaignDialogOpen}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>New Campaign</DialogTitle>
+                <DialogTitle>{editingCampaign ? "Edit Campaign" : "New Campaign"}</DialogTitle>
                 <DialogDescription>
                   Create a new outreach campaign to organize your contact outreach.
                 </DialogDescription>
@@ -487,10 +553,34 @@ export default function OutreachPage() {
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setCampaignDialogOpen(false)}>Cancel</Button>
-                <Button onClick={saveCampaign}>Create</Button>
+                <Button onClick={saveCampaign}>{editingCampaign ? "Save" : "Create"}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
+          <Dialog open={!!audienceCampaign} onOpenChange={(open) => { if (!open) setAudienceCampaign(null); }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Audience for {audienceCampaign?.name}</DialogTitle>
+                <DialogDescription>Preview eligible contacts before adding them to this campaign. This does not send messages.</DialogDescription>
+              </DialogHeader>
+              <Select value={audienceTier} onValueChange={(tier) => {
+                setAudienceTier(tier); setAudiencePreview(null);
+                if (audienceCampaign) previewAudience(audienceCampaign, tier);
+              }}>
+                <SelectTrigger aria-label="Audience tier"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All scored tiers</SelectItem>
+                  {['gold', 'silver', 'bronze', 'watch'].map(tier => <SelectItem key={tier} value={tier}>{tier}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <p className="text-sm">{audiencePreview ? `${audiencePreview.length} eligible contacts (first 100)` : "Loading preview..."}</p>
+              <div className="max-h-48 overflow-y-auto text-sm">
+                {audiencePreview?.map(contact => <p key={contact.id}>{contact.full_name ?? "Unnamed contact"} · {contact.tier}{contact.basis_kind === "legacy-unverified" && <span className="text-muted-foreground"> · unverified score</span>}</p>)}
+              </div>
+              <DialogFooter><Button disabled={!audiencePreview?.length || audienceCampaign?.status !== 'draft'} onClick={enrollAudience}>Enroll previewed audience</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
+          {campaignError && <p role="alert" className="text-sm text-destructive">{campaignError}</p>}
         </TabsContent>
 
         {/* Sequences */}
@@ -500,34 +590,7 @@ export default function OutreachPage() {
               <CardTitle className="text-base">Outreach Sequences</CardTitle>
             </CardHeader>
             <CardContent>
-              <OutreachSequenceTree
-                data={{
-                  name: "Initial",
-                  children: [
-                    {
-                      name: "Replied",
-                      count: (stages["replied"] ?? []).length,
-                      children: [
-                        { name: "Meeting", count: (stages["meeting_booked"] ?? []).length },
-                      ],
-                    },
-                    {
-                      name: "No Reply",
-                      count: 0,
-                      children: [
-                        {
-                          name: "Follow-up",
-                          count: 0,
-                          children: [
-                            { name: "Replied", count: 0 },
-                            { name: "Close", count: (stages["lost"] ?? []).length },
-                          ],
-                        },
-                      ],
-                    },
-                  ],
-                }}
-              />
+              <p className="text-sm text-muted-foreground">Sequence scheduling and sending are unavailable. Use draft campaigns to organize contacts and the pipeline to track outcomes.</p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -536,47 +599,34 @@ export default function OutreachPage() {
         <TabsContent value="performance">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Template Performance</CardTitle>
+              <CardTitle className="text-base">Recorded events by attached template</CardTitle>
             </CardHeader>
             <CardContent>
+              <p className="mb-3 text-sm text-muted-foreground">Each column counts contacts independently by the template ID on that event. An untagged reply appears under Unattributed events; these counts are not a conversion funnel.</p>
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Template</TableHead>
-                    <TableHead className="text-right">Sent</TableHead>
-                    <TableHead className="text-right">Opened</TableHead>
-                    <TableHead className="text-right">Open %</TableHead>
-                    <TableHead className="text-right">Replied</TableHead>
-                    <TableHead className="text-right">Reply %</TableHead>
-                    <TableHead className="text-right">Meetings</TableHead>
+                    <TableHead className="text-right">Contacts sent</TableHead>
+                    <TableHead className="text-right">Contacts opened</TableHead>
+                    <TableHead className="text-right">Contacts replied</TableHead>
+                    <TableHead className="text-right">Contacts booked</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {perfStats.map((s) => {
-                    const openRate = s.total_sent > 0
-                      ? ((s.total_opened / s.total_sent) * 100).toFixed(1) : "0.0";
-                    const replyRate = s.total_sent > 0
-                      ? ((s.total_replied / s.total_sent) * 100).toFixed(1) : "0.0";
-                    return (
+                  {perfStats.map((s) => (
                       <TableRow key={s.template_id}>
                         <TableCell className="font-medium">{s.template_name}</TableCell>
                         <TableCell className="text-right">{s.total_sent}</TableCell>
                         <TableCell className="text-right">{s.total_opened}</TableCell>
-                        <TableCell className="text-right">
-                          <Badge variant="outline">{openRate}%</Badge>
-                        </TableCell>
                         <TableCell className="text-right">{s.total_replied}</TableCell>
-                        <TableCell className="text-right">
-                          <Badge variant="outline">{replyRate}%</Badge>
-                        </TableCell>
-                        <TableCell className="text-right">{s.total_accepted}</TableCell>
+                        <TableCell className="text-right">{s.total_meetings}</TableCell>
                       </TableRow>
-                    );
-                  })}
+                  ))}
                   {perfStats.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center text-muted-foreground">
-                        No performance data. Create templates and start campaigns.
+                      <TableCell colSpan={5} className="text-center text-muted-foreground">
+                        No recorded delivery events yet.
                       </TableCell>
                     </TableRow>
                   )}

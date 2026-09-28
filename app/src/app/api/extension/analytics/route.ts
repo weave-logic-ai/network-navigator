@@ -10,6 +10,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { RESEARCH_FLAGS } from '@/lib/config/research-flags';
 import { recordEvent, type AnalyticsEventName } from '@/lib/analytics/events';
+import { requireVisibilityPrincipal } from '@/lib/auth/extension-visibility-boundary';
 
 const KNOWN_EVENTS: ReadonlyArray<AnalyticsEventName> = [
   'parse_panel_viewed',
@@ -23,7 +24,20 @@ interface AnalyticsBody {
   properties?: Record<string, unknown>;
 }
 
+export async function GET(request: NextRequest) {
+  // Read-only feature probe: authenticate without spending a POST rate-limit
+  // slot or recording a synthetic analytics event.
+  const denied = await requireVisibilityPrincipal(request, false, false);
+  if (denied) return denied;
+  if (!RESEARCH_FLAGS.parserTelemetry) {
+    return NextResponse.json({ enabled: false }, { status: 404 });
+  }
+  return NextResponse.json({ enabled: true }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
 export async function POST(request: NextRequest) {
+  const denied = await requireVisibilityPrincipal(request, true);
+  if (denied) return denied;
   if (!RESEARCH_FLAGS.parserTelemetry) {
     return NextResponse.json(
       { error: 'RESEARCH_PARSER_TELEMETRY is off' },

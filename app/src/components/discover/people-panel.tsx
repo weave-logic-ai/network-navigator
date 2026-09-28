@@ -24,6 +24,18 @@ interface Contact {
 
 interface Pagination { page: number; limit: number; total: number; totalPages: number }
 
+interface BulkPreview {
+  contactId: string;
+  totalCostCents: number;
+  partial?: boolean;
+  delta: Array<{ field: string; label: string; oldValue: string | null; newValue: string | null; selected: boolean }>;
+}
+
+export function remainingBulkContactIds(ids: string[], reviewed: BulkPreview[]): string[] {
+  const completed = new Set(reviewed.filter(item => !item.partial).map(item => item.contactId));
+  return ids.filter(id => !completed.has(id));
+}
+
 interface PeoplePanelProps {
   selectedNiche: string | null;
   selectedIcp: string | null;
@@ -69,7 +81,43 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
   const [enriching, setEnriching] = useState<Set<string>>(new Set());
   const [bulkScoring, setBulkScoring] = useState(false);
   const [bulkEnriching, setBulkEnriching] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState<BulkPreview[]>([]);
+  const [previewStop, setPreviewStop] = useState<string | null>(null);
+  const [pendingQuote, setPendingQuote] = useState<{ ids: string[]; quote: string } | null>(null);
+  const [resumeIds, setResumeIds] = useState<string[]>([]);
+  const [resumeBlocked, setResumeBlocked] = useState(false);
+  const [applyingPreview, setApplyingPreview] = useState(false);
   const [expanding, setExpanding] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('discover-enrichment-pending-quote');
+      if (saved) {
+        const parsed = JSON.parse(saved) as { ids: string[]; quote: string };
+        if (Array.isArray(parsed.ids) && typeof parsed.quote === 'string') {
+          setPendingQuote(parsed);
+          setSelected(new Set(parsed.ids));
+        }
+      }
+    } catch { /* invalid local recovery state */ }
+    try {
+      const saved = sessionStorage.getItem('discover-enrichment-resume');
+      if (saved) {
+        const parsed = JSON.parse(saved) as { ids: string[]; blocked: boolean };
+        if (Array.isArray(parsed.ids) && parsed.ids.every(id => typeof id === 'string')) {
+          setResumeIds(parsed.ids); setResumeBlocked(parsed.blocked === true);
+        }
+      }
+    } catch { /* invalid local recovery state */ }
+  }, []);
+  useEffect(() => {
+    if (pendingQuote) sessionStorage.setItem('discover-enrichment-pending-quote', JSON.stringify(pendingQuote));
+    else sessionStorage.removeItem('discover-enrichment-pending-quote');
+  }, [pendingQuote]);
+  useEffect(() => {
+    if (resumeIds.length) sessionStorage.setItem('discover-enrichment-resume', JSON.stringify({ ids: resumeIds, blocked: resumeBlocked }));
+    else sessionStorage.removeItem('discover-enrichment-resume');
+  }, [resumeIds, resumeBlocked]);
 
   const fetchContacts = useCallback(async () => {
     setLoading(true);
@@ -142,20 +190,95 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
   }
 
   async function handleBulkEnrich() {
-    const ids = [...selected];
+    const ids = pendingQuote?.ids || (resumeIds.length ? resumeIds : [...selected]);
     if (ids.length === 0) return;
-    if (!confirm(`Enrich ${ids.length} contact${ids.length !== 1 ? "s" : ""}? This may incur API costs.`)) return;
     setBulkEnriching(true);
-    setEnriching(new Set(ids));
     try {
-      for (const id of ids) {
-        await fetch("/api/enrichment/enrich", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contactId: id }),
+      let confirmed = pendingQuote;
+      if (!confirmed) {
+        const estimateResponse = await fetch('/api/enrichment/estimate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactIds: ids }),
         });
+        if (!estimateResponse.ok) throw new Error('Could not estimate enrichment cost');
+        const { data: estimate } = await estimateResponse.json() as { data: {
+        totalCostCents: number; budgetRemaining: number; withinBudget: boolean;
+        quote: string;
+        } };
+        if (!estimate.withinBudget) {
+          alert(`Insufficient enrichment budget. Worst-case expected spend: $${(estimate.totalCostCents / 100).toFixed(2)}; remaining: $${(estimate.budgetRemaining / 100).toFixed(2)}.`);
+          return;
+        }
+        if (!confirm(`Enrich ${ids.length} contacts? Worst-case expected spend: $${(estimate.totalCostCents / 100).toFixed(2)}. Remaining budget: $${(estimate.budgetRemaining / 100).toFixed(2)}. A preview may cost money even if you do not apply the data.`)) return;
+        confirmed = { ids, quote: estimate.quote };
+        sessionStorage.setItem('discover-enrichment-pending-quote', JSON.stringify(confirmed));
+        setPendingQuote(confirmed);
       }
+      setEnriching(new Set(ids));
+      const response = await fetch("/api/enrichment/enrich", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactIds: ids, quote: confirmed.quote }),
+      });
+      if (!response.ok) throw new Error('Enrichment result is not ready. Use Recover paid result with this same quote; do not start a new paid preview.');
+      const outcome = await response.json();
+      if (outcome.running) {
+        setPreviewStop(outcome.message || 'Provider request is still running. Recover this same quote later.');
+        return;
+      }
+      if (outcome.noCharge) {
+        setPendingQuote(null);
+        setResumeIds(ids);
+        setResumeBlocked(false);
+        setPreviewStop('No provider call was made. Review a fresh estimate to continue.');
+        return;
+      }
+      setBulkPreview(outcome.data || []);
+      setPreviewStop(outcome.partial ? `${outcome.stopReason}; spent $${((outcome.totalCostCents || 0) / 100).toFixed(2)}, reserved exposure $${((outcome.reservedBudgetCents || 0) / 100).toFixed(2)}` : null);
+      const remaining = outcome.partial ? remainingBulkContactIds(ids, outcome.data || []) : [];
+      setResumeIds(remaining);
+      setResumeBlocked(!!outcome.reconciliationRequired);
+      if (!outcome.data?.length) setPendingQuote(null);
       await fetchContacts();
-    } catch { /* silent */ } finally { setBulkEnriching(false); setEnriching(new Set()); }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Enrichment failed');
+    } finally { setBulkEnriching(false); setEnriching(new Set()); }
+  }
+
+  async function applyBulkPreview() {
+    setApplyingPreview(true);
+    try {
+      for (const item of bulkPreview) {
+        const fields = item.delta.filter(field => field.selected && field.newValue !== null)
+          .map(field => ({ field: field.field, value: field.newValue! }));
+        if (fields.length) {
+          const response = await fetch('/api/enrichment/apply', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+              contactId: item.contactId, fields, quote: pendingQuote?.quote,
+            }) });
+          if (!response.ok) throw new Error(`Could not apply reviewed fields for ${item.contactId}`);
+        }
+        setBulkPreview(previous => previous.filter(entry => entry.contactId !== item.contactId));
+        setSelected(previous => new Set([...previous].filter(id => id !== item.contactId)));
+      }
+      setPendingQuote(null);
+      setPreviewStop(null);
+      setSelected(new Set(resumeIds));
+      await fetchContacts();
+    } catch (error) { alert(error instanceof Error ? error.message : 'Could not apply preview'); }
+    finally { setApplyingPreview(false); }
+  }
+
+  async function checkChargeReconciliation() {
+    try {
+      const response = await fetch('/api/enrichment/reconcile');
+      if (!response.ok) throw new Error('Could not check charge reconciliation');
+      const payload = await response.json() as { data: Array<{ contactId: string }> };
+      if (payload.data.some(item => resumeIds.includes(item.contactId))) {
+        alert('A charge for a remaining contact still needs invoice reconciliation.');
+        return;
+      }
+      setResumeBlocked(false);
+    } catch { alert('Could not check charge reconciliation'); }
   }
 
   async function handleExpandNetwork() {
@@ -220,22 +343,53 @@ export function PeoplePanel({ selectedNiche, selectedIcp, selectedOfferings }: P
         </div>
 
         {/* Bulk actions */}
-        {selCount > 0 && (
+        {(selCount > 0 || pendingQuote || resumeIds.length > 0) && (
           <div className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-1.5">
-            <span className="text-xs font-medium text-muted-foreground">{selCount} selected</span>
+            <span className="text-xs font-medium text-muted-foreground">{selCount} selected{resumeIds.length > 0 ? ` · ${resumeIds.length} awaiting resume` : ''}</span>
             <div className="flex-1" />
             <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleBulkScore} disabled={bulkScoring}>
               {bulkScoring ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Sparkles className="h-3 w-3 mr-1" />}
               Score
             </Button>
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleBulkEnrich} disabled={bulkEnriching}>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleBulkEnrich} disabled={bulkEnriching || bulkPreview.length > 0}>
               {bulkEnriching ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Sparkles className="h-3 w-3 mr-1" />}
-              Enrich
+              {pendingQuote ? 'Recover paid result' : resumeIds.length ? 'Quote remaining contacts' : 'Enrich'}
             </Button>
             <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleExpandNetwork} disabled={expanding}>
               {expanding ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Users className="h-3 w-3 mr-1" />}
               Expand Network
             </Button>
+          </div>
+        )}
+
+        {previewStop && bulkPreview.length === 0 && <p role="status" className="text-xs rounded-md border p-2">{previewStop}</p>}
+
+        {resumeIds.length > 0 && !pendingQuote && <p role="status" className="text-xs rounded-md border p-2">
+          {resumeBlocked ? 'Reconcile the unknown charge on the Enrichment page before quoting remaining contacts.'
+            : 'The partial batch is saved. Quote the remaining contacts to resume; any paid request requires a new confirmation.'}
+          {resumeBlocked && <Link href="/enrichment" className="ml-1 underline">Open charge reconciliation</Link>}
+          {resumeBlocked && <button type="button" className="ml-2 underline" onClick={checkChargeReconciliation}>Check reconciliation</button>}
+        </p>}
+
+        {bulkPreview.length > 0 && (
+          <div className="rounded-md border p-3 text-xs space-y-2" role="region" aria-label="Paid enrichment review">
+            <p className="font-medium">Review paid enrichment before applying or clearing selection</p>
+            {previewStop && <p role="alert">Stopped: {previewStop}. {resumeBlocked ? 'Reconcile the unknown charge before another paid preview.' : 'Review saved fields, then quote the remaining contacts.'}</p>}
+            {bulkPreview.map(item => (
+              <div key={item.contactId} className="space-y-1">
+                <p>{nameOf(contacts.find(c => c.id === item.contactId) || { id: item.contactId } as Contact)} — spent ${(item.totalCostCents / 100).toFixed(2)}</p>
+                {item.delta.length === 0 && <p className="text-muted-foreground">No fields returned.</p>}
+                {item.delta.map(field => (
+                  <label key={`${item.contactId}-${field.field}`} className="flex gap-2 items-center">
+                    <input type="checkbox" checked={field.selected} onChange={() => setBulkPreview(previous => previous.map(entry =>
+                      entry.contactId === item.contactId ? { ...entry, delta: entry.delta.map(value =>
+                        value.field === field.field ? { ...value, selected: !value.selected } : value) } : entry))} />
+                    {field.label}: {field.oldValue || 'empty'} → {field.newValue}
+                  </label>
+                ))}
+              </div>
+            ))}
+            <Button size="sm" onClick={applyBulkPreview} disabled={applyingPreview}>{applyingPreview ? 'Applying…' : 'Apply reviewed fields and clear selection'}</Button>
           </div>
         )}
 

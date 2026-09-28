@@ -9,11 +9,15 @@
     "architecture/...",
     "claude-agent/...",
     "browser-extension/...",
+    "---Research Tools---",
+    "research-tools/...",
     "---Scoring & Models---",
     "scoring/...",
     "---Integrations---",
     "integrations/...",
     "---API Reference---",
-    "api-reference/..."
+    "api-reference/...",
+    "---Operations---",
+    "operations/..."
   ]
 }

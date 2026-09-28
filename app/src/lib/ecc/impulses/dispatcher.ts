@@ -10,6 +10,30 @@ const HANDLER_TIMEOUT_MS = 5000;
 const MAX_FAILURES_BEFORE_DISABLE = 3;
 
 /**
+ * Race a promise against a timeout, without leaking the timer.
+ *
+ * A bare `Promise.race([promise, new Promise((_, reject) => setTimeout(...))])`
+ * never clears the timeout's handle once `promise` wins the race — the timer
+ * stays scheduled for the full `ms` regardless of outcome. In a long-lived
+ * server that's an easy-to-miss resource leak (one live timer per dispatched
+ * handler); in tests it surfaces as Jest's "did not exit one second after
+ * the test run has completed" / "worker process has failed to exit
+ * gracefully" warnings, since every mocked handler resolves instantly and
+ * leaves its timeout pending for up to HANDLER_TIMEOUT_MS afterward.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId!);
+  }
+}
+
+/**
  * Dispatch an impulse to all matching handlers.
  * Each handler is executed independently with error isolation.
  */
@@ -23,6 +47,7 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
     throw new Error(`Impulse not found: ${impulseId}`);
   }
   const impulse = mapImpulse(impulseResult.rows[0]);
+  const durableScoringImpulse = impulseResult.rows[0].score_revision != null;
 
   // Find matching handlers
   const handlersResult = await query<Record<string, unknown>>(
@@ -33,27 +58,63 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
   );
 
   const handlers = handlersResult.rows.map(mapHandler);
+
+  // An impulse with no registered handler is dispatched to nobody. That is
+  // indistinguishable from success in the return value (handlersExecuted: 0),
+  // which is exactly how ECC_IMPULSES=true silently produced zero tasks for
+  // as long as impulse_handlers went unseeded. Say so out loud instead.
+  if (handlers.length === 0) {
+    console.warn(
+      `[ecc/impulses] No enabled handler registered for impulse_type ` +
+        `"${impulse.impulseType}" (tenant ${impulse.tenantId}, impulse ${impulseId}). ` +
+        `The impulse was recorded but nothing acted on it. Register a row in ` +
+        `impulse_handlers for this tenant and impulse type — see ` +
+        `data/db/init/048-seed-impulse-handlers.sql.`
+    );
+    if (durableScoringImpulse) {
+      return { impulseId, handlersExecuted: 0, results: [{
+        handlerId: 'unregistered', status: 'failed',
+        result: { error: 'no_enabled_handler' }, durationMs: 0,
+      }] };
+    }
+  }
+
   const results: HandlerExecutionResult[] = [];
 
   for (const handler of handlers) {
     const start = Date.now();
     try {
-      const result = await Promise.race([
+      // A committed scoring impulse can be retried after any later handler
+      // fails or the process restarts. Successful acks are the durable per-
+      // handler completion ledger; never repeat their effects.
+      if (durableScoringImpulse) {
+        const completed = await query(
+          `SELECT 1 FROM impulse_acks
+           WHERE impulse_id = $1 AND handler_id = $2 AND status = 'success' LIMIT 1`,
+          [impulseId, handler.id]
+        );
+        if (completed.rows.length > 0) {
+          results.push({ handlerId: handler.id, status: 'skipped',
+            result: { reason: 'already_completed' }, durationMs: 0 });
+          continue;
+        }
+      }
+      const result = await withTimeout(
         executeHandler(handler, impulse),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Handler timeout')), HANDLER_TIMEOUT_MS)
-        ),
-      ]);
+        HANDLER_TIMEOUT_MS,
+        'Handler timeout'
+      );
+      if (handler.handlerType === 'webhook' && result.dispatched !== true) {
+        throw new Error(`Webhook delivery failed: ${String(result.reason ?? 'unknown')}`);
+      }
 
       const durationMs = Date.now() - start;
-      results.push({ handlerId: handler.id, status: 'success', result, durationMs });
-
-      // Record acknowledgment
       await query(
         `INSERT INTO impulse_acks (impulse_id, handler_id, status, result)
          VALUES ($1, $2, 'success', $3)`,
         [impulseId, handler.id, JSON.stringify(result)]
       );
+      results.push({ handlerId: handler.id, status: 'success', result, durationMs });
     } catch (error) {
       const durationMs = Date.now() - start;
       const errorResult = { error: error instanceof Error ? error.message : 'Unknown error' };
@@ -67,7 +128,9 @@ export async function dispatchImpulse(impulseId: string): Promise<DispatchResult
       );
 
       // Check if handler should be auto-disabled (dead letter)
-      await checkDeadLetter(handler.id);
+      // A scored outbox row must remain retryable. Auto-disabling its handler
+      // would make the next drain falsely treat the impulse as dispatched.
+      if (!durableScoringImpulse) await checkDeadLetter(handler.id);
     }
   }
 
@@ -86,7 +149,7 @@ async function executeHandler(
     case 'notification':
       return executeNotification(impulse, handler.config);
     case 'webhook':
-      return executeWebhook(impulse, handler.config);
+      return executeWebhook(impulse, handler.config, `${impulse.id}:${handler.id}`);
     default:
       return { skipped: true, reason: `Unknown handler type: ${handler.handlerType}` };
   }

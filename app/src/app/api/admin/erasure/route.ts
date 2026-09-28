@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query, transaction } from '@/lib/db/client';
 import { PoolClient } from 'pg';
 import * as actionLog from '@/lib/db/queries/action-log';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 interface ErasureBody {
   contactId: string;
@@ -12,6 +13,8 @@ interface ErasureBody {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request, true);
+  if (denied) return denied;
   try {
     const body = (await request.json()) as ErasureBody;
 
@@ -68,6 +71,10 @@ export async function POST(request: NextRequest) {
     // Perform cascading erasure within a transaction
     await transaction(async (client: PoolClient) => {
       const contactId = body.contactId;
+
+      // Serialize with Knowledge Graph rebuilds. Otherwise a rebuild can read
+      // this contact before erasure and save its snapshot after we commit.
+      await client.query('SELECT pg_advisory_xact_lock(1733164046, 1)');
 
       // 1. Delete action_log entries for this contact (except the erasure record we just created)
       await client.query(
@@ -164,6 +171,14 @@ export async function POST(request: NextRequest) {
       // 16. Delete education
       await client.query(
         'DELETE FROM education WHERE contact_id = $1',
+        [contactId]
+      );
+
+      // Snapshot entity JSON contains contact IDs but has no contact FK.
+      // Invalidate affected snapshots within the same erasure transaction.
+      await client.query(
+        `DELETE FROM knowledge_snapshots
+         WHERE entities @> jsonb_build_array(jsonb_build_object('contactIds', jsonb_build_array($1::text)))`,
         [contactId]
       );
 

@@ -1,11 +1,11 @@
 ---
 title: Claude Agent
-description: A portable Claude Code skill that turns your LinkedIn connections into scored, tiered, persona-classified network intelligence.
+description: A portable, API-first Claude Code skill that turns your LinkedIn connections into scored, tiered, persona-classified network intelligence.
 ---
 
 # Claude Agent
 
-The Claude Agent is a portable [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that provides LinkedIn network intelligence through two slash commands. It searches your 1st-degree connections, enriches profiles, builds a knowledge graph, scores contacts across three layers, and generates actionable analysis -- all from conversation.
+The Claude Agent is a portable [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that provides LinkedIn network intelligence through two slash commands. It is **API-first**: every operation goes through the NetworkNav REST API at `localhost:3750`. There is no Playwright, no local JSON data store, and no browser automation inside the agent -- LinkedIn capture happens through the browser extension as you browse.
 
 ## Three Subsystems
 
@@ -15,53 +15,44 @@ NetworkNav is built from three cooperating subsystems, each with a distinct role
 +------------------+        +------------------+        +------------------+
 |   Web App        |        |   Claude Agent   |        | Browser Extension|
 |   (app/)         |<------>|   (agent/)       |<------>|   (browser/)     |
-|                  |        |                  |        |                  |
-| Next.js dashboard|        | Claude Code skill|        | Chrome MV3       |
-| PostgreSQL + RVF |        | Playwright + CLI |        | Page capture     |
-| Scoring UI       |        | Scoring engine   |        | Task display     |
-| Outreach mgmt    |        | 12 analysis modes|        | Outreach overlay |
-| REST API         |        | Semantic search  |        | Sidebar panel    |
+|                  |  REST  |                  |  REST  |                  |
+| Next.js dashboard|  API   | Claude Code skill|  API   | Chrome MV3       |
+| PostgreSQL + RVF |        | 4 REST scripts   |        | Page capture     |
+| Scoring engine   |        | No local state   |        | Task display     |
+| Outreach mgmt    |        | No browser auto  |        | Auto-paginate    |
+| REST API         |        |                  |        | search results   |
 +------------------+        +------------------+        +------------------+
 ```
 
 | Subsystem | Role | Data Flow |
 |-----------|------|-----------|
-| **Web App** | Web UI and persistent storage. Dashboard, contacts table, scoring visualization, enrichment management, outreach pipeline, REST API. | Stores all contacts in PostgreSQL. Serves the UI. Receives captured data from the extension. |
-| **Claude Agent** | CLI intelligence layer. Active LinkedIn search via Playwright, 3-layer scoring engine, 12 analysis modes, semantic vector search, ICP configuration, report generation. | Reads/writes local JSON files. Pushes scored data to the app via API. Operates independently for offline analysis. |
-| **Browser Extension** | Passive data capture. Extracts profile data from LinkedIn pages you visit, displays tasks, provides outreach templates inline. | Sends captured page data to the app API. Displays tasks and outreach context from the app. |
+| **Web App** | Web UI and persistent storage. Dashboard, contacts table, scoring engine, graph analysis, enrichment management, outreach pipeline, REST API. | Owns all data in PostgreSQL. Serves the dashboard UI. Receives captured data from the extension. |
+| **Claude Agent** | REST client. Configuration wizard, pipeline orchestration, and read-only analysis, all via HTTP calls to the app. | Holds no local state. Every command is a `GET`/`POST`/`PUT` against the app's API. |
+| **Browser Extension** | Active data capture. Extracts profile data from LinkedIn pages you visit, displays tasks, can auto-paginate search results. | Sends captured page data to the app API. Displays tasks and context surfaced by the app. |
 
-The agent operates independently of the app and extension -- it maintains its own local data store and can run entirely offline. When the app is available, scored contacts and analysis results sync to PostgreSQL for visualization in the dashboard.
+The agent has no independent existence apart from the app -- it cannot run offline, and there is nothing for it to do if the app isn't running. All scoring, storage, and analysis logic lives server-side.
 
-## Five-Phase Workflow
+## Two Slash Commands
 
-```
-Phase 0: CONFIGURE  -- Define ICP profiles, scoring weights, niche definitions
-Phase 1: PULL       -- Search LinkedIn, enrich profiles, cache locally
-Phase 2: SCORE      -- Build knowledge graph, run 3-layer scoring engine, vectorize
-Phase 3: ANALYZE    -- 12 analysis modes (hubs, prospects, referrals, semantic...)
-Phase 4: REPORT     -- Interactive HTML dashboard with 3D graph and charts
-```
+| Command | Purpose |
+|---------|---------|
+| `/linkedin-prospector` | Configure ICP profiles, niches, and offerings; validate and list current configuration |
+| `/network-intel` | Score contacts, run analysis, search, and surface recommended next actions |
 
-Two slash commands wrap these phases:
+## Scoring Engine
 
-| Command | Phases | Purpose |
-|---------|--------|---------|
-| `/linkedin-prospector` | 0 and 1 | Configure ICP profiles, search LinkedIn, enrich profiles, manage the contact database |
-| `/network-intel` | 2, 3, and 4 | Build the graph, score contacts, run analysis, generate reports, expand the network |
+Scoring runs entirely in the app, backed by PostgreSQL:
 
-## Three-Layer Scoring Engine
+| Phase | What It Measures | Key Outputs |
+|-------|--------------------|-------------|
+| **Phase 1: Composite Score** | Nine weighted dimensions -- ICP fit, network hub, relationship strength, signal boost, skills relevance, network proximity, behavioral, content relevance, graph centrality | Composite score, Tier (gold/silver/bronze/watch), Persona |
+| **Phase 2: Referral Score** | Referral role, client overlap, network reach, amplification power, relationship warmth, buyer inversion | Referral likelihood, Referral tier, Referral persona (e.g. white-label-partner, warm-introducer, co-seller, amplifier) |
 
-The agent scores every contact across three independent layers that build on each other sequentially:
+See [Scoring Pipeline](/docs/claude-agent/scoring-pipeline) for the full dimension breakdown and weight defaults.
 
-| Layer | What It Measures | Key Outputs |
-|-------|-----------------|-------------|
-| **Layer 1: ICP + Gold Score** | Role fit, industry match, buying signals, network centrality, relationship strength | Gold Score, Tier (gold/silver/bronze/watch), ICP Persona (buyer/advisor/hub/peer) |
-| **Layer 2: Behavioral** | Connection power, recency, about-section signals, headline patterns, super-connector traits, amplification potential | Behavioral Score, Behavioral Persona (super-connector/content-creator/silent-influencer/rising-connector) |
-| **Layer 3: Referral** | Referral role, client overlap, network reach, amplification power, relationship warmth, buyer inversion | Referral Likelihood, Referral Tier, Referral Persona (warm-introducer/white-label-partner/co-seller/amplifier) |
+## Semantic and Hybrid Search
 
-## Semantic Search with ruvector
-
-The agent integrates [ruvector](https://github.com/ruvnet/ruvector) as a core dependency for semantic vector search. Every contact's profile text is converted into a 384-dimensional embedding using the all-MiniLM-L6-v2 ONNX model and stored in an HNSW-indexed vector store. This enables finding contacts by meaning rather than exact keyword matches.
+The app integrates the [ruvector](https://github.com/ruvnet/ruvector) PostgreSQL extension for vector search. Contact profile text is embedded and indexed with HNSW, and `GET /api/contacts/hybrid-search` combines keyword (trigram) and vector similarity ranking, with an automatic fallback to keyword-only search if the vector extension is unavailable.
 
 See [Semantic Search](/docs/claude-agent/semantic-search) for details.
 
@@ -69,15 +60,15 @@ See [Semantic Search](/docs/claude-agent/semantic-search) for details.
 
 <Cards>
   <Card title="Getting Started" href="/docs/claude-agent/getting-started">
-    Install prerequisites, configure your first ICP, and run your first search.
+    Start the app, install the extension, configure your first ICP, and score your first contacts.
   </Card>
   <Card title="Commands Reference" href="/docs/claude-agent/commands">
-    Full reference for /linkedin-prospector and /network-intel slash commands.
+    Full reference for the /linkedin-prospector and /network-intel slash commands.
   </Card>
   <Card title="Scoring Pipeline" href="/docs/claude-agent/scoring-pipeline">
-    Deep dive into the 3-layer scoring engine and pipeline orchestration.
+    Deep dive into the composite and referral scoring dimensions.
   </Card>
   <Card title="Analysis Modes" href="/docs/claude-agent/analysis-modes">
-    All 12 analysis modes with examples and output descriptions.
+    All eight analysis modes with examples and output descriptions.
   </Card>
 </Cards>

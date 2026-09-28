@@ -38,16 +38,19 @@ If you do not already have a LinkedIn export:
 git clone <repository-url> networknav
 cd networknav
 cp .env.example .env
+openssl rand -hex 32
 ```
 
 Open `.env` in your editor and set the required variables:
 
 ```bash title=".env"
 POSTGRES_PASSWORD=your-secure-password-here
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+LOCAL_OPERATOR_SECRET=<paste the 64-character output from openssl here>
+# ANTHROPIC_API_KEY is optional for AI features.
 ```
 
-These two variables are the minimum needed to get started. Enrichment provider keys (PDL, Apollo, Lusha) are optional and can be added later.
+Keep `.env` out of Git. The database password and operator secret are required;
+enrichment provider and Anthropic keys are optional.
 
 ### Start the services
 
@@ -76,6 +79,8 @@ If the app container is not yet healthy, wait 30 seconds and try again. The data
 ### Open the dashboard
 
 Navigate to [http://localhost:3750](http://localhost:3750) in your browser.
+Open [http://localhost:3750/operator/unlock](http://localhost:3750/operator/unlock)
+and enter the operator secret from `.env` to unlock the local dashboard.
 
 <Callout>
 Screenshot: Dashboard before any data is imported — empty state with import prompt.
@@ -90,13 +95,6 @@ Screenshot: Dashboard before any data is imported — empty state with import pr
 <Callout>
 Screenshot: Import page showing upload progress and parsed contact count.
 </Callout>
-
-You can also import via the API:
-
-```bash title="Terminal"
-curl -X POST http://localhost:3750/api/import/csv \
-  -F "file=@/path/to/Connections.csv"
-```
 
 ### Watch auto-scoring classify your contacts
 
@@ -124,8 +122,10 @@ The browser extension lets you capture LinkedIn profile data and manage outreach
 1. Open Chrome and go to `chrome://extensions`
 2. Enable **Developer mode** (toggle in the top right)
 3. Click **Load unpacked**
-4. Select the `browser/` directory from the project root
-5. Pin the NetworkNav extension icon in your toolbar
+4. Build the extension with `cd browser && npm install && npm run build`, then select the `browser/` directory from the project root
+5. Copy the 32-letter extension ID shown on `chrome://extensions`. Set `EXTENSION_ALLOWED_ORIGINS=chrome-extension://<id>` in the root `.env` using that exact ID; wildcards are not accepted
+6. From the project root, run `docker compose up -d --force-recreate app` so the app receives the new origin. If the ID changes after reinstalling, repeat this step
+7. Pin the extension icon. In the unlocked dashboard's **Extension** page, click **Generate New Token**, copy the full token shown once, and paste it into the extension popup to register. A displayed prefix cannot authenticate; after revocation or loss, generate and register a replacement
 
 </Steps>
 

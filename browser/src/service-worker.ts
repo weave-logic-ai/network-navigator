@@ -10,8 +10,6 @@ import { AppClient } from './shared/app-client';
 import {
   getStorage,
   setStorage,
-  enqueueCapturePayload,
-  dequeueCapturePayload,
   getCaptureQueueDepth,
   incrementDailyCaptureCount,
   getDailyCaptureCount,
@@ -29,10 +27,14 @@ import {
 } from './shared/constants';
 import { logger } from './utils/logger';
 import {
+  enqueueSnippet,
   flushSnippetQueue,
   getSnippetQueueDepth,
+  retrySnippet,
+  removeSnippetFromQueue,
   SNIPPET_QUEUE_FLUSH_ALARM,
   SNIPPET_QUEUE_FLUSH_INTERVAL_MIN,
+  type SnippetDestination,
 } from './shared/snippet-queue';
 import { syncApprovedOriginsFromChrome } from './shared/approved-origins';
 
@@ -42,6 +44,36 @@ import { syncApprovedOriginsFromChrome } from './shared/approved-origins';
 
 const RETRY_QUEUE_ALARM = 'retry-queue';
 const MAX_RETRIES = 3;
+const CAPTURE_ACK_KEY = 'captureReplayAcknowledgements';
+type CaptureOutcome = { status: 'submitted' | 'queued' | 'failed' | 'limit'; message?: string };
+const capturesInFlight = new Set<string>();
+const capturesAcknowledged = new Set<string>();
+let captureFlushInFlight = false;
+let snippetFlushPromise: Promise<void> | null = null;
+let captureQueueMutation: Promise<unknown> = Promise.resolve();
+
+function mutateCaptureQueue<T>(operation: () => Promise<T>): Promise<T> {
+  const result = captureQueueMutation.then(operation, operation);
+  captureQueueMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function getCaptureAcknowledgements(): Promise<string[]> {
+  const stored = await chrome.storage.local.get(CAPTURE_ACK_KEY);
+  return Array.isArray(stored[CAPTURE_ACK_KEY]) ? stored[CAPTURE_ACK_KEY] as string[] : [];
+}
+
+async function rememberAcknowledgedCapture(id: string): Promise<void> {
+  capturesAcknowledged.add(id);
+  const ids = await getCaptureAcknowledgements();
+  await chrome.storage.local.set({ [CAPTURE_ACK_KEY]: Array.from(new Set([...ids, id])) });
+}
+
+async function forgetAcknowledgedCapture(id: string): Promise<void> {
+  capturesAcknowledged.delete(id);
+  const ids = await getCaptureAcknowledgements();
+  await chrome.storage.local.set({ [CAPTURE_ACK_KEY]: ids.filter((entry) => entry !== id) });
+}
 
 // ============================================================
 // App Client (singleton)
@@ -110,7 +142,7 @@ async function checkCaptureRateLimit(): Promise<{ allowed: boolean; remaining: n
 async function processCapture(
   payload: CapturePayload,
   sourceTabId?: number,
-): Promise<void> {
+): Promise<CaptureOutcome> {
   // Phase 6: Check rate limit before processing
   const rateCheck = await checkCaptureRateLimit();
   if (!rateCheck.allowed) {
@@ -126,49 +158,79 @@ async function processCapture(
       // Notifications API may not be available
     }
     await updateBadge();
-    return;
+    return { status: 'limit', message: 'Daily capture limit reached' };
   }
 
-  const client = await getAppClient();
+  if (capturesInFlight.has(payload.captureId)) {
+    return { status: 'failed', message: 'Capture already in progress' };
+  }
+  capturesInFlight.add(payload.captureId);
 
   try {
-    const result = await client.submitCapture(payload);
-    logger.info(`Capture submitted: ${result.captureId}, ${result.storedBytes} bytes`);
-    await incrementDailyCaptureCount();
-    await incrementDailyCaptureTracking();
-
-    // Refresh tasks -- server auto-completes matching tasks on capture and
-    // creates a follow-up task for the next search page (up to MAX_SEARCH_PAGES).
-    try {
-      const tasksData = await client.fetchTasks('pending', 50);
-      const allTasks = tasksData.goals.flatMap((g) => g.tasks);
-      await setStorage('pendingTasks', allTasks);
-    } catch {
-      // Non-critical
-    }
-
-    await updateBadge();
-
-    // Task #11: browser-side auto-pagination click-through
-    if (sourceTabId !== undefined) {
-      await maybeAutoPaginate(payload, sourceTabId);
+    if ((await getStorage('captureQueue')).some((item) => item.captureId === payload.captureId)) {
+      return { status: 'queued', message: 'Capture is already queued locally' };
     }
   } catch (error) {
-    logger.warn(`Capture failed, queuing: ${(error as Error).message}`);
-    await enqueueCapturePayload(payload);
-    // Queue for retry (Phase 6)
-    try {
-      await enqueueRetry({
-        method: 'POST',
-        path: '/api/extension/capture',
-        body: payload,
-        maxRetries: MAX_RETRIES,
-      });
-    } catch {
-      // Non-critical -- already queued via enqueueCapturePayload
-    }
-    await updateBadge();
+    return { status: 'failed', message: `Cannot read capture queue: ${(error as Error).message}` };
+  } finally {
+    capturesInFlight.delete(payload.captureId);
   }
+  capturesInFlight.add(payload.captureId);
+
+  let client: AppClient;
+  try {
+    client = await getAppClient();
+    await client.submitCapture(payload);
+  } catch (error) {
+    const message = (error as Error).message;
+    const httpStatus = Number(/^API error (\d{3})\b/.exec(message)?.[1]);
+    if (message === 'No extension token configured' || (httpStatus >= 400 && httpStatus < 500 && httpStatus !== 429)) {
+      capturesInFlight.delete(payload.captureId);
+      return { status: 'failed', message };
+    }
+    logger.warn(`Capture failed, queuing: ${message}`);
+    try {
+      const admitted = await mutateCaptureQueue(async () => {
+        const queue = await getStorage('captureQueue');
+        const { maxQueueSize } = await getStorage('settings');
+        if (queue.some((item) => item.captureId === payload.captureId)) return true;
+        if (queue.length >= maxQueueSize) return false;
+        await setStorage('captureQueue', [...queue, payload]);
+        return true;
+      });
+      if (!admitted) return { status: 'failed', message: 'Capture queue is full' };
+      await updateBadge();
+      return { status: 'queued', message };
+    } catch (queueError) {
+      return { status: 'failed', message: `Could not save capture locally: ${(queueError as Error).message}` };
+    } finally {
+      capturesInFlight.delete(payload.captureId);
+    }
+  }
+  try {
+    // Local bookkeeping must never turn a successful POST back into a retry.
+    try {
+      await recordSubmittedCapture(client);
+    } catch (error) {
+      logger.warn(`Capture submitted but local status update failed: ${(error as Error).message}`);
+    }
+    if (sourceTabId !== undefined) void maybeAutoPaginate(payload, sourceTabId);
+    return { status: 'submitted' };
+  } finally {
+    capturesInFlight.delete(payload.captureId);
+  }
+}
+
+async function recordSubmittedCapture(client: AppClient): Promise<void> {
+  await incrementDailyCaptureCount();
+  await incrementDailyCaptureTracking();
+  try {
+    const tasksData = await client.fetchTasks('pending', 50);
+    await setStorage('pendingTasks', tasksData.goals.flatMap((g) => g.tasks));
+  } catch {
+    // The next status refresh will pick up task changes.
+  }
+  await updateBadge();
 }
 
 /**
@@ -278,30 +340,53 @@ async function maybeAutoPaginate(
 }
 
 async function flushCaptureQueue(): Promise<void> {
-  const queueDepth = await getCaptureQueueDepth();
-  if (queueDepth === 0) return;
-
-  logger.info(`Flushing capture queue: ${queueDepth} items`);
-  const client = await getAppClient();
-
-  let processed = 0;
-  let payload = await dequeueCapturePayload();
-
-  while (payload) {
-    try {
-      await client.submitCapture(payload);
-      processed++;
-    } catch (error) {
-      // Re-queue on failure and stop
-      logger.warn(`Queue flush failed at item ${processed}: ${(error as Error).message}`);
-      await enqueueCapturePayload(payload);
-      break;
+  if (captureFlushInFlight) return;
+  captureFlushInFlight = true;
+  try {
+    const queue = await getStorage('captureQueue');
+    if (queue.length === 0) return;
+    logger.info(`Flushing capture queue: ${queue.length} items`);
+    const client = await getAppClient();
+    let processed = 0;
+    const seen = new Set<string>();
+    const remembered = new Set(await getCaptureAcknowledgements());
+    for (const payload of queue) {
+      if (seen.has(payload.captureId)) continue;
+      seen.add(payload.captureId);
+      if (capturesInFlight.has(payload.captureId)) break;
+      capturesInFlight.add(payload.captureId);
+      try {
+        const acknowledged = capturesAcknowledged.has(payload.captureId) || remembered.has(payload.captureId);
+        if (!acknowledged) {
+          await client.submitCapture(payload);
+          try {
+            await rememberAcknowledgedCapture(payload.captureId);
+          } catch (error) {
+            logger.warn(`Capture acknowledged but replay journal failed: ${(error as Error).message}`);
+          }
+        }
+        await mutateCaptureQueue(async () => {
+          await setStorage('captureQueue', (await getStorage('captureQueue')).filter((item) => item.captureId !== payload.captureId));
+        });
+        await forgetAcknowledgedCapture(payload.captureId).catch(() => {});
+        try {
+          await recordSubmittedCapture(client);
+        } catch (error) {
+          logger.warn(`Queued capture submitted but local status update failed: ${(error as Error).message}`);
+        }
+        processed++;
+      } catch (error) {
+        logger.warn(`Queue flush failed at item ${processed}: ${(error as Error).message}`);
+        break;
+      } finally {
+        capturesInFlight.delete(payload.captureId);
+      }
     }
-    payload = await dequeueCapturePayload();
+    logger.info(`Queue flush complete: ${processed} items processed`);
+    await updateBadge();
+  } finally {
+    captureFlushInFlight = false;
   }
-
-  logger.info(`Queue flush complete: ${processed} items processed`);
-  await updateBadge();
 }
 
 // ============================================================
@@ -315,6 +400,27 @@ async function processRetryQueue(): Promise<void> {
   logger.info(`Processing retry queue: ${queue.length} items`);
 
   for (const item of queue) {
+    if (item.path === '/api/extension/capture') {
+      // Older workers wrote each capture to both queues. Preserve a retry-only
+      // copy before retiring that replay path.
+      const payload = item.body as CapturePayload | undefined;
+      if (!payload?.captureId || !payload.url || typeof payload.html !== 'string') {
+        logger.warn(`Cannot migrate malformed legacy capture retry ${item.id}`);
+        continue;
+      }
+      try {
+        await mutateCaptureQueue(async () => {
+          const current = await getStorage('captureQueue');
+          if (!current.some((entry) => entry.captureId === payload.captureId)) {
+            await setStorage('captureQueue', [...current, payload]);
+          }
+        });
+        await removeRetryItem(item.id);
+      } catch (error) {
+        logger.warn(`Legacy capture retry migration failed: ${(error as Error).message}`);
+      }
+      continue;
+    }
     if (item.retryCount >= item.maxRetries) {
       logger.error(`Retry exhausted for ${item.method} ${item.path} after ${item.maxRetries} attempts. Discarding.`);
       await removeRetryItem(item.id);
@@ -404,32 +510,69 @@ async function performHealthCheck(): Promise<void> {
 
 chrome.runtime.onMessage.addListener(
   (message: ExtensionMessage, sender, sendResponse) => {
+    const action = message.type as string;
+    if (action === 'QUEUE_SNIPPET' || action === 'RETRY_SNIPPET' || action === 'DISCARD_SNIPPET') {
+      const payload = message.payload as { body?: unknown; destination?: SnippetDestination; error?: string; state?: 'queued' | 'failed' | 'pending_verification'; id?: string } | undefined;
+      const pending: Promise<void> = snippetFlushPromise ?? Promise.resolve();
+      const operation = pending.then(async () => {
+        if (action === 'QUEUE_SNIPPET') {
+          if (!payload?.destination) throw new Error('Missing snippet destination');
+          return enqueueSnippet(payload.body, payload.destination, payload.error, payload.state);
+        }
+        if (!payload?.id) throw new Error('Missing snippet queue item ID');
+        if (action === 'RETRY_SNIPPET') {
+          const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+          return retrySnippet(payload.id, (config.appUrl as string) || DEFAULT_APP_URL,
+            (config.extensionToken as string) || null);
+        }
+        return removeSnippetFromQueue(payload.id);
+      });
+      void operation.then(() => {
+        sendResponse({ status: 'ok' });
+        if (action === 'RETRY_SNIPPET') void processSnippetQueue();
+      }, (error: Error) => sendResponse({ status: 'failed', message: error.message }));
+      return true;
+    }
     switch (message.type) {
       case 'CAPTURE_REQUEST': {
         // Phase 6: Check rate limit before capture
         checkCaptureRateLimit().then((rateCheck) => {
           if (!rateCheck.allowed) {
             sendResponse({
-              status: 'error',
+              status: 'limit',
               message: 'Daily capture limit reached',
             });
             return;
           }
 
+          const deliver = (tabId: number) => {
+            let finished = false;
+            const finish = (result: CaptureOutcome) => {
+              if (finished) return;
+              finished = true;
+              sendResponse(result);
+            };
+            const timeout = setTimeout(() => finish({ status: 'failed', message: 'Content script did not respond' }), 10000);
+            try {
+              chrome.tabs.sendMessage(tabId, { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage, (response) => {
+                clearTimeout(timeout);
+                if (finished) return;
+                if (chrome.runtime.lastError || !response?.payload) {
+                  finish({ status: 'failed', message: chrome.runtime.lastError?.message || 'No capture payload from page' });
+                  return;
+                }
+                void processCapture(response.payload as CapturePayload, tabId)
+                  .then(finish, (error: Error) => finish({ status: 'failed', message: error.message }));
+              });
+            } catch (error) {
+              clearTimeout(timeout);
+              finish({ status: 'failed', message: (error as Error).message });
+            }
+          };
           if (sender.tab?.id) {
             // Content script initiated capture - process the result
             const sourceTabId = sender.tab.id;
-            chrome.tabs.sendMessage(
-              sourceTabId,
-              { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage,
-              (response) => {
-                if (response?.payload) {
-                  processCapture(response.payload as CapturePayload, sourceTabId).then(() => {
-                    sendResponse({ status: 'ok' });
-                  });
-                }
-              }
-            );
+            deliver(sourceTabId);
           } else {
             // Popup or side panel initiated - get active tab
             chrome.tabs.query(
@@ -437,24 +580,14 @@ chrome.runtime.onMessage.addListener(
               (tabs) => {
                 if (tabs[0]?.id) {
                   const sourceTabId = tabs[0].id;
-                  chrome.tabs.sendMessage(
-                    sourceTabId,
-                    { type: 'CAPTURE_REQUEST' } satisfies ExtensionMessage,
-                    (response) => {
-                      if (response?.payload) {
-                        processCapture(response.payload as CapturePayload, sourceTabId).then(
-                          () => {
-                            sendResponse({ status: 'ok' });
-                          }
-                        );
-                      }
-                    }
-                  );
+                  deliver(sourceTabId);
+                } else {
+                  sendResponse({ status: 'failed', message: 'No active tab' });
                 }
               }
             );
           }
-        });
+        }).catch((error: Error) => sendResponse({ status: 'failed', message: error.message }));
         return true; // async response
       }
 
@@ -462,7 +595,7 @@ chrome.runtime.onMessage.addListener(
         Promise.all([
           getStorage('connectionState'),
           getCaptureQueueDepth(),
-          getStorage('dailyCaptureCount'),
+          getDailyCaptureCount(),
           getStorage('lastHealthCheck'),
           getStorage('pendingTasks'),
         ]).then(
@@ -563,16 +696,23 @@ chrome.runtime.onMessage.addListener(
 // ============================================================
 
 async function processSnippetQueue(): Promise<void> {
+  if (snippetFlushPromise) return snippetFlushPromise;
+  snippetFlushPromise = flushSnippetQueueOnce().finally(() => {
+    snippetFlushPromise = null;
+  });
+  return snippetFlushPromise;
+}
+
+async function flushSnippetQueueOnce(): Promise<void> {
   const depth = await getSnippetQueueDepth();
   if (depth === 0) return;
-  const [appUrl, token] = await Promise.all([
-    getStorage('appUrl'),
-    getStorage('extensionToken'),
-  ]);
+  const config = await chrome.storage.local.get(['appUrl', 'extensionToken']);
+  const appUrl = config.appUrl as string | undefined;
+  const token = config.extensionToken as string | undefined;
   try {
     const result = await flushSnippetQueue({
       appUrl: appUrl || DEFAULT_APP_URL,
-      extensionToken: token,
+      extensionToken: token || null,
     });
     if (result.processed > 0) {
       logger.info(
@@ -590,29 +730,50 @@ async function processSnippetQueue(): Promise<void> {
 // Permission Change Listeners (WS-3 Phase 6 §7)
 // ============================================================
 
+async function reconcilePermissions(): Promise<string[] | null> {
+  try {
+    return await syncApprovedOriginsFromChrome();
+  } catch (error) {
+    // The 30-second health alarm retries even when Chrome's permission API
+    // briefly fails. Never replace native state with a stale storage mirror.
+    logger.warn('Permission reconciliation failed; retrying on health alarm:', error);
+    return null;
+  }
+}
+
 // Listen for origin revokes from chrome://extensions so the sidebar's
 // `approvedOrigins` storage key stays aligned. The sidebar subscribes to
 // `storage.onChanged` and re-renders automatically when we rewrite the key.
 chrome.permissions.onRemoved.addListener(async (perms) => {
   const origins = perms?.origins ?? [];
   if (origins.length === 0) return;
-  const next = await import('./shared/approved-origins').then((m) =>
-    m.removeApprovedOrigins(origins)
-  );
-  logger.info(
-    `Permissions revoked: ${origins.join(', ')}; approved list now ${next.length}`
-  );
+  const next = await reconcilePermissions();
+  if (next) logger.info(`Permissions revoked: ${origins.join(', ')}; approved list now ${next.length}`);
 });
 
 chrome.permissions.onAdded.addListener(async (perms) => {
   const origins = perms?.origins ?? [];
   if (origins.length === 0) return;
-  const next = await import('./shared/approved-origins').then((m) =>
-    m.addApprovedOrigins(origins)
-  );
-  logger.info(
-    `Permissions granted: ${origins.join(', ')}; approved list now ${next.length}`
-  );
+  const next = await reconcilePermissions();
+  if (next) logger.info(`Permissions granted: ${origins.join(', ')}; approved list now ${next.length}`);
+});
+
+// ============================================================
+// Commands (ADR-028 clause 4 — Snip mode opt-in hotkey)
+// ============================================================
+//
+// `chrome.commands` only fires in the extension's background context, so the
+// side panel can't register the hotkey itself. Relay it as a runtime message;
+// the side panel (if open) flips its own session-scoped snip-mode state. If
+// no side panel is open there is nothing to toggle, so the "receiving end
+// does not exist" rejection is expected and swallowed.
+chrome.commands.onCommand.addListener((command) => {
+  if (command !== 'toggle-snip-mode') return;
+  chrome.runtime
+    .sendMessage({ type: 'TOGGLE_SNIP_MODE' } satisfies ExtensionMessage)
+    .catch(() => {
+      // No side panel listening — ignore.
+    });
 });
 
 // ============================================================
@@ -682,6 +843,7 @@ async function setupWebSocketHandlers(): Promise<void> {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === HEALTH_CHECK_ALARM) {
+    await reconcilePermissions();
     await performHealthCheck();
   }
   if (alarm.name === QUEUE_FLUSH_ALARM) {
@@ -748,7 +910,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
   // Reconcile approved-origins with Chrome's native permission state in case
   // the user revoked an origin while the SW was asleep (WS-3 Phase 6 §7).
-  await syncApprovedOriginsFromChrome();
+  await reconcilePermissions();
 
   // Drain any pending snippets from the previous session (WS-3 Phase 6 §10).
   await processSnippetQueue();
@@ -761,7 +923,7 @@ performHealthCheck().catch(() => {});
 processRetryQueue().catch(() => {});
 
 // WS-3 Phase 6 §7 — reconcile approved origins on SW load.
-syncApprovedOriginsFromChrome().catch(() => {});
+void reconcilePermissions();
 
 // WS-3 Phase 6 §10 — drain offline snippet queue on SW load.
 processSnippetQueue().catch(() => {});

@@ -47,33 +47,47 @@ export async function importEducation(
       const startDate = startDateStr ? new Date(startDateStr) : null;
       const endDate = endDateStr ? new Date(endDateStr) : null;
 
-      // Insert education record
-      await client.query(
-        `INSERT INTO education (contact_id, institution, degree, field_of_study, start_date, end_date, source)
-         VALUES ($1, $2, $3, $4, $5, $6, 'csv')`,
-        [
-          selfContactId,
-          institution,
-          degree || null,
-          fieldOfStudy || null,
-          startDate && !isNaN(startDate.getTime()) ? startDate : null,
-          endDate && !isNaN(endDate.getTime()) ? endDate : null,
-        ]
-      );
+      const normalizedStart = startDate && !isNaN(startDate.getTime()) ? startDate : null;
+      const normalizedEnd = endDate && !isNaN(endDate.getTime()) ? endDate : null;
+      const values = [selfContactId, institution, degree || null, fieldOfStudy || null, normalizedStart, normalizedEnd];
+      await client.query('BEGIN');
+      try {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [JSON.stringify(values)]);
+        const existing = await client.query(
+          `SELECT id FROM education WHERE contact_id = $1 AND institution = $2
+           AND degree IS NOT DISTINCT FROM $3 AND field_of_study IS NOT DISTINCT FROM $4
+           AND start_date IS NOT DISTINCT FROM $5 AND end_date IS NOT DISTINCT FROM $6 AND source = 'csv' LIMIT 1`, values
+        );
+        if (existing.rows.length) {
+          result.skippedRecords++;
+          await client.query('COMMIT');
+          continue;
+        }
+        await client.query(
+          `INSERT INTO education (contact_id, institution, degree, field_of_study, start_date, end_date, source)
+           VALUES ($1, $2, $3, $4, $5, $6, 'csv')`,
+          [selfContactId, institution, degree || null, fieldOfStudy || null, normalizedStart, normalizedEnd]
+        );
 
-      // Create EDUCATED_AT edge (using company resolver for institution)
-      const institutionCompany = await companyResolver.resolve(institution);
-      if (institutionCompany) {
-        await createEducatedAtEdge(client, selfContactId, institutionCompany.id, degree, fieldOfStudy);
+        // Create EDUCATED_AT edge only for a new education row.
+        const institutionCompany = await companyResolver.resolve(institution);
+        if (institutionCompany) {
+          await createEducatedAtEdge(client, selfContactId, institutionCompany.id, degree, fieldOfStudy);
+        }
+        await client.query('COMMIT');
+        result.newRecords++;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        companyResolver.clearCache();
+        throw error;
       }
-
-      result.newRecords++;
     } catch (err) {
       result.errors.push({
         file: 'Education.csv',
         row: i + 1,
         message: err instanceof Error ? err.message : 'Unknown error',
       });
+      result.skippedRecords++;
     }
   }
 

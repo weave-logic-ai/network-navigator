@@ -3,63 +3,35 @@
 import { NextResponse } from 'next/server';
 import { readdir, stat } from 'fs/promises';
 import { join } from 'path';
+import { detectDeepFileType } from '@/lib/import/profile-importer';
+import { detectContactFileType, previewContactCsv, previewOwnerProfileCsv } from '@/lib/import/mapping-preview';
+import type { MappingPreview } from '@/lib/import/mapping-preview';
+import { allowedImportDirectory, readAllowedImportPreview } from '@/lib/import/directory-path';
 
 const LINKEDIN_EXPORT_DIR = join(process.cwd(), '..', 'data', 'linkedin', 'LinkedinExport');
 
-// Pipeline-recognized file types (contacts import)
-const FILE_TYPE_PATTERNS: [string, string][] = [
-  ['connection', 'connections'],
-  ['message', 'messages'],
-  ['invitation', 'invitations'],
-  ['endorsement', 'endorsements'],
-  ['recommendation', 'recommendations'],
-  ['position', 'positions'],
-  ['education', 'education'],
-  ['skill', 'skills'],
-  ['profile', 'profile'],
-];
-
-// Deep profile file types (full LinkedIn dump)
-const DEEP_FILE_TYPES: Record<string, string> = {
-  'ad_targeting.csv': 'ad_targeting',
-  'certifications.csv': 'certifications',
-  'company follows.csv': 'company_follows',
-  'courses.csv': 'courses',
-  'email addresses.csv': 'email_addresses',
-  'events.csv': 'events',
-  'honors.csv': 'honors',
-  'learning.csv': 'learning',
-  'organizations.csv': 'organizations',
-  'phonenumbers.csv': 'phone_numbers',
-  'profile summary.csv': 'profile_summary',
-  'receipts_v2.csv': 'receipts',
-  'registration.csv': 'registration',
-  'rich_media.csv': 'rich_media',
-  'savedjob alerts.csv': 'saved_job_alerts',
-  'savedjobalerts.csv': 'saved_job_alerts',
-  'volunteering.csv': 'volunteering',
-  'projects.csv': 'projects',
-};
-
 function detectFileType(filename: string): string | null {
-  const lower = filename.toLowerCase();
-  if (lower.includes('company') && lower.includes('follow')) return 'company_follows';
-  for (const [pattern, type] of FILE_TYPE_PATTERNS) {
-    if (lower.includes(pattern)) return type;
-  }
-  return null;
+  return detectContactFileType(filename);
 }
 
-function detectDeepFileType(filename: string): string | null {
-  const lower = filename.toLowerCase();
-  return DEEP_FILE_TYPES[lower] || null;
+async function previewFile(directory: string, path: string, name: string, owner: boolean): Promise<MappingPreview> {
+  try {
+    const content = await readAllowedImportPreview(directory, path);
+    return (owner ? previewOwnerProfileCsv(name, content) : previewContactCsv(name, content))!;
+  } catch {
+    return { file: name, target: owner ? 'Owner profile' : 'Contacts', rowsSampled: 0,
+      fields: [], ignored: [], warning: 'Preview unavailable: file cannot be read.',
+      warningDisposition: owner ? name.toLowerCase() === 'profile.csv' ? 'fatal' : 'skip' : undefined };
+  }
 }
 
 export async function GET() {
   try {
+    const directory = await allowedImportDirectory(LINKEDIN_EXPORT_DIR);
+    if (!directory) return NextResponse.json({ found: false });
     let dirStat;
     try {
-      dirStat = await stat(LINKEDIN_EXPORT_DIR);
+      dirStat = await stat(directory);
     } catch {
       return NextResponse.json({ found: false });
     }
@@ -68,7 +40,7 @@ export async function GET() {
       return NextResponse.json({ found: false });
     }
 
-    const entries = await readdir(LINKEDIN_EXPORT_DIR);
+    const entries = await readdir(directory);
     const csvFiles = entries.filter((name) => name.toLowerCase().endsWith('.csv'));
 
     if (csvFiles.length === 0) {
@@ -81,15 +53,13 @@ export async function GET() {
 
     for (const name of csvFiles) {
       const type = detectFileType(name);
+      const deepType = detectDeepFileType(name);
       if (type) {
         recognized.push({ name, type });
+      } else if (deepType) {
+        deepFiles.push({ name, type: deepType });
       } else {
-        const deepType = detectDeepFileType(name);
-        if (deepType) {
-          deepFiles.push({ name, type: deepType });
-        } else {
-          other.push(name);
-        }
+        other.push(name);
       }
     }
 
@@ -97,25 +67,32 @@ export async function GET() {
     const subdirs: string[] = [];
     for (const entry of entries) {
       try {
-        const entryStat = await stat(join(LINKEDIN_EXPORT_DIR, entry));
+        const entryStat = await stat(join(directory, entry));
         if (entryStat.isDirectory()) subdirs.push(entry);
       } catch {
         // skip
       }
     }
 
-    // Full dump = has Profile.csv + Ad_Targeting.csv + messages + connections
-    const hasFullDump = csvFiles.length >= 15;
+    const ownerProfileFiles = csvFiles.filter((name) => detectDeepFileType(name) !== null);
+    const hasOwnerProfileFiles = ownerProfileFiles.some(name => name.toLowerCase() === 'profile.csv');
+    const contactPreviews = await Promise.all(recognized.map(file => previewFile(directory, join(directory, file.name), file.name, false)));
+    const ownerPreviews = hasOwnerProfileFiles
+      ? await Promise.all(ownerProfileFiles.map(name => previewFile(directory, join(directory, name), name, true)))
+      : [];
 
     return NextResponse.json({
       found: true,
       directoryPath: 'data/linkedin/LinkedinExport',
       recognizedFiles: recognized,
       deepFiles,
+      ownerProfileFiles,
       otherFiles: other,
       subdirectories: subdirs,
       totalCsvCount: csvFiles.length,
-      hasFullDump,
+      hasOwnerProfileFiles,
+      contactPreviews,
+      ownerPreviews,
     });
   } catch {
     return NextResponse.json({ found: false });

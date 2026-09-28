@@ -18,7 +18,7 @@ export async function GET(
     }
 
     const gauges = await computeAllGauges(contactId);
-    return NextResponse.json({ data: gauges });
+    return NextResponse.json(gauges, { status: gauges.errors.length === 5 ? 503 : 200 });
   } catch (error) {
     return NextResponse.json(
       {

@@ -28,6 +28,15 @@
   "optional_host_permissions": [
     "<all_urls>"
   ],
+  "commands": {
+    "toggle-snip-mode": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Toggle Snip mode in the side panel (ADR-028 clause 4)"
+    }
+  },
   "background": {
     "service_worker": "dist/service-worker.js",
     "type": "module"

@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { X, Search } from "lucide-react";
 import { RescoreAllButton } from "@/components/scoring/rescore-all-button";
+import useSWR from "swr";
 
 interface ToolbarProps {
   search: string;
@@ -21,6 +22,8 @@ interface ToolbarProps {
   onTierChange: (value: string) => void;
   enrichmentStatus: string;
   onEnrichmentChange: (value: string) => void;
+  campaignId: string;
+  onCampaignChange: (value: string) => void;
   onClearFilters: () => void;
 }
 
@@ -31,8 +34,13 @@ export function ContactsTableToolbar({
   onTierChange,
   enrichmentStatus,
   onEnrichmentChange,
+  campaignId,
+  onCampaignChange,
   onClearFilters,
 }: ToolbarProps) {
+  const { data: campaigns, error: campaignError } = useSWR<{
+    data: Array<{ id: string; name: string }>;
+  }>("/api/outreach/campaigns");
   const [localSearch, setLocalSearch] = useState(search);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -49,6 +57,7 @@ export function ContactsTableToolbar({
   const activeFilterCount =
     (tier && tier !== "all" ? 1 : 0) +
     (enrichmentStatus && enrichmentStatus !== "all" ? 1 : 0) +
+    (campaignId ? 1 : 0) +
     (search ? 1 : 0);
 
   return (
@@ -74,17 +83,29 @@ export function ContactsTableToolbar({
           <SelectItem value="watch">Watch</SelectItem>
         </SelectContent>
       </Select>
+      <Select value={campaignId || "latest"} onValueChange={onCampaignChange}>
+        <SelectTrigger className="w-[210px]" aria-label="Campaign members">
+          <SelectValue placeholder="Campaign members" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="latest">Latest outreach activity</SelectItem>
+          {campaigns?.data.map((campaign) => (
+            <SelectItem key={campaign.id} value={campaign.id}>Members: {campaign.name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {campaignError && <span role="alert" className="text-xs text-destructive">Campaigns unavailable</span>}
       <Select
         value={enrichmentStatus || "all"}
         onValueChange={onEnrichmentChange}
       >
         <SelectTrigger className="w-[160px]">
-          <SelectValue placeholder="Enrichment" />
+          <SelectValue placeholder="Lookup data" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All Status</SelectItem>
-          <SelectItem value="enriched">Enriched</SelectItem>
-          <SelectItem value="pending">Pending</SelectItem>
+          <SelectItem value="all">All lookup data</SelectItem>
+          <SelectItem value="has_data">Lookup data found</SelectItem>
+          <SelectItem value="no_data">No lookup data</SelectItem>
         </SelectContent>
       </Select>
       {activeFilterCount > 0 && (

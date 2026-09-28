@@ -73,17 +73,32 @@ const profileTitleTag: FallbackStrategy = {
   name: 'title-tag',
   pageTypes: ['PROFILE'],
   apply($: CheerioAPI): ExtractedField[] {
+    const out: ExtractedField[] = [];
     const name = titleTagName($);
-    if (!name) return [];
-    return [
-      {
+    if (name) {
+      out.push({
         field: 'name',
         value: name,
         confidence: 0.85,
         source: 'fallback',
         selectorUsed: 'fallback:title-tag',
-      },
-    ];
+      });
+    }
+    // The page title can preserve a role after a top-card selector breaks.
+    // It is weaker evidence than visible profile text, so keep its confidence
+    // low and let the registry use it only when headline was not extracted.
+    const title = $('title').first().text().trim();
+    const role = title.match(/^.+?\s[-–—]\s(.+?)\s\|\sLinkedIn$/i)?.[1]?.trim();
+    if (role) {
+      out.push({
+        field: 'headline',
+        value: role,
+        confidence: 0.3,
+        source: 'fallback',
+        selectorUsed: 'fallback:title-tag[headline]',
+      });
+    }
+    return out;
   },
 };
 

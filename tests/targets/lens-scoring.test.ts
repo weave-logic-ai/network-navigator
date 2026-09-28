@@ -1,9 +1,5 @@
-// Research Tools Sprint — WS-4 Phase 1.5 lens-scoring integration.
-//
-// Golden case: one contact, two lenses on the same target, different
-// `icp_fit` values. Demonstrates that the scoring pipeline's ICP resolution
-// is actually lens-driven when the `targets` flag is on, and that callers
-// that omit `targetId` still see today's owner-default behavior.
+// D2 scoring contract: persisted scores use the owner basis. Lens scoring is
+// transient and may only be requested through the read-only preview.
 
 import { IcpFitScorer } from '@/lib/scoring/scorers/icp-fit';
 import type { ContactScoringData, IcpCriteria } from '@/lib/scoring/types';
@@ -76,167 +72,127 @@ describe('WS-4 Phase 1.5 — lens-driven icp_fit scoring', () => {
   });
 });
 
-describe('WS-4 Phase 1.5 — pipeline lens resolution', () => {
+describe('D2 — owner baseline and transient lens preview', () => {
   beforeEach(() => {
     jest.resetModules();
-    // Start with the flag off; individual tests enable it as needed.
-    delete process.env.RESEARCH_TARGETS;
   });
 
-  it('falls back to owner-default ICPs when targets flag is off', async () => {
-    const getActiveIcpProfiles = jest.fn(async () => [
-      {
-        id: 'owner-default-icp',
-        name: 'Owner Default',
-        description: null,
-        isActive: true,
-        criteria: { roles: ['CTO'] },
-        weightOverrides: {},
-        createdAt: '',
-        updatedAt: '',
-      },
-    ]);
-    jest.doMock('@/lib/db/queries/scoring', () => ({
-      getActiveIcpProfiles,
+  function mockScoringQueries() {
+    const queries = {
+      getActiveIcpProfiles: jest.fn(async () => [{
+        id: 'owner-icp', name: 'Owner', description: null, isActive: true,
+        criteria: { roles: ['CEO'] }, weightOverrides: {}, createdAt: '', updatedAt: '',
+      }]),
       getDefaultWeightProfile: jest.fn(async () => null),
-      getWeightProfileByName: jest.fn(async () => null),
       getAllContactIds: jest.fn(async () => []),
-      getScoringBaselines: jest.fn(async () => ({
-        p90Mutuals: 0,
-        p90Edges: 0,
-        totalClusters: 0,
-      })),
+      getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 20, p90Edges: 10, totalClusters: 5, graphCentralityDistribution: [] })),
+      getContactScoringData: jest.fn(async () => makeContact()),
       upsertContactScore: jest.fn(async () => undefined),
       upsertContactIcpFit: jest.fn(async () => undefined),
-      getContactScoringData: jest.fn(async () => null),
-      createScoringRun: jest.fn(async () => 'run-1'),
-      updateScoringRun: jest.fn(async () => undefined),
-    }));
-    const lensService = {
-      getActiveLensIcps: jest.fn(async () => [
-        {
-          id: 'lens-icp',
-          name: 'Lens ICP',
-          description: null,
-          isActive: true,
-          criteria: { roles: ['VP Marketing'] },
-          weightOverrides: {},
-          createdAt: '',
-          updatedAt: '',
-        },
-      ]),
     };
-    jest.doMock('@/lib/targets/lens-service', () => lensService);
-    jest.doMock('@/lib/config/research-flags', () => ({
-      RESEARCH_FLAGS: {
-        targets: false,
-        snippets: false,
-        parserTelemetry: false,
-        sources: false,
-      },
+    jest.doMock('@/lib/db/queries/scoring', () => queries);
+    return queries;
+  }
+
+  it('uses owner ICPs for an ordinary batch even when targets are enabled', async () => {
+    const queries = mockScoringQueries();
+    const getActiveLensForTarget = jest.fn();
+    jest.doMock('@/lib/db/client', () => ({
+      transaction: jest.fn(async fn => fn({ query: jest.fn(async () => ({ rows: [{ snapshot_id: '1:2:' }] })) })),
+      query: jest.fn(),
     }));
+    jest.doMock('@/lib/taxonomy/service', () => ({ resolveTaxonomyChain: jest.fn(async () => ({})) }));
+    jest.doMock('@/lib/targets/lens-service', () => ({ getActiveLensForTarget }));
+    jest.doMock('@/lib/config/research-flags', () => ({ RESEARCH_FLAGS: { targets: true } }));
 
-    // Import after mocks so the module captures the flag-off state.
     const { scoreBatch } = await import('@/lib/scoring/pipeline');
-    // Batch with no IDs resolves to an empty list of contacts — the call
-    // is only to drive the ICP-resolver code path. We verify via the
-    // mock call counts which path ran.
-    await scoreBatch([], undefined, 'target-1').catch(() => undefined);
+    await expect(scoreBatch([])).resolves.toEqual([]);
 
-    expect(lensService.getActiveLensIcps).not.toHaveBeenCalled();
+    expect(queries.getActiveIcpProfiles).toHaveBeenCalledTimes(1);
+    expect(queries.getDefaultWeightProfile).toHaveBeenCalledTimes(1);
+    expect(getActiveLensForTarget).not.toHaveBeenCalled();
+    expect(queries.upsertContactScore).not.toHaveBeenCalled();
   });
 
-  it('prefers the lens-scoped ICPs when targets flag is on AND targetId is set', async () => {
-    const getActiveIcpProfiles = jest.fn(async () => [
-      {
-        id: 'owner-default',
-        name: 'Owner Default',
-        description: null,
-        isActive: true,
-        criteria: { roles: ['CEO'] },
-        weightOverrides: {},
-        createdAt: '',
-        updatedAt: '',
-      },
-    ]);
-    jest.doMock('@/lib/db/queries/scoring', () => ({
-      getActiveIcpProfiles,
-      getDefaultWeightProfile: jest.fn(async () => null),
-      getWeightProfileByName: jest.fn(async () => null),
-      getAllContactIds: jest.fn(async () => []),
-      getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 0, p90Edges: 0, totalClusters: 0 })),
-      upsertContactScore: jest.fn(async () => undefined),
-      upsertContactIcpFit: jest.fn(async () => undefined),
-      getContactScoringData: jest.fn(async () => null),
-    }));
-    const getActiveLensIcps = jest.fn(async () => [
-      {
-        id: 'lens-icp',
-        name: 'Lens ICP',
-        description: null,
-        isActive: true,
-        criteria: { roles: ['CTO'] },
-        weightOverrides: {},
-        createdAt: '',
-        updatedAt: '',
-      },
-    ]);
-    jest.doMock('@/lib/targets/lens-service', () => ({ getActiveLensIcps }));
-    jest.doMock('@/lib/config/research-flags', () => ({
-      RESEARCH_FLAGS: {
-        targets: true,
-        snippets: false,
-        parserTelemetry: false,
-        sources: false,
-      },
-    }));
+  it('rejects target-scoped mutation before reading settings or writing scores', async () => {
+    const queries = mockScoringQueries();
+    const getActiveLensForTarget = jest.fn();
+    jest.doMock('@/lib/targets/lens-service', () => ({ getActiveLensForTarget }));
+    jest.doMock('@/lib/config/research-flags', () => ({ RESEARCH_FLAGS: { targets: true } }));
 
-    const { scoreBatch } = await import('@/lib/scoring/pipeline');
-    await scoreBatch([], undefined, 'target-1').catch(() => undefined);
+    const { scoreBatch, TargetScopedScoreError } = await import('@/lib/scoring/pipeline');
+    await expect(scoreBatch(['contact-1'], undefined, 'target-1'))
+      .rejects.toBeInstanceOf(TargetScopedScoreError);
 
-    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1');
-    // Owner-default must NOT be queried when the lens yields a non-empty set.
-    expect(getActiveIcpProfiles).not.toHaveBeenCalled();
+    expect(queries.getActiveIcpProfiles).not.toHaveBeenCalled();
+    expect(queries.getDefaultWeightProfile).not.toHaveBeenCalled();
+    expect(queries.getContactScoringData).not.toHaveBeenCalled();
+    expect(queries.upsertContactScore).not.toHaveBeenCalled();
+    expect(getActiveLensForTarget).not.toHaveBeenCalled();
   });
 
-  it('falls back to owner-default when the flag is on but the target has no lens ICPs', async () => {
-    const getActiveIcpProfiles = jest.fn(async () => [
-      {
-        id: 'owner-default',
-        name: 'Owner Default',
-        description: null,
-        isActive: true,
-        criteria: { roles: ['CEO'] },
-        weightOverrides: {},
-        createdAt: '',
-        updatedAt: '',
-      },
-    ]);
-    jest.doMock('@/lib/db/queries/scoring', () => ({
-      getActiveIcpProfiles,
-      getDefaultWeightProfile: jest.fn(async () => null),
-      getWeightProfileByName: jest.fn(async () => null),
-      getAllContactIds: jest.fn(async () => []),
-      getScoringBaselines: jest.fn(async () => ({ p90Mutuals: 0, p90Edges: 0, totalClusters: 0 })),
-      upsertContactScore: jest.fn(async () => undefined),
-      upsertContactIcpFit: jest.fn(async () => undefined),
-      getContactScoringData: jest.fn(async () => null),
+  it('previews distinct lens criteria without persisting either result', async () => {
+    const queries = mockScoringQueries();
+    const getActiveLensForTarget = jest.fn(async (targetId: string) => ({
+      id: `lens-${targetId}`, updatedAt: '2026-09-01T00:00:00Z',
+      tenantId: 'tenant-1', userId: 'owner-1', primaryTargetId: targetId,
     }));
-    const getActiveLensIcps = jest.fn(async () => []); // empty — no lens
-    jest.doMock('@/lib/targets/lens-service', () => ({ getActiveLensIcps }));
-    jest.doMock('@/lib/config/research-flags', () => ({
-      RESEARCH_FLAGS: {
-        targets: true,
-        snippets: false,
-        parserTelemetry: false,
-        sources: false,
-      },
+    const resolveTaxonomyChain = jest.fn(async () => ({}));
+    const emitScoringImpulses = jest.fn();
+    const query = jest.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (sql.startsWith('SELECT transaction_timestamp')) return {
+        rows: [{ captured_at: new Date('2026-09-02'), snapshot_id: '1:2:' }],
+      };
+      if (sql.includes('FROM tenants tenant')) return { rows: [{ tenant_id: 'tenant-1', owner_id: 'owner-1' }] };
+      const cto = params?.[0] === 'target-cto';
+      return { rows: [{
+        id: cto ? 'icp-cto' : 'icp-marketing', name: 'Lens ICP', description: null,
+        is_active: true, criteria: { roles: cto ? ['CTO'] : ['VP of Marketing'] },
+        weight_overrides: {}, created_at: new Date('2026-09-01'),
+        updated_at: new Date('2026-09-01'),
+      }] };
+    });
+    jest.doMock('@/lib/db/client', () => ({ transaction: jest.fn(async fn => fn({ query })), query: jest.fn() }));
+    jest.doMock('@/lib/targets/lens-service', () => ({ getActiveLensForTarget }));
+    jest.doMock('@/lib/taxonomy/service', () => ({ resolveTaxonomyChain }));
+    jest.doMock('@/lib/ecc/impulses/scoring-adapter', () => ({ emitScoringImpulses }));
+    jest.doMock('@/lib/config/research-flags', () => ({ RESEARCH_FLAGS: { targets: true } }));
+
+    const { previewContactForTarget } = await import('@/lib/scoring/pipeline');
+    const cto = await previewContactForTarget('contact-1', 'target-cto');
+    const marketing = await previewContactForTarget('contact-1', 'target-marketing');
+
+    expect(cto.score.compositeScore).toBeGreaterThan(marketing.score.compositeScore);
+    expect(cto.basis.selectedIcpId).toBe('icp-cto');
+    expect(marketing.basis.selectedIcpId).toBe('icp-marketing');
+    expect(cto.basis.kind).toBe('lens-preview');
+    expect(query).toHaveBeenCalledWith('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(queries.getContactScoringData).toHaveBeenCalledWith('contact-1', expect.objectContaining({ query }));
+    expect(queries.getActiveIcpProfiles).not.toHaveBeenCalled();
+    expect(queries.upsertContactScore).not.toHaveBeenCalled();
+    expect(queries.upsertContactIcpFit).not.toHaveBeenCalled();
+    expect(emitScoringImpulses).not.toHaveBeenCalled();
+  });
+
+  it('rejects a lens preview with no active ICP instead of using owner ICPs', async () => {
+    const queries = mockScoringQueries();
+    const query = jest.fn(async (sql: string) => ({ rows: sql.startsWith('SELECT transaction_timestamp')
+      ? [{ captured_at: new Date('2026-09-02'), snapshot_id: '1:2:' }]
+      : sql.includes('FROM tenants tenant') ? [{ tenant_id: 'tenant-1', owner_id: 'owner-1' }] : [] }));
+    jest.doMock('@/lib/db/client', () => ({ transaction: jest.fn(async fn => fn({ query })), query: jest.fn() }));
+    jest.doMock('@/lib/targets/lens-service', () => ({
+      getActiveLensForTarget: jest.fn(async () => ({
+        id: 'empty-lens', updatedAt: '2026-09-01T00:00:00Z', tenantId: 'tenant-1',
+        userId: 'owner-1', primaryTargetId: 'target-empty',
+      })),
     }));
+    jest.doMock('@/lib/config/research-flags', () => ({ RESEARCH_FLAGS: { targets: true } }));
 
-    const { scoreBatch } = await import('@/lib/scoring/pipeline');
-    await scoreBatch([], undefined, 'target-1').catch(() => undefined);
-
-    expect(getActiveLensIcps).toHaveBeenCalledWith('target-1');
-    expect(getActiveIcpProfiles).toHaveBeenCalled(); // fallback fired
+    const { previewContactForTarget, LensPreviewError } = await import('@/lib/scoring/pipeline');
+    await expect(previewContactForTarget('contact-1', 'target-empty'))
+      .rejects.toMatchObject({ name: LensPreviewError.name, status: 422 });
+    expect(queries.getActiveIcpProfiles).not.toHaveBeenCalled();
+    expect(queries.upsertContactScore).not.toHaveBeenCalled();
   });
 });

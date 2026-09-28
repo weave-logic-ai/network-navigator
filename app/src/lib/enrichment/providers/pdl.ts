@@ -57,6 +57,7 @@ export class PdlProvider implements EnrichmentProvider {
       };
     }
 
+    let requestStarted = false;
     try {
       const params = new URLSearchParams();
       if (contact.linkedinUrl) params.set('profile', contact.linkedinUrl);
@@ -64,7 +65,9 @@ export class PdlProvider implements EnrichmentProvider {
       if (contact.fullName) params.set('name', contact.fullName);
       if (contact.currentCompany) params.set('company', contact.currentCompany);
 
+      requestStarted = true;
       const response = await fetch(`${this.baseUrl}/person/enrich?${params}`, {
+        redirect: 'manual',
         headers: {
           'X-Api-Key': this.apiKey,
           'Content-Type': 'application/json',
@@ -77,8 +80,9 @@ export class PdlProvider implements EnrichmentProvider {
           providerName: this.displayName,
           success: false,
           fields: [],
-          costCents: response.status === 404 ? 0 : this.costPerLookupCents,
+          costCents: 0,
           error: `PDL API error: ${response.status}`,
+          errorCode: response.status === 404 ? undefined : 'provider_unknown_charge',
         };
       }
 
@@ -100,7 +104,9 @@ export class PdlProvider implements EnrichmentProvider {
         success: false,
         fields: [],
         costCents: 0,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: requestStarted ? 'Provider request or response failed; charge requires reconciliation'
+          : error instanceof Error ? error.message : 'Unknown error',
+        errorCode: requestStarted ? 'provider_unknown_charge' : undefined,
       };
     }
   }

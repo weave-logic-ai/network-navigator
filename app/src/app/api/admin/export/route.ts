@@ -1,7 +1,9 @@
 // GET /api/admin/export - CSV export of contacts with scores
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db/client';
+import { escapeCsvField } from '@/lib/import/csv-export';
+import { requireLocalDashboardRequest } from '@/lib/auth/local-request-boundary';
 
 interface ExportRow {
   full_name: string | null;
@@ -19,7 +21,9 @@ interface ExportRow {
   tags: string[];
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireLocalDashboardRequest(request);
+  if (denied) return denied;
   try {
     const result = await query<ExportRow>(
       `SELECT
@@ -67,12 +71,4 @@ export async function GET() {
       { status: 500 }
     );
   }
-}
-
-function escapeCsvField(value: string): string {
-  // If the field contains commas, quotes, or newlines, wrap in quotes and escape inner quotes
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
 }

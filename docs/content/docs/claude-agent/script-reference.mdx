@@ -1,133 +1,126 @@
 ---
 title: Script Reference
-description: Complete reference for all agent scripts grouped by phase, with common flags, environment variables, and data files.
+description: Complete reference for all four agent scripts, their flags, and the REST endpoints they call.
 ---
 
 # Script Reference
 
-All scripts are located in `.claude/linkedin-prospector/skills/linkedin-prospector/scripts/`.
+All agent scripts live in `agent/network-navigator/skills/linkedin-prospector/scripts/`. There are exactly **four** of them -- every one is a thin REST client against the app's API at `http://localhost:3750` (override with `NETWORKNAV_URL`). None of them touch the filesystem for contact data, run a browser, or maintain local state.
 
-## Scripts by Phase
-
-### Phase 0: Configure
-
-| Script | Purpose | Interactive |
-|--------|---------|------------|
-| `configure.mjs wizard` | Full interactive ICP setup with prompts | Yes |
-| `configure.mjs init` | Quick template from a few inputs | Yes |
-| `configure.mjs generate --json '<config>'` | Non-interactive config from JSON | No |
-| `configure.mjs validate` | Check config file validity | No |
-
-<Callout type="warn">
-When using Claude Code slash commands, always use `generate --json` (not `wizard` or `init`). The interactive modes require readline stdin which hangs in non-interactive shells.
+<Callout type="info">
+Earlier versions of this skill shipped 17 scripts that ran Playwright against LinkedIn directly and stored data in local JSON files (`contacts.json`, `graph.json`, `icp-config.json`, and friends). That architecture was retired. The retired scripts are preserved for reference under `agent/network-navigator/.v1-archive/` but are not part of the shipped skill and are not invoked by the slash commands.
 </Callout>
 
-### Phase 1: Pull
+## The Four Scripts
 
-| Script | Purpose | Key Flags |
-|--------|---------|-----------|
-| `search.mjs` | Search LinkedIn 1st-degree connections | `--niche <slug>`, `--keywords "k1,k2"`, `--max-results N`, `--max-pages N` |
-| `enrich.mjs` | Visit profiles for detailed data | `--unenriched-only`, `--max N` |
-| `deep-scan.mjs` | Scan a contact's connections (2nd-degree) | `--url <url>`, `--max-pages N`, `--max-results N`, `--mutual-only` |
-| `batch-deep-scan.mjs` | Batch deep-scan multiple contacts | `--criteria <type>`, `--min-score N`, `--delay N`, `--dry-run`, `--skip N` |
-| `reparse.mjs` | Re-extract data from cached HTML | `--all`, `--type profiles\|search`, `--url <url>`, `--stats` |
-| `db.mjs` | Contact database CLI | `stats`, `search`, `export`, `seed`, `prune` |
+| Script | Purpose | Entry point |
+|--------|---------|--------------|
+| `api-client.mjs` | Shared HTTP client -- not run directly | Imported by the other three |
+| `configure.mjs` | ICP / niche / offering configuration | `validate`, `list`, `generate --json` |
+| `pipeline.mjs` | Scoring, enrichment, and graph orchestration | `--status`, `--score`, `--rescore-all`, `--enrich`, `--compute-graph`, `--export`, `--health` |
+| `analyze.mjs` | Read-only network analysis | `--mode <mode>` |
 
-### Phase 2: Score
+### api-client.mjs
 
-| Script | Purpose | Key Flags |
-|--------|---------|-----------|
-| `graph-builder.mjs` | Build knowledge graph from contacts | `--verbose` |
-| `scorer.mjs` | Layer 1: ICP fit, network hub, gold score | `--verbose` |
-| `behavioral-scorer.mjs` | Layer 2: behavioral score, personas | `--verbose` |
-| `referral-scorer.mjs` | Layer 3: referral likelihood, personas | `--verbose` |
-| `vectorize.mjs` | Generate embeddings, build vector store | `--from-graph`, `--batch-size N`, `--verbose` |
+Not a CLI -- a shared module imported by the other three scripts.
 
-### Phase 3: Analyze
+**Exports:**
 
-| Script | Purpose | Key Flags |
-|--------|---------|-----------|
-| `analyzer.mjs` | 12 analysis modes | `--mode <mode>`, `--top N`, `--icp`, `--persona`, `--tier`, `--cluster`, `--name`, `--url`, `--query` |
-| `delta.mjs` | Snapshot and change detection | `--snapshot`, `--check`, `--list` |
+| Export | Signature | Description |
+|--------|-----------|--------------|
+| `api` | `api(path, options)` | Generic fetch wrapper. Sends `Content-Type: application/json`, JSON-encodes `options.body`, throws `Error('API <status>: <message>')` on a non-2xx response. |
+| `get` | `get(path)` | `GET` request |
+| `post` | `post(path, body)` | `POST` request with a JSON body |
+| `put` | `put(path, body)` | `PUT` request with a JSON body |
+| `del` | `del(path)` | `DELETE` request |
 
-### Phase 4: Report
+Base URL: `process.env.NETWORKNAV_URL || 'http://localhost:3750'`.
 
-| Script | Purpose | Key Flags |
-|--------|---------|-----------|
-| `report-generator.mjs` | Interactive HTML dashboard | `--verbose` |
-| `pipeline.mjs` | Pipeline orchestrator (all modes) | `--full`, `--rebuild`, `--rescore`, `--behavioral`, `--referrals`, `--report`, `--deep-scan`, `--validate`, `--reparse` |
+### configure.mjs
 
-### Utility Modules (not called directly)
+ICP / niche / offering configuration manager. Calls `GET`/`POST` on `/api/icps`, `/api/niches`, `/api/offerings`.
 
-| Module | Purpose |
-|--------|---------|
-| `lib.mjs` | Shared utilities: `launchBrowser()`, `parseArgs()`, `NICHE_KEYWORDS`, `USER_DATA_DIR` |
-| `cache.mjs` | HTML cache: `saveSearchPage()`, `saveProfilePage()`, `saveConnectionsPage()`, `loadIndex()`, `getCachedHtml()` |
-| `rvf-store.mjs` | ruvector abstraction: `isRvfAvailable()`, `openStore()`, `queryStore()`, `ingestContacts()`, `upsertMetadata()` |
+```bash
+node scripts/configure.mjs validate                # GET the three endpoints, report counts + warnings
+node scripts/configure.mjs list                     # GET the three endpoints, print full detail
+node scripts/configure.mjs generate --json '{...}'  # POST each profile/niche/offering in the JSON
+```
+
+<Callout type="warn">
+There is no interactive `wizard` or `init` subcommand in v2 -- the script has no readline prompts. The `/linkedin-prospector` agent conducts the conversation itself and then calls `configure.mjs generate --json` (or the equivalent API calls directly) with the assembled config.
+</Callout>
+
+**`generate` JSON shape:**
+
+```json
+{
+  "profiles": {
+    "slug": { "name": "...", "description": "...", "criteria": { "roles": [], "industries": [], "signals": [], "companySizeRanges": [] } }
+  },
+  "niches": {
+    "slug": { "name": "...", "keywords": ["..."], "industry": "..." }
+  },
+  "offerings": [
+    { "name": "...", "description": "..." }
+  ]
+}
+```
+
+`generate` posts each `profiles` entry to `POST /api/icps` (as `{ slug, ...profile }`), each `niches` entry to `POST /api/niches`, and each `offerings` entry to `POST /api/offerings`. It reports created/error counts; it does not roll back partial failures.
+
+### pipeline.mjs
+
+Orchestrator for scoring, enrichment, and graph operations. Every flag maps to exactly one API call (`--rescore-all` also polls).
+
+```bash
+node scripts/pipeline.mjs --status                # GET  /api/dashboard
+node scripts/pipeline.mjs --score [contactId]      # POST /api/scoring/run  { contactId? }
+node scripts/pipeline.mjs --rescore-all            # POST /api/scoring/rescore-all, then polls GET /api/scoring/status every 2s (up to 60 attempts)
+node scripts/pipeline.mjs --enrich [contactId]     # POST /api/enrichment/enrich  { contactId? }
+node scripts/pipeline.mjs --compute-graph          # POST /api/graph/compute
+node scripts/pipeline.mjs --export                 # GET  /api/admin/export
+node scripts/pipeline.mjs --health                 # GET  /api/health  and  GET /api/extension/health-internal
+```
+
+<Callout type="warn">
+`--export` requests `GET /api/admin/export`, which returns **CSV** (`Content-Type: text/csv`), and writes it out verbatim. Until 2026-08-19 the shared API client parsed every response as JSON, so this flag threw on the CSV body; it now requests a raw response for this path. Expect a `.csv` file, not JSON.
+</Callout>
+
+`--score` and `--enrich` both accept an optional contact ID as the flag's value (`--score abc123`); omit it to let the endpoint pick a target/batch.
+
+### analyze.mjs
+
+Read-only analysis tool with eight modes, each mapping to one `GET` request.
+
+```bash
+node scripts/analyze.mjs --mode summary                      # GET /api/dashboard
+node scripts/analyze.mjs --mode hubs --top 10                # GET /api/graph/data
+node scripts/analyze.mjs --mode prospects --top 10            # GET /api/contacts?sort=compositeScore&order=desc&limit=N
+node scripts/analyze.mjs --mode referrals --top 10            # GET /api/contacts?sort=referralLikelihood&order=desc&limit=N (falls back to client-side sort by compositeScore)
+node scripts/analyze.mjs --mode clusters                      # GET /api/graph/communities
+node scripts/analyze.mjs --mode search --query "AI startup"   # GET /api/contacts/hybrid-search?q=...
+node scripts/analyze.mjs --mode recommend                     # GET /api/actions/next
+node scripts/analyze.mjs --mode company --name "Acme"         # GET /api/contacts?company=...
+```
+
+See [Analysis Modes](/docs/claude-agent/analysis-modes) for a full description of each mode's output.
 
 ## Common Flags
 
 | Flag | Used By | Description |
-|------|---------|-------------|
-| `--verbose` | Most scripts | Detailed progress logging |
-| `--max-results <N>` | search, deep-scan, batch-deep-scan | Maximum results to collect |
-| `--max-pages <N>` | search, deep-scan, batch-deep-scan | Maximum pages to scroll |
-| `--top <N>` | analyzer, pipeline | Number of results to return |
-| `--niche <slug>` | search, pipeline (--full) | Niche from icp-config.json |
-| `--keywords "k1,k2"` | search, db search | Raw search keywords |
-| `--dry-run` | batch-deep-scan | Preview without executing |
-| `--json` | search | Output as JSON to stdout |
-| `--from-graph` | vectorize | Load from graph.json (recommended) |
-
-## Pipeline Modes
-
-| Mode | Steps | When to Use |
-|------|-------|-------------|
-| `--full` | search, enrich, graph, score, behavioral, referral, vectorize, analyze, snapshot | First-time setup |
-| `--rebuild` | graph, score, behavioral, referral, vectorize, analyze, snapshot | After data changes |
-| `--rescore` | score, behavioral, referral, analyze | After weight/threshold changes |
-| `--behavioral` | behavioral, analyze(behavioral), analyze(visibility) | Behavioral-only |
-| `--referrals` | referral-scorer, analyze(referrals) | Referral-only |
-| `--report` | report-generator | Generate HTML dashboard |
-| `--deep-scan --url <url>` | deep-scan, graph, score, behavioral, referral, report | Scan then rebuild |
-| `--validate` | configure validate | Validate config |
-| `--reparse` | reparse --all | Re-extract from cache |
-
-## Database Commands
-
-```bash
-node scripts/db.mjs stats                                    # Show contact counts
-node scripts/db.mjs search --niche <slug>                    # Search by niche
-node scripts/db.mjs search --keywords "k1,k2" --min-mutual 20  # Search with filters
-node scripts/db.mjs export --format csv                      # Export as CSV
-node scripts/db.mjs export --format json --niche <slug>      # Export filtered JSON
-node scripts/db.mjs prune --older-than 90d                   # Remove stale contacts
-node scripts/db.mjs seed --file /path/to/contacts.json       # Import from file
-```
+|------|---------|--------------|
+| `--mode <mode>` | analyze | Analysis mode (required) |
+| `--top <N>` | analyze (hubs, prospects, referrals) | Number of results (default 10) |
+| `--query <text>` | analyze (search) | Free-text search query (required for `search` mode) |
+| `--name <text>` | analyze (company) | Company name to filter by (required for `company` mode) |
+| `--json <string>` | configure (generate) | Full configuration JSON (required for `generate`) |
 
 ## Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `BROWSER_DATA_DIR` | `.browser-data/` | Playwright persistent browser data directory |
-| `PROSPECTOR_DATA_DIR` | `skills/linkedin-prospector/data/` | Contact data directory (keeps PII separate) |
+|----------|---------|--------------|
+| `NETWORKNAV_URL` | `http://localhost:3750` | Base URL for the app's REST API |
 
-## Data Files
+## Data
 
-All data files are in `data/` within the skill directory:
-
-| File | Description | Generated By |
-|------|-------------|-------------|
-| `icp-config.json` | ICP configuration (user-editable) | `configure.mjs` |
-| `behavioral-config.json` | Behavioral persona rules | Ships with defaults |
-| `referral-config.json` | Referral scoring rules | Ships with defaults |
-| `outreach-config.json` | Outreach lifecycle, limits, sequences | Ships with defaults |
-| `outreach-templates.yaml` | Message templates with merge fields | Ships with defaults |
-| `contacts.json` | Contact database | `search.mjs`, `enrich.mjs`, `deep-scan.mjs` |
-| `graph.json` | Scored knowledge graph | `graph-builder.mjs`, `scorer.mjs` |
-| `network-report.html` | Interactive HTML dashboard | `report-generator.mjs` |
-| `network.rvf` | Semantic vector store | `vectorize.mjs` |
-| `outreach-state.json` | Outreach pipeline state | Outreach system |
-| `rate-budget.json` | Daily rate limit tracking | Outreach system |
-| `snapshots/` | Delta snapshots | `delta.mjs` |
-| `cache/` | Cached HTML pages | `search.mjs`, `enrich.mjs`, `deep-scan.mjs` |
+There are no agent-managed data files in v2 -- contacts, scores, configuration, graph data, and vector embeddings all live in PostgreSQL, owned and served by the app. The scripts hold no state between invocations.

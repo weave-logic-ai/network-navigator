@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Command as CommandPrimitive } from "cmdk";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Badge } from "@/components/ui/badge";
 import {
   Home,
@@ -75,17 +76,8 @@ export function CommandPalette() {
   const [contactsLoading, setContactsLoading] = useState(false);
   const router = useRouter();
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setOpen((prev) => !prev);
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
 
   const searchContacts = useCallback(async (query: string) => {
     if (query.length < 2) {
@@ -125,6 +117,27 @@ export function CommandPalette() {
     setContacts([]);
   }, []);
 
+  const handleOpen = useCallback(() => {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        if (open) handleClose();
+        else handleOpen();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("open-command-palette", handleOpen);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("open-command-palette", handleOpen);
+    };
+  }, [handleClose, handleOpen, open]);
+
   const handleNavSelect = useCallback(
     (href: string) => {
       router.push(href);
@@ -149,16 +162,24 @@ export function CommandPalette() {
     [router, handleClose]
   );
 
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 z-50">
-      <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={handleClose}
-        aria-hidden="true"
-      />
-      <div className="fixed left-1/2 top-[20%] z-50 w-full max-w-lg -translate-x-1/2">
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => next ? handleOpen() : handleClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
+        <DialogPrimitive.Content
+          aria-modal="true"
+          aria-describedby={undefined}
+          className="fixed left-1/2 top-[20%] z-50 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 outline-none"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            inputRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (openerRef.current?.isConnected) openerRef.current.focus();
+          }}
+        >
+        <DialogPrimitive.Title className="sr-only">Search contacts, pages, and actions</DialogPrimitive.Title>
         <CommandPrimitive
           className="rounded-xl border bg-popover text-popover-foreground shadow-2xl"
           shouldFilter={true}
@@ -167,6 +188,7 @@ export function CommandPalette() {
           <div className="flex items-center border-b px-3">
             <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
             <CommandPrimitive.Input
+              ref={inputRef}
               placeholder="Search contacts, pages, actions..."
               className="flex h-12 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
               value={search}
@@ -259,7 +281,8 @@ export function CommandPalette() {
             </CommandPrimitive.Group>
           </CommandPrimitive.List>
         </CommandPrimitive>
-      </div>
-    </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }

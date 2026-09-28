@@ -3,21 +3,22 @@
 import { query } from '../../db/client';
 import { contextHash } from '../engine';
 import type { TickContext, GoalCandidate, GoalCheck } from '../types';
+import { CONTACT_RECOMMENDATION_ELIGIBLE_SQL, contactDisplayName, identityFromRow, isRecommendationEligible, type ContactIdentityRow } from '../../contacts/identity';
 
 const CHECK_NEW_CONNECTION = 'new-connection-window';
 const CHECK_WARM_COOLING = 'warm-lead-cooling';
 
 async function newConnectionWindow(_ctx: TickContext): Promise<GoalCandidate[]> {
   // Find contacts connected in the last 7 days with no outreach
-  const result = await query<{
-    id: string; name: string; title: string | null; connected_days: string;
+  const result = await query<ContactIdentityRow & {
+    id: string; title: string | null; connected_days: string;
   }>(
     `SELECT c.id,
-            COALESCE(c.full_name, c.first_name || ' ' || c.last_name, 'Unknown') AS name,
+            c.full_name, c.first_name, c.last_name, c.linkedin_url, c.degree, c.is_archived,
             c.title,
             EXTRACT(DAY FROM NOW() - c.created_at)::text AS connected_days
      FROM contacts c
-     WHERE c.is_archived = FALSE AND c.degree = 1
+     WHERE ${CONTACT_RECOMMENDATION_ELIGIBLE_SQL} AND c.degree = 1
        AND c.created_at > NOW() - INTERVAL '7 days'
        AND NOT EXISTS (
          SELECT 1 FROM tasks t WHERE t.contact_id = c.id
@@ -28,14 +29,19 @@ async function newConnectionWindow(_ctx: TickContext): Promise<GoalCandidate[]> 
      LIMIT 3`
   );
 
-  if (result.rows.length === 0) return [];
+  const contacts = result.rows.flatMap((row) => {
+    const identity = identityFromRow(row);
+    const name = contactDisplayName(identity);
+    return name && isRecommendationEligible(row) ? [{ ...row, name }] : [];
+  });
+  if (contacts.length === 0) return [];
 
-  const count = result.rows.length;
+  const count = contacts.length;
   const hash = contextHash(CHECK_NEW_CONNECTION, {});
 
   return [{
     title: `Welcome ${count} new connection${count > 1 ? 's' : ''} — optimal outreach window`,
-    description: `${result.rows.map(r => r.name).join(', ')} connected recently. The first 7 days after connecting have the highest response rate.`,
+    description: `${contacts.map(r => r.name).join(', ')} connected recently. The first 7 days after connecting have the highest response rate.`,
     goalType: CHECK_NEW_CONNECTION,
     priority: 2,
     targetMetric: 'outreach_sent',
@@ -45,7 +51,7 @@ async function newConnectionWindow(_ctx: TickContext): Promise<GoalCandidate[]> 
       engine: 'relationship_strength',
       checkType: CHECK_NEW_CONNECTION,
       contextHash: hash,
-      suggestedTasks: result.rows.map((r) => ({
+      suggestedTasks: contacts.map((r) => ({
         title: `Welcome message to ${r.name}`,
         description: `Send a personalized welcome message to ${r.name} (${r.title || 'new connection'}). Reference how you connected or shared interests.`,
         taskType: 'SEND_MESSAGE',
@@ -60,17 +66,17 @@ async function warmLeadCooling(ctx: TickContext): Promise<GoalCandidate[]> {
   if (ctx.page !== 'contacts' && ctx.page !== 'discover' && ctx.page !== 'dashboard') return [];
 
   // Find gold/silver contacts whose last message is 30-90 days ago
-  const result = await query<{
-    id: string; name: string; tier: string; days_since: string;
+  const result = await query<ContactIdentityRow & {
+    id: string; tier: string; days_since: string;
   }>(
     `SELECT c.id,
-            COALESCE(c.full_name, c.first_name || ' ' || c.last_name, 'Unknown') AS name,
+            c.full_name, c.first_name, c.last_name, c.linkedin_url, c.degree, c.is_archived,
             cs.tier,
             EXTRACT(DAY FROM NOW() - ms.last_message_at)::text AS days_since
      FROM contacts c
      JOIN contact_scores cs ON cs.contact_id = c.id
      JOIN message_stats ms ON ms.contact_id = c.id
-     WHERE c.is_archived = FALSE
+     WHERE ${CONTACT_RECOMMENDATION_ELIGIBLE_SQL}
        AND cs.tier IN ('gold', 'silver')
        AND ms.last_message_at BETWEEN NOW() - INTERVAL '90 days' AND NOW() - INTERVAL '30 days'
        AND NOT EXISTS (
@@ -83,12 +89,16 @@ async function warmLeadCooling(ctx: TickContext): Promise<GoalCandidate[]> {
   if (result.rows.length === 0) return [];
 
   const contact = result.rows[0];
+  const identity = identityFromRow(contact);
+  if (!isRecommendationEligible(contact)) return [];
+  const name = contactDisplayName(identity);
+  if (!name) return [];
   const days = parseInt(contact.days_since, 10);
   const hash = contextHash(CHECK_WARM_COOLING, { contactId: contact.id });
 
   return [{
-    title: `${contact.name} is cooling off — ${days}d since last contact`,
-    description: `${contact.name} (${contact.tier} tier) hasn't had interaction in ${days} days. Re-engage before the relationship goes cold.`,
+    title: `${name} is cooling off — ${days}d since last contact`,
+    description: `${name} (${contact.tier} tier) hasn't had interaction in ${days} days. Re-engage before the relationship goes cold.`,
     goalType: CHECK_WARM_COOLING,
     priority: 3,
     metadata: {
@@ -96,7 +106,7 @@ async function warmLeadCooling(ctx: TickContext): Promise<GoalCandidate[]> {
       checkType: CHECK_WARM_COOLING,
       contextHash: hash,
       suggestedTasks: [{
-        title: `Re-engage ${contact.name}`,
+        title: `Re-engage ${name}`,
         description: `Send a value-add message: share an article, congratulate on something, or ask for their take on a topic.`,
         taskType: 'SEND_MESSAGE',
         priority: 2,

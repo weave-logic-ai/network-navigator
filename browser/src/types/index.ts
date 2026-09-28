@@ -241,7 +241,11 @@ export type ExtensionMessageType =
   | 'GET_SNIPPET_SELECTION'
   | 'REQUEST_HOST_PERMISSION'
   // Phase 1.5 — image snippet round-trip
-  | 'GET_SNIPPET_IMAGE_FROM_URL';
+  | 'GET_SNIPPET_IMAGE_FROM_URL'
+  // ADR-028 clause 4 — Ctrl+Shift+S hotkey toggles Snip mode in the side
+  // panel. Relayed from the service worker's chrome.commands listener since
+  // commands only fire in the background context.
+  | 'TOGGLE_SNIP_MODE';
 
 // Response shape returned by content-snippet content scripts when the side
 // panel asks them for the currently-selected text.
