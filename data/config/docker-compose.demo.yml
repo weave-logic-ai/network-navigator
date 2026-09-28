@@ -17,6 +17,8 @@ services:
     volumes: !override
       - ctox-demo-data:/data
     environment:
+      # Unpacked load of <repo>/browser; the ID is derived from that absolute path.
+      EXTENSION_ALLOWED_ORIGINS: "chrome-extension://jeanjhnnapmljnemofhenjijhedkcchd"
       PDL_API_KEY: ""
       APOLLO_API_KEY: ""
       LUSHA_API_KEY: ""
