@@ -54,3 +54,13 @@ export function isAllowedExtensionOrigin(origin: string): boolean {
   const allowlist = process.env.EXTENSION_ALLOWED_ORIGINS;
   return !!allowlist && allowlist.split(',').map(value => value.trim()).includes(origin);
 }
+
+/** MV3 host-permission GETs omit Origin in Chromium. Only the token-authenticated
+ * extension read paths may use this shape; dashboard requests keep their own
+ * same-origin and operator-session checks. */
+export function isOriginlessExtensionRead(request: NextRequest): boolean {
+  return request.method === 'GET'
+    && request.headers.get('origin') === null
+    && (request.headers.get('sec-fetch-site') === null || request.headers.get('sec-fetch-site') === 'none')
+    && /^ext_[A-Za-z0-9_-]{43}$/.test(request.headers.get('x-extension-token') ?? '');
+}

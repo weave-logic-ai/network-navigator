@@ -147,6 +147,17 @@ test('authenticated feature probe is read-only and survives exhausted POST rate 
   expect((await analyticsProbe(req('/api/extension/analytics', 'GET', { origin }))).status).toBe(401);
 });
 
+test('originless MV3 feature probe needs a full token and stays on the named read route', async () => {
+  const headers = { 'x-extension-token': token, 'sec-fetch-site': 'none' };
+  const request = req('/api/extension/analytics', 'GET', headers);
+  expect((await middleware(request)).status).toBe(200);
+  expect((await analyticsProbe(request)).status).toBe(200);
+  expect((await middleware(req('/api/parser/flag-unmatched', 'GET', headers))).status).toBe(401);
+  expect((await analyticsProbe(req('/api/extension/analytics', 'GET', {
+    ...headers, 'sec-fetch-site': 'same-origin',
+  }))).status).toBe(401);
+});
+
 test('same-origin visibility reads need operator session, including direct handler invocation', async () => {
   const path = `/api/extension/entity-diff?kind=contact&id=${id}`;
   const local = { origin: 'http://localhost:3750', 'sec-fetch-site': 'same-origin' };

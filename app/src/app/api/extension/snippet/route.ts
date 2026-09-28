@@ -33,6 +33,35 @@ type Receipt = {
   response: SaveResponse;
 };
 
+function requestHash(body: SnippetSaveRequest): string {
+  // chrome.storage.local may reorder object keys before an offline replay.
+  // Hash the JSON value so a lost response can return its original receipt.
+  const canonical = JSON.stringify(body, (_key, value: unknown) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function legacyRequestHashes(body: SnippetSaveRequest): string[] {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const currentOrder = digest(body);
+  // Receipts saved before canonical hashing used the extension's insertion
+  // order. Chrome storage can reorder the same queued body before replay.
+  const common = ['kind', 'targetKind', 'targetId'];
+  const fields = body.kind === 'image'
+    ? ['imageBytes', 'mimeType', 'width', 'height', 'sourceUrl', 'pageType', 'tagSlugs', 'note']
+    : body.kind === 'link'
+      ? ['href', 'linkText', 'sourceUrl', 'pageType', 'tagSlugs', 'note']
+      : ['text', 'sourceUrl', 'pageType', 'tagSlugs', 'note', 'mentionContactIds'];
+  const order = [...common, ...fields, 'requestId'];
+  const record = body as unknown as Record<string, unknown>;
+  if (Object.keys(record).some(key => !order.includes(key))) return [currentOrder];
+  const extensionOrder = Object.fromEntries(order.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]]));
+  return [currentOrder, digest(extensionOrder)];
+}
+
 async function saveSnippet(body: SnippetSaveRequest, tenantId: string, imageBytes?: Buffer): Promise<SaveResponse> {
   if (body.kind === 'image') {
     const result = await saveImageSnippet({
@@ -61,7 +90,7 @@ async function saveSnippet(body: SnippetSaveRequest, tenantId: string, imageByte
 
 async function saveSnippetOnce(extensionId: string, tenantId: string, body: SnippetSaveRequest, imageBytes?: Buffer): Promise<SaveResponse | null> {
   if (!body.requestId) return saveSnippet(body, tenantId, imageBytes); // Shipped legacy clients.
-  const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  const hash = requestHash(body);
   return transactionWithQueryContext(async (client) => {
     // The unique insert waits for any in-flight request with this key. All
     // snippet graph writes use this transaction through the query context.
@@ -70,7 +99,7 @@ async function saveSnippetOnce(extensionId: string, tenantId: string, body: Snip
        (extension_id, request_id, tenant_id, target_kind, target_id, request_hash, response)
        VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)
        ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
-      [extensionId, body.requestId, tenantId, body.targetKind, body.targetId, requestHash]
+      [extensionId, body.requestId, tenantId, body.targetKind, body.targetId, hash]
     );
     if (claim.rowCount === 0) {
       const existing = await client.query<Receipt>(
@@ -80,7 +109,8 @@ async function saveSnippetOnce(extensionId: string, tenantId: string, body: Snip
       );
       const receipt = existing.rows[0];
       if (!receipt || receipt.tenant_id !== tenantId || receipt.target_kind !== body.targetKind ||
-          receipt.target_id !== body.targetId || receipt.request_hash !== requestHash) return null;
+          receipt.target_id !== body.targetId ||
+          (receipt.request_hash !== hash && !legacyRequestHashes(body).includes(receipt.request_hash))) return null;
       return receipt.response;
     }
     const response = await saveSnippet(body, tenantId, imageBytes);

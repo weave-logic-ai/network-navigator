@@ -1,4 +1,5 @@
 import type { NextRequest } from 'next/server';
+import { createHash } from 'node:crypto';
 
 jest.mock('@/lib/config/research-flags', () => ({ RESEARCH_FLAGS: { snippets: true } }));
 jest.mock('@/lib/middleware/extension-auth-middleware', () => ({
@@ -119,5 +120,33 @@ describe('snippet request receipts', () => {
     expect(first.status).toBe(200);
     expect(await replay.json()).toEqual(await first.json());
     expect(service).toHaveBeenCalledTimes(1);
+  });
+
+  test('image replay survives Chrome storage reordering JSON keys', async () => {
+    const image = { ...body, kind: 'image', imageBytes: 'c3ludGhldGlj', mimeType: 'image/png',
+      note: 'synthetic note' };
+    const first = await POST(request(image));
+    const reordered = Object.fromEntries(Object.entries(image).sort(([a], [b]) => a.localeCompare(b)));
+    const replay = await POST(request(reordered));
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(await first.json());
+    expect(saveImage).toHaveBeenCalledTimes(1);
+    expect(receipts.size).toBe(1);
+  });
+
+  test('reordered Chrome replay accepts a receipt written with the old insertion-order hash', async () => {
+    const image = { kind: 'image', targetKind: 'contact', targetId: 'target-a',
+      imageBytes: 'c3ludGhldGlj', mimeType: 'image/png', sourceUrl: 'https://example.test/',
+      tagSlugs: [], note: 'synthetic note', requestId };
+    const oldHash = createHash('sha256').update(JSON.stringify(image)).digest('hex');
+    receipts.set(requestId, { tenant_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      target_kind: 'contact', target_id: 'target-a', request_hash: oldHash,
+      response: { success: true, snippetId: 'old-image', causalNodeId: 'old-node' } });
+    const reordered = Object.fromEntries(Object.entries(image).sort(([a], [b]) => a.localeCompare(b)));
+    const replay = await POST(request(reordered));
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ snippetId: 'old-image' });
+    expect(saveImage).not.toHaveBeenCalled();
   });
 });
