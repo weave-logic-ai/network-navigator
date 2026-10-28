@@ -59,7 +59,7 @@ Totals: 43 files changed, ~4200 insertions, ~60 deletions (mostly test code + do
 ## Release procedure (on final green-light)
 
 ```bash
-cd /home/aepod/dev/network-navigator
+cd /path/to/network-navigator
 
 # 1. Verify branch is clean and green
 git status

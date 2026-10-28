@@ -32,8 +32,8 @@ POSTGRES_PASSWORD=a-strong-random-password
 ANTHROPIC_API_KEY=sk-ant-your-production-key
 
 # Optional: database customization
-POSTGRES_USER=ctox
-POSTGRES_DB=ctox
+POSTGRES_USER=navigator
+POSTGRES_DB=navigator
 
 # Optional: enrichment providers
 PDL_API_KEY=your-pdl-key
@@ -69,8 +69,8 @@ curl http://localhost:3750/api/health
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `POSTGRES_PASSWORD` | Yes | — | Password for the PostgreSQL database |
-| `POSTGRES_USER` | No | `ctox` | PostgreSQL username |
-| `POSTGRES_DB` | No | `ctox` | PostgreSQL database name |
+| `POSTGRES_USER` | No | `navigator` | PostgreSQL username |
+| `POSTGRES_DB` | No | `navigator` | PostgreSQL database name |
 | `ANTHROPIC_API_KEY` | No | — | Anthropic API key for Claude AI features |
 | `PDL_API_KEY` | No | — | People Data Labs API key for contact enrichment |
 | `APOLLO_API_KEY` | No | — | Apollo API key for contact enrichment |
@@ -157,25 +157,25 @@ sudo certbot --nginx -d networknav.yourdomain.com
 Use `pg_dump` to create consistent database backups:
 
 ```bash title="Terminal"
-docker exec ctox-db pg_dump -U ctox ctox > backup-$(date +%Y%m%d).sql
+docker exec network-navigator-db pg_dump -U navigator navigator > backup-$(date +%Y%m%d).sql
 ```
 
 For compressed backups:
 
 ```bash title="Terminal"
-docker exec ctox-db pg_dump -U ctox -Fc ctox > backup-$(date +%Y%m%d).dump
+docker exec network-navigator-db pg_dump -U navigator -Fc navigator > backup-$(date +%Y%m%d).dump
 ```
 
 ### Restore from Backup
 
 ```bash title="Terminal"
-docker exec -i ctox-db psql -U ctox ctox < backup-20260319.sql
+docker exec -i network-navigator-db psql -U navigator navigator < backup-20260319.sql
 ```
 
 Or for compressed dumps:
 
 ```bash title="Terminal"
-docker exec -i ctox-db pg_restore -U ctox -d ctox backup-20260319.dump
+docker exec -i network-navigator-db pg_restore -U navigator -d navigator backup-20260319.dump
 ```
 
 ### Volume Backup
@@ -191,7 +191,7 @@ tar -czf networknav-data-$(date +%Y%m%d).tar.gz data/
 Add a cron job for daily backups:
 
 ```bash title="crontab -e"
-0 2 * * * cd /path/to/networknav && docker exec ctox-db pg_dump -U ctox -Fc ctox > backups/backup-$(date +\%Y\%m\%d).dump
+0 2 * * * cd /path/to/networknav && docker exec network-navigator-db pg_dump -U navigator -Fc navigator > backups/backup-$(date +\%Y\%m\%d).dump
 ```
 
 <Callout>
@@ -270,7 +270,7 @@ Check that the database is healthy and the `DATABASE_URL` is correct:
 
 ```bash title="Terminal"
 docker compose logs db
-docker exec ctox-app printenv DATABASE_URL
+docker exec network-navigator-app printenv DATABASE_URL
 ```
 
 ### Permission errors on data directory
@@ -278,7 +278,7 @@ docker exec ctox-app printenv DATABASE_URL
 If the app container creates files as root and you cannot remove them from the host:
 
 ```bash title="Terminal"
-docker exec ctox-app rm -rf /app/.next
+docker exec network-navigator-app rm -rf /app/.next
 ```
 
 ### Database runs out of disk space
@@ -286,13 +286,13 @@ docker exec ctox-app rm -rf /app/.next
 Check disk usage:
 
 ```bash title="Terminal"
-docker exec ctox-db du -sh /var/lib/postgresql/data/
+docker exec network-navigator-db du -sh /var/lib/postgresql/data/
 ```
 
 If needed, run a vacuum to reclaim space:
 
 ```bash title="Terminal"
-docker exec ctox-db psql -U ctox -c "VACUUM FULL;"
+docker exec network-navigator-db psql -U navigator -c "VACUUM FULL;"
 ```
 
 ## Next Steps
