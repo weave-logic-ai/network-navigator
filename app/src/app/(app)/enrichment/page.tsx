@@ -243,7 +243,7 @@ export default function EnrichmentPage() {
                   <div className="text-xs text-muted-foreground space-y-1">
                     <p>
                       The Chrome extension scrapes profile data when you browse
-                      LinkedIn and sends it to ctox for enrichment.
+                      LinkedIn and sends it to Network Navigator for enrichment.
                     </p>
                     <p>
                       Install the extension from{" "}

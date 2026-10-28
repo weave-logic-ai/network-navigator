@@ -81,7 +81,7 @@ docker compose down
 
 - ALWAYS run tests after making code changes
 - ALWAYS verify build succeeds before committing
-- Clean `.next` via `docker exec ctox-app rm -rf /app/.next` if root-owned files block local rm
+- Clean `.next` via `docker exec network-navigator-app rm -rf /app/.next` if root-owned files block local rm
 
 ## Security Rules
 

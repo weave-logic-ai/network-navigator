@@ -8,17 +8,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readFile, stat } from 'fs/promises';
 import { resolve } from 'path';
 import { getPool } from '@/lib/db/client';
+import { isImportPathAllowed, importBaseDir } from '@/lib/import/allowed-dirs';
 import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
 import type { PoolClient } from 'pg';
 
-// Allowed paths
-const ALLOWED_PREFIXES = ['/home/aepod/dev/ctox/', '/data/'];
-
-function isPathAllowed(filePath: string): boolean {
-  const resolved = resolve(filePath);
-  if (filePath.includes('..')) return false;
-  return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
-}
+// Allowed paths: see LEGACY_IMPORT_DIRS in lib/import/allowed-dirs.ts
+const isPathAllowed = isImportPathAllowed;
 
 // ── Types for the legacy graph.json ─────────────────────────────────────────
 
@@ -498,12 +493,12 @@ export async function POST(request: NextRequest) {
 
     // Resolve relative paths
     if (!filePath.startsWith('/')) {
-      resolvedPath = resolve('/home/aepod/dev/ctox', filePath);
+      resolvedPath = resolve(importBaseDir(), filePath);
     }
 
     if (!isPathAllowed(resolvedPath)) {
       return NextResponse.json(
-        { error: 'Path not allowed', details: 'Must be under project root or /data/' },
+        { error: 'Path not allowed', details: 'Must be under an allowed import directory (LEGACY_IMPORT_DIRS)' },
         { status: 403 }
       );
     }

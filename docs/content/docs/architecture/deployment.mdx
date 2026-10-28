@@ -31,18 +31,18 @@ The `docker-compose.yml` defines two services:
 services:
   db:
     image: ruvnet/ruvector-postgres:latest
-    container_name: ctox-db
+    container_name: network-navigator-db
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-ctox}
+      POSTGRES_USER: ${POSTGRES_USER:-navigator}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-ctox}
+      POSTGRES_DB: ${POSTGRES_DB:-navigator}
     volumes:
       - ./db/init:/docker-entrypoint-initdb.d
       - ./data/drives/db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ctox} -d ${POSTGRES_DB:-ctox}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-navigator} -d ${POSTGRES_DB:-navigator}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,11 +65,11 @@ Key points:
       context: ./app
       dockerfile: Dockerfile
       target: runner
-    container_name: ctox-app
+    container_name: network-navigator-app
     ports:
       - "3000:3000"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ctox}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ctox}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-navigator}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-navigator}
       NODE_ENV: production
       PDL_API_KEY: ${PDL_API_KEY:-}
       APOLLO_API_KEY: ${APOLLO_API_KEY:-}
@@ -108,8 +108,8 @@ Key points:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_USER` | `ctox` | PostgreSQL username |
-| `POSTGRES_DB` | `ctox` | PostgreSQL database name |
+| `POSTGRES_USER` | `navigator` | PostgreSQL username |
+| `POSTGRES_DB` | `navigator` | PostgreSQL database name |
 | `NODE_ENV` | `production` | Node.js environment |
 
 ### Optional (API keys)
@@ -129,8 +129,8 @@ Key points:
 
 ```bash
 POSTGRES_PASSWORD=change-me-to-something-strong
-POSTGRES_USER=ctox
-POSTGRES_DB=ctox
+POSTGRES_USER=navigator
+POSTGRES_DB=navigator
 
 # Enrichment providers (set the ones you have)
 PDL_API_KEY=
@@ -162,7 +162,7 @@ Both services expose health checks:
 ### Database
 
 ```bash
-pg_isready -U ctox -d ctox
+pg_isready -U navigator -d navigator
 ```
 
 Checked every 10 seconds. The app service will not start until this passes.
@@ -260,20 +260,20 @@ Both services use `restart: unless-stopped`, which restarts containers after cra
 
 ```bash
 # Backup to compressed SQL
-docker exec ctox-db pg_dump -U ctox -d ctox | gzip > backup-$(date +%Y%m%d).sql.gz
+docker exec network-navigator-db pg_dump -U navigator -d navigator | gzip > backup-$(date +%Y%m%d).sql.gz
 
 # Or use pg_dump with custom format for parallel restore
-docker exec ctox-db pg_dump -U ctox -d ctox -Fc > backup-$(date +%Y%m%d).dump
+docker exec network-navigator-db pg_dump -U navigator -d navigator -Fc > backup-$(date +%Y%m%d).dump
 ```
 
 ### Database restore
 
 ```bash
 # From SQL
-gunzip -c backup-20260319.sql.gz | docker exec -i ctox-db psql -U ctox -d ctox
+gunzip -c backup-20260319.sql.gz | docker exec -i network-navigator-db psql -U navigator -d navigator
 
 # From custom format
-docker exec -i ctox-db pg_restore -U ctox -d ctox --clean < backup-20260319.dump
+docker exec -i network-navigator-db pg_restore -U navigator -d navigator --clean < backup-20260319.dump
 ```
 
 ### Full system backup
@@ -295,7 +295,7 @@ Create a cron job for daily backups:
 
 ```bash
 # /etc/cron.d/networknav-backup
-0 2 * * * root docker exec ctox-db pg_dump -U ctox -d ctox | gzip > /backups/networknav-$(date +\%Y\%m\%d).sql.gz
+0 2 * * * root docker exec network-navigator-db pg_dump -U navigator -d navigator | gzip > /backups/networknav-$(date +\%Y\%m\%d).sql.gz
 ```
 
 ## Monitoring
@@ -317,7 +317,7 @@ curl -s http://localhost:3750/api/health | jq .
 ### Database statistics
 
 ```bash
-docker exec ctox-db psql -U ctox -d ctox -c "
+docker exec network-navigator-db psql -U navigator -d navigator -c "
   SELECT relname, n_tup_ins, n_tup_upd, n_tup_del
   FROM pg_stat_user_tables
   ORDER BY n_tup_ins DESC
@@ -337,7 +337,7 @@ docker compose up -d app
 If the `.next` build cache becomes root-owned inside the container:
 
 ```bash
-docker exec ctox-app rm -rf /app/.next
+docker exec network-navigator-app rm -rf /app/.next
 docker compose restart app
 ```
 
@@ -348,11 +348,11 @@ New SQL migration scripts are added to `db/init/` with incrementing numeric pref
 For existing deployments, apply migrations manually:
 
 ```bash
-docker exec -i ctox-db psql -U ctox -d ctox < db/init/019-referral-scoring-schema.sql
+docker exec -i network-navigator-db psql -U navigator -d navigator < db/init/019-referral-scoring-schema.sql
 ```
 
 Or connect directly:
 
 ```bash
-docker exec -it ctox-db psql -U ctox -d ctox
+docker exec -it network-navigator-db psql -U navigator -d navigator
 ```

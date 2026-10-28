@@ -1,5 +1,5 @@
 // LinkedIn enrichment provider (via browser extension)
-// This provider enriches contacts by communicating with the ctox browser extension
+// This provider enriches contacts by communicating with the Network Navigator browser extension
 // which scrapes profile data directly from LinkedIn pages.
 
 import {

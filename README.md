@@ -55,13 +55,22 @@ Required variables:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `POSTGRES_PASSWORD` | Yes | Database password |
-| `POSTGRES_USER` | No | Database user (default: `ctox`) |
-| `POSTGRES_DB` | No | Database name (default: `ctox`) |
+| `POSTGRES_USER` | No | Database user (default: `navigator`) |
+| `POSTGRES_DB` | No | Database name (default: `navigator`) |
+| `LEGACY_IMPORT_DIRS` | No | Colon-separated directories the import routes may read (default: `/data/`) |
 | `ANTHROPIC_API_KEY` | No | For AI-powered outreach and message generation |
 | `PDL_API_KEY` | No | PeopleDataLabs enrichment |
 | `APOLLO_API_KEY` | No | Apollo.io enrichment |
 | `LUSHA_API_KEY` | No | Lusha enrichment |
 | `THEIRSTACK_API_KEY` | No | TheirStack enrichment |
+
+#### Upgrading from an older install
+
+Earlier releases used a different default for the database user and name. To keep an
+existing database, set `POSTGRES_USER` and `POSTGRES_DB` in `.env` to the values it was
+created with (check `docker inspect` on your old db container, or your previous `.env`).
+Container names are now `network-navigator-db` and `network-navigator-app`, so update any
+scripts that call `docker exec` on the old names.
 
 ### 3. Start services
 

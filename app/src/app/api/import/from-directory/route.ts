@@ -7,25 +7,12 @@ import { getPool } from '@/lib/db/client';
 import { runImportPipeline, detectFileType } from '@/lib/import/pipeline';
 import { triggerBatchAutoScore } from '@/lib/scoring/auto-score';
 import { query as dbQuery } from '@/lib/db/client';
+import { isImportPathAllowed } from '@/lib/import/allowed-dirs';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Allowed directory prefixes (absolute paths only)
-const ALLOWED_PREFIXES = [
-  '/home/aepod/dev/ctox/data/',
-  '/data/',
-];
-
-function isPathAllowed(dirPath: string): boolean {
-  const resolved = resolve(dirPath);
-
-  // Reject paths with traversal sequences
-  if (dirPath.includes('..')) {
-    return false;
-  }
-
-  return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
-}
+// Allowed paths: see LEGACY_IMPORT_DIRS in lib/import/allowed-dirs.ts
+const isPathAllowed = isImportPathAllowed;
 
 export async function POST(request: NextRequest) {
   let client;
@@ -53,14 +40,7 @@ export async function POST(request: NextRequest) {
     // Resolve relative "data/" paths to absolute
     let resolvedPath = directoryPath;
     if (directoryPath.startsWith('data/')) {
-      // Try container path first, then host path
-      const containerPath = resolve('/', directoryPath);
-      const hostPath = resolve('/home/aepod/dev/ctox', directoryPath);
-      resolvedPath = containerPath;
-      // Fallback to host path if container path doesn't match allowed prefixes
-      if (!isPathAllowed(containerPath) && isPathAllowed(hostPath)) {
-        resolvedPath = hostPath;
-      }
+      resolvedPath = resolve('/', directoryPath);
     } else {
       resolvedPath = resolve(directoryPath);
     }
@@ -71,7 +51,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error: 'Directory path is not allowed',
-          details: 'Path must be under /home/aepod/dev/ctox/data/',
+          details: 'Path must be under an allowed import directory (LEGACY_IMPORT_DIRS)',
         },
         { status: 403 }
       );

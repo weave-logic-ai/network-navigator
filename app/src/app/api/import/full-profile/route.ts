@@ -5,18 +5,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stat } from 'fs/promises';
 import { resolve } from 'path';
 import { getPool } from '@/lib/db/client';
+import { isImportPathAllowed } from '@/lib/import/allowed-dirs';
 import { importFullProfile } from '@/lib/import/profile-importer';
 
-const ALLOWED_PREFIXES = [
-  '/home/aepod/dev/ctox/data/',
-  '/data/',
-];
-
-function isPathAllowed(dirPath: string): boolean {
-  const resolved = resolve(dirPath);
-  if (dirPath.includes('..')) return false;
-  return ALLOWED_PREFIXES.some((prefix) => resolved.startsWith(prefix));
-}
+// Allowed paths: see LEGACY_IMPORT_DIRS in lib/import/allowed-dirs.ts
+const isPathAllowed = isImportPathAllowed;
 
 // GET - fetch current owner profile
 export async function GET() {
@@ -57,20 +50,14 @@ export async function POST(request: NextRequest) {
     // Resolve relative "data/" paths
     let resolvedPath = directoryPath;
     if (directoryPath.startsWith('data/')) {
-      // Try container path first, then host path
-      const containerPath = resolve('/', directoryPath);
-      const hostPath = resolve('/home/aepod/dev/ctox', directoryPath);
-      resolvedPath = containerPath;
-      if (!isPathAllowed(containerPath) && isPathAllowed(hostPath)) {
-        resolvedPath = hostPath;
-      }
+      resolvedPath = resolve('/', directoryPath);
     } else {
       resolvedPath = resolve(directoryPath);
     }
 
     if (!isPathAllowed(resolvedPath)) {
       return NextResponse.json(
-        { error: 'Directory path not allowed', details: 'Path must be under /home/aepod/dev/ctox/data/' },
+        { error: 'Directory path not allowed', details: 'Path must be under an allowed import directory (LEGACY_IMPORT_DIRS)' },
         { status: 403 }
       );
     }

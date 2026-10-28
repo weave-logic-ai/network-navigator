@@ -32,12 +32,12 @@
       "port": 5432,
       "protocol": "tcp",
       "start_command": "docker compose up db -d",
-      "health_check": "pg_isready -U ${POSTGRES_USER:-ctox} -d ${POSTGRES_DB:-ctox}",
+      "health_check": "pg_isready -U ${POSTGRES_USER:-navigator} -d ${POSTGRES_DB:-navigator}",
       "dependencies": [],
       "environment": {
-        "POSTGRES_USER": "ctox",
+        "POSTGRES_USER": "navigator",
         "POSTGRES_PASSWORD": "",
-        "POSTGRES_DB": "ctox"
+        "POSTGRES_DB": "navigator"
       }
     },
     {
@@ -52,7 +52,7 @@
     }
   ],
   "networking": {
-    "internal_dns": "ctox-app",
+    "internal_dns": "network-navigator-app",
     "external_dns": "",
     "load_balancer": false,
     "ssl_required": false

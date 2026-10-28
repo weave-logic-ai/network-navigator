@@ -30,7 +30,7 @@ These are gitignored via `.env` already.
 ## Step 2 — Bring the stack up
 
 ```bash
-cd /home/aepod/dev/network-navigator
+cd /path/to/network-navigator
 docker compose up -d db
 # wait for db healthcheck to pass (~30s)
 docker compose up -d --force-recreate app
@@ -43,7 +43,7 @@ App should be reachable at http://localhost:3750/api/health returning 200.
 ## Step 3 — Confirm migrations applied
 
 ```bash
-docker exec ctox-db psql -U ctox -d ctox -c "\dt causal_nodes causal_edges exo_chain_entries impulses impulse_acks research_sessions session_messages cross_refs"
+docker exec network-navigator-db psql -U navigator -d navigator -c "\dt causal_nodes causal_edges exo_chain_entries impulses impulse_acks research_sessions session_messages cross_refs"
 ```
 
 All 8 tables should list. If any are missing, inspect `data/db/init/` files 024–030 — the db container only runs init scripts on a fresh volume. If you have a pre-existing volume from before these migrations landed, you'll need `docker compose down -v && docker compose up -d` (destroys all data).
@@ -53,7 +53,7 @@ All 8 tables should list. If any are missing, inspect `data/db/init/` files 024�
 Pick any existing contact:
 
 ```bash
-CONTACT_ID=$(docker exec ctox-db psql -U ctox -d ctox -At -c "SELECT id FROM contacts WHERE NOT is_archived LIMIT 1")
+CONTACT_ID=$(docker exec network-navigator-db psql -U navigator -d navigator -At -c "SELECT id FROM contacts WHERE NOT is_archived LIMIT 1")
 echo "Using contact: $CONTACT_ID"
 
 curl -s -X POST "http://localhost:3750/api/scoring/run" \
@@ -76,7 +76,7 @@ With `ECC_EXO_CHAIN=true`, each provider step becomes an exo-chain entry with BL
 ## Step 6 — Verify DB writes
 
 ```bash
-docker exec ctox-db psql -U ctox -d ctox <<'SQL'
+docker exec network-navigator-db psql -U navigator -d navigator <<'SQL'
 SELECT 'causal_nodes' AS table, COUNT(*) FROM causal_nodes
 UNION ALL SELECT 'causal_edges', COUNT(*) FROM causal_edges
 UNION ALL SELECT 'exo_chain_entries', COUNT(*) FROM exo_chain_entries

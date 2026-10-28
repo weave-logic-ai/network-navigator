@@ -80,18 +80,18 @@ The system deploys as two services via `docker-compose.yml`:
 services:
   db:
     image: ruvnet/ruvector-postgres:latest
-    container_name: ctox-db
+    container_name: network-navigator-db
     ports: ["5432:5432"]
     volumes:
       - ./db/init:/docker-entrypoint-initdb.d
       - ./data/drives/db:/var/lib/postgresql/data
     healthcheck:
-      test: pg_isready -U ctox -d ctox
+      test: pg_isready -U navigator -d navigator
       interval: 10s
 
   app:
     build: { context: ./app, target: runner }
-    container_name: ctox-app
+    container_name: network-navigator-app
     ports: ["3000:3000"]
     depends_on:
       db: { condition: service_healthy }
